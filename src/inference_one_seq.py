@@ -18,7 +18,7 @@ from utils.data_handler import *
 
 def inference(dataloader, model, device):
     
-    infer_results = torch.empty(0,4,dtype=torch.uint8).to(device)
+    infer_results = torch.empty(0,2,dtype=torch.uint8).to(device)  # 2 legs for biped
     with torch.no_grad():
         for sample in tqdm(dataloader):
             input_data = sample['data']
@@ -34,8 +34,8 @@ def inference_and_compute_acc(dataloader, model, device):
 
     num_correct = 0
     num_data = 0
-    correct_per_leg = np.zeros(4)
-    infer_results = torch.empty(0,4,dtype=torch.uint8).to(device)
+    correct_per_leg = np.zeros(2)  # 2 legs for biped
+    infer_results = torch.empty(0,2,dtype=torch.uint8).to(device)  # 2 legs for biped
     with torch.no_grad():
         for sample in tqdm(dataloader):
             input_data = sample['data']
@@ -45,7 +45,7 @@ def inference_and_compute_acc(dataloader, model, device):
             output = model(input_data)
             _, prediction = torch.max(output,1)
             bin_pred = decimal2binary(prediction)
-            bin_gt = decimal2binary(gt_label).view(-1,4)
+            bin_gt = decimal2binary(gt_label).view(-1,2)  # 2 legs for biped
             infer_results = torch.cat((infer_results, bin_pred), 0)
 
 
@@ -57,7 +57,7 @@ def inference_and_compute_acc(dataloader, model, device):
     return infer_results, num_correct/num_data,  correct_per_leg/num_data
 
 def decimal2binary(x):
-    mask = 2**torch.arange(4-1,-1,-1).to(x.device, x.dtype)
+    mask = 2**torch.arange(2-1,-1,-1).to(x.device, x.dtype)  # 2 legs for biped
 
     return x.unsqueeze(-1).bitwise_and(mask).ne(0).byte()
 
@@ -66,7 +66,7 @@ def save2mat(pred, config):
     data = np.load(config['data_path'])
     label_deci_np = np.load(config['label_path'])
     label_deci = torch.from_numpy(label_deci_np)
-    label = decimal2binary(label_deci).reshape(-1,4)
+    label = decimal2binary(label_deci).reshape(-1,2)  # 2 legs for biped
 
     out = {}
     out['contacts_est'] = pred.cpu().numpy()
@@ -75,8 +75,8 @@ def save2mat(pred, config):
     out['qd'] = data[config['window_size']-1:,12:24]
     out['imu_acc'] = data[config['window_size']-1:,24:27]
     out['imu_omega'] = data[config['window_size']-1:,27:30]
-    out['p'] = data[config['window_size']-1:,30:42]
-    out['v'] = data[config['window_size']-1:,42:54]
+    out['p'] = data[config['window_size']-1:,30:36]
+    out['v'] = data[config['window_size']-1:,36:42]
 
     # data not used in the network but needed for visualization.
     out['control_time'] = mat_raw_data['control_time'].flatten().tolist()[config['window_size']-1:]
@@ -112,7 +112,7 @@ def save2lcm(pred, config):
                     'leg_control_data', leg_control_data_msg.encode())
         
         contact_msg = contact_t()
-        contact_msg.num_legs = 4
+        contact_msg.num_legs = 2  # 2 legs for biped
         contact_msg.timestamp = imu_time[data_idx]
         contact_msg.contact = pred[idx]
 
@@ -150,7 +150,7 @@ def main():
                                 window_size=config['window_size'],device=device)
     dataloader = DataLoader(dataset=dataset, batch_size=config['batch_size'])
 
-    model = contact_cnn()
+    model = contact_cnn(window_size=config['window_size'])
     checkpoint = torch.load(config['model_load_path'])
     model.load_state_dict(checkpoint['model_state_dict'])
     model = model.eval().to(device)
@@ -161,9 +161,7 @@ def main():
         print("Accuracy in terms of class: %.4f" % acc)
         print("Accuracy of leg 0 is: %.4f" % acc_per_leg[0])
         print("Accuracy of leg 1 is: %.4f" % acc_per_leg[1])
-        print("Accuracy of leg 2 is: %.4f" % acc_per_leg[2])
-        print("Accuracy of leg 3 is: %.4f" % acc_per_leg[3])
-        print("Accuracy is: %.4f" % (np.sum(acc_per_leg)/4.0))
+        print("Accuracy is: %.4f" % (np.sum(acc_per_leg)/2.0))  # 2 legs for biped
     else:
         pred = inference(dataloader, model, device)
 

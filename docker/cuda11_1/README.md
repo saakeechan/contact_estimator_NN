@@ -9,10 +9,12 @@ To build the docker image, run `docker build --tag justintzuyuan/pytorch_1.8_cud
 If you want to make any changes to this docker image, edit the `Dockerfile`. If any changes happends, remember to update the `LABEL version` inside. 
 
 ### How to run this docker container?
-`bash run_contact_estimator_docker.bash [container_name]`. Change the home directly, disk volumn mapping in this bash file correspondingly.
+`bash run_contact_estimator_docker.bash contact_estimator_train' . Change the home directly, disk volumn mapping in this bash file correspondingly.
 
 
 ### After the docker container is running 
 `docker exec -it [container_name] /bin/bash` to use bash as user
 `docker exec -u root -it [container_name] /bin/bash` to use bash as root
+
+<!-- docker start contact_estimator_train && docker exec -it contact_estimator_train /bin/bash -->
 

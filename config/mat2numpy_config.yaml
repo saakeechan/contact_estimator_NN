@@ -1,19 +1,25 @@
 
-mat_folder: "/home/justin/data/contact_data/2021-09-07_terrain_estimation/automatic_contact_mat/"
-save_path: "/home/justin/data/contact_data/2021-09-07_terrain_estimation/numpy/"
+mat_folder: "/home/saakee/Research/deep-contact-estimator/Data/MatFiles/"
+save_path: "/home/saakee/Research/deep-contact-estimator/Data/NumpyFiles/"
 
 # mode: "train": split data into train/val/test
 #       "inference": create numpy for one seq without spliting
 #       "mat2lcm": simply convert mat to lcm
-mode: "inference"
+mode: "train"
 
 # contact_type: "GRF":
 #               "gait_cycle"
 #               "contact"
 contact_type: "contact"
-mat_data_path: "/home/justin/data/automatic_contact_test/mat/lcmlog-2020-08-29-00_network_data.mat"
-lcm_save_path: "/home/justin/data/automatic_contact_test/lcm/lcmlog-2020-08-29-00_network_data_automatic_contact.lcm"
+mat_data_path: "/home/saakee/Research/deep-contact-estimator/Data/MatFiles/lcmlog-2020-08-29-00_network_data.mat"
+lcm_save_path: "/home/saakee/Research/deep-contact-estimator/Data/LcmFiles/lcmlog-2020-08-29-00_network_data_automatic_contact.lcm"
 
-window_size: 150
+window_size: 10
 train_ratio: 0.7
 val_ratio: 0.15
+# Remaining is test ratio
+
+# Worry about stitching multiple runs together. Do I need to have multiple mat files?
+#  Also how does the time window size work? Will the window size stitch different runs together. This is bad!
+
+# python3 utils/mat2numpy.py --config_name config/mat2numpy_config.yaml

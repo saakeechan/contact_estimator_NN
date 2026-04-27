@@ -1,24 +1,28 @@
 # Path to the data folder. Data should be separated into train.npy, train_label.npy, val.npy, val_label.npy.
-data_folder: "/home/justin/data/contact_data/automatic_contact/train/numpy/"
+data_folder: "/home/saakee/Research/deep-contact-estimator/Data/NumpyFiles/"
 
 # Path to save the trained model. 
 # Please leave the filename extension out.
-# It will automatically generate ${name}_best_loss.pt, ${name}_best_acc.pt, ${name}_final_epo.pt.
-model_save_path: "/home/justin/code/deep-contact-estimator/results/0913_auto_contact"
-log_writer_path: "/home/justin/code/deep-contact-estimator/logs/0913_auto_contact"
+# It will automatically generate ${name}_best_loss.pt, ${name}_best_acc.pt, ${name}_final_epoch.pt.
+model_save_path: "/home/saakee/Research/deep-contact-estimator/results/bipedal_contact"
+log_writer_path: "/home/saakee/Research/deep-contact-estimator/logs/bipedal_contact"
 
 
-model_description: "1D CNN 2block, 54-64-64-drop-pool-128-128-drop-pool-fc, shuffle train, batch: 30, ws:150, lr:1e-4, all data"
+model_description: "Bipedal 2-leg contact, 54 features, 4 output classes, 2block CNN, batch:30, ws:40, lr:1e-4"
 
 print_every: 1000
 
 # Data params
-window_size: 150
+window_size: 10 # Fits in 140-sample runs, gives good temporal context (120→60→30 timesteps)
 shuffle: True
+random_seed: 42  # For reproducible train/val/test splits
+train_ratio: 0.7
+val_ratio: 0.15
 
 # Network params
 batch_size: 30
 init_lr: 0.0001
-num_epoch: 30
+num_epoch: 30  # Reduced for quick training with small dataset
 
 
+# python3 src/train.py --config_name config/network_params.yaml

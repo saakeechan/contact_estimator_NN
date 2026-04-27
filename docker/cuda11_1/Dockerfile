@@ -4,10 +4,11 @@ LABEL version="0.5"
 
 USER root
 
-# scipy, tensorboard
+# scipy, tensorboard, pandas
 RUN pip install scipy
 RUN pip install tensorboard
 RUN pip install -U scikit-learn
+RUN pip install pandas
 
 # build essential, cmake, vim, git
 ENV DEBIAN_FRONTEND=noninteractive
@@ -16,14 +17,20 @@ RUN apt-get update && apt-get install -y vim
 RUN apt-get install -y build-essential
 RUN apt-get update && apt-get install -y git-all
 
+# python3-dev
+RUN apt-get update && apt-get install -y python3-dev
+
+
 # lcm 
 RUN apt-get install -y libglib2.0-dev
 RUN mkdir -p /home/root/tmp/
 RUN cd /home/root/tmp/ \
-    && git clone https://github.com/lcm-proj/lcm.git
+    && git clone https://github.com/lcm-proj/lcm.git \
+    && cd lcm \
+    && git checkout v1.4.0
 RUN cd /home/root/tmp/lcm/ \
     && mkdir build \
     && cd build \ 
-    && cmake .. -DLCM_ENABLE_PYTHON=ON && make -j && make install
+    && cmake .. && make -j && make install
 RUN cd /home/root/tmp/lcm/lcm-python/\
     && python setup.py install

@@ -5,25 +5,58 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 
 class contact_cnn(nn.Module):
-    def __init__(self):
+    def __init__(self, window_size=150):
         super(contact_cnn, self).__init__()
         self.block1 = nn.Sequential(
-            nn.Conv1d(in_channels=54,
-                      out_channels=64,
-                      kernel_size=3,
-                      stride=1,
-                      padding=1),
+            # First convolutional layer
+            # Takes 54 input feature channels (q, qd, IMU, p, v)
+            # Produces 64 learned feature maps (filters)
+            # kernel_size=3: each filter looks at 3 consecutive timesteps
+            # stride=1: moves one timestep at a time
+            # padding=1: adds 1 zero on each side to maintain length
+            nn.Conv1d(in_channels=54,      # Input: 54 sensor features
+                    out_channels=64,      # Output: 64 learned patterns
+                    kernel_size=3,        # Look at 3 timesteps at once
+                    stride=1,             # Slide by 1 timestep
+                    padding=1),           # Keep same length (150→150)
+            
+            # Activation function
+            # Introduces non-linearity (allows learning complex patterns)
+            # ReLU(x) = max(0, x): zeros out negative values
             nn.ReLU(),
-            nn.Conv1d(in_channels=64,
-                      out_channels=64,
-                      kernel_size=3,
-                      stride=1,
-                      padding=1),
+            
+            # Second convolutional layer
+            # Refines the 64 features from first conv layer
+            # Learns combinations of low-level patterns
+            # Same parameters as first conv (except in_channels)
+            nn.Conv1d(in_channels=64,      # Input: 64 features from previous layer
+                    out_channels=64,      # Output: 64 refined features
+                    kernel_size=3,        # Look at 3 timesteps
+                    stride=1,             # Slide by 1 timestep
+                    padding=1),           # Keep same length (150→150)
+            
+            # Second activation
             nn.ReLU(),
-            nn.Dropout(p=0.5),
-            nn.MaxPool1d(kernel_size=2,
-                         stride=2)
+            
+            # REGULARIZATION: Dropout layer
+            # During training: randomly sets 50% of neuron outputs to 0
+            # During inference: does nothing (automatically disabled)
+            # Purpose: prevents overfitting by forcing redundant learning
+            # p=0.5 means 50% dropout probability
+            # Does NOT change tensor dimensions
+            nn.Dropout(p=0.5),              # Randomly drop 50% of neurons
+            
+            # DOWNSAMPLING: Max pooling layer
+            # Reduces temporal dimension by taking max in each window
+            # kernel_size=2: looks at 2 consecutive values
+            # stride=2: moves by 2 (non-overlapping windows)
+            # Takes max of [t0,t1], then [t2,t3], then [t4,t5], etc.
+            # Reduces length: 150 → 75 timesteps
+            # Purpose: (1) reduce computation (2) focus on strongest signals
+            nn.MaxPool1d(kernel_size=2,     # Window size of 2
+                        stride=2)           # Move by 2 (no overlap)
         )
+        # After block1: (batch, 150, 54) → (batch, 75, 64)
 
         self.block2 = nn.Sequential(
             nn.Conv1d(in_channels=64,
@@ -44,8 +77,13 @@ class contact_cnn(nn.Module):
         )
 
     
+        # Calculate FC input size based on window_size
+        # 2 MaxPool layers (stride=2 each) reduce window by 4x total
+        # Final conv outputs 128 channels
+        fc_input_size = (window_size // 4) * 128
+        
         self.fc = nn.Sequential(
-            nn.Linear(in_features=4736,
+            nn.Linear(in_features=fc_input_size,
                       out_features=2048),
             nn.ReLU(),
             nn.Dropout(p=0.5),
@@ -54,7 +92,7 @@ class contact_cnn(nn.Module):
             nn.ReLU(),
             nn.Dropout(p=0.5),
             nn.Linear(in_features=512,
-                      out_features=16),
+                      out_features=4),  # 2 legs: 2^2 = 4 contact combinations
         )
 
     def forward(self, x):
@@ -98,7 +136,7 @@ class contact_cnn_1block(nn.Module):
             nn.ReLU(),
             nn.Dropout(p=0.5),
             nn.Linear(in_features=512,
-                      out_features=16),
+                      out_features=4),  # 2 legs: 2^2 = 4 contact combinations
         )
 
     def forward(self, x):
@@ -148,7 +186,7 @@ class contact_cnn_1conv_2blocks(nn.Module):
             nn.ReLU(),
             nn.Dropout(p=0.5),
             nn.Linear(in_features=512,
-                      out_features=16),
+                      out_features=4),  # 2 legs: 2^2 = 4 contact combinations
         )
 
     def forward(self, x):
@@ -261,7 +299,7 @@ class contact_cnn_4blocks(nn.Module):
             nn.ReLU(),
             nn.Dropout(p=0.5),
             nn.Linear(in_features=512,
-                      out_features=16),
+                      out_features=4),  # 2 legs: 2^2 = 4 contact combinations
         )
 
     def forward(self, x):
@@ -376,7 +414,7 @@ class contact_cnn_256(nn.Module):
             nn.ReLU(),
             nn.Dropout(p=0.5),
             nn.Linear(in_features=512,
-                      out_features=16),
+                      out_features=4),  # 2 legs: 2^2 = 4 contact combinations
         )
 
     def forward(self, x):
@@ -489,7 +527,7 @@ class contact_2d_cnn(nn.Module):
             nn.ReLU(),
             nn.Dropout(p=0.5),
             nn.Linear(in_features=512,
-                      out_features=16),
+                      out_features=4),  # 2 legs: 2^2 = 4 contact combinations
         )
 
     def forward(self, x):

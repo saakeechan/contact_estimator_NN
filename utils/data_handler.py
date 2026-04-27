@@ -21,13 +21,41 @@ class contact_dataset(Dataset):
         data = np.load(data_path)
         label = np.load(label_path)
         
-        self.num_data = (data.shape[0]-window_size+1)
         self.window_size = window_size
         self.data = torch.from_numpy(data).type('torch.FloatTensor').to(device)
         self.label = torch.from_numpy(label).type('torch.LongTensor').to(device)
+        
+        # Load run boundaries to prevent window bleeding across different runs
+        boundary_path = data_path.replace('.npy', '_boundaries.npy')
+        boundaries = None
+        if os.path.exists(boundary_path):
+            boundaries = np.load(boundary_path)
+            print(f"Loaded {len(boundaries)} run boundaries from {boundary_path}")
+        else:
+            print(f"Warning: No boundary file found at {boundary_path}. Windows may span across different runs.")
+        
+        # Pre-compute valid window indices (windows that don't cross run boundaries)
+        self.valid_indices = []
+        total_possible_windows = data.shape[0] - window_size + 1
+        
+        for idx in range(total_possible_windows):
+            window_end = idx + window_size
+            is_valid = True
+            
+            if boundaries is not None:
+                for boundary in boundaries:
+                    if idx < boundary < window_end:
+                        is_valid = False
+                        break
+            
+            if is_valid:
+                self.valid_indices.append(idx)
+        
+        num_invalid = total_possible_windows - len(self.valid_indices)
+        print(f"Valid windows: {len(self.valid_indices)} / {total_possible_windows} (skipped {num_invalid} boundary-crossing windows)")
 
     def __len__(self):
-        return self.num_data
+        return len(self.valid_indices)
 
     def __getitem__(self, idx):
         
@@ -50,11 +78,17 @@ class contact_dataset(Dataset):
         - label: (batch_size, 1)
         """
         if torch.is_tensor(idx):
-            idx = idx.tolist()    
+            idx = idx.tolist()
         
-        this_data = (self.data[idx:idx+self.window_size,:]-torch.mean(self.data[idx:idx+self.window_size,:],dim=0))\
-                            /torch.std(self.data[idx:idx+self.window_size,:],dim=0)
-        this_label = self.label[idx+self.window_size-1] 
+        # Map from valid index to actual data index
+        real_idx = self.valid_indices[idx]
+        
+        # Normalize with protection against division by zero
+        mean = torch.mean(self.data[real_idx:real_idx+self.window_size,:],dim=0)
+        std = torch.std(self.data[real_idx:real_idx+self.window_size,:],dim=0)
+        std = torch.where(std == 0, torch.ones_like(std), std)  # Replace 0 std with 1 to avoid NaN
+        this_data = (self.data[real_idx:real_idx+self.window_size,:] - mean) / std
+        this_label = self.label[real_idx+self.window_size-1] 
             
         sample = {'data': this_data, 'label': this_label}
 

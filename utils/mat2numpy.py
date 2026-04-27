@@ -66,11 +66,13 @@ def mat2numpy_one_seq(data_pth, save_pth):
         acc = raw_data['imu_acc']
         omega = raw_data['imu_omega']
 
-        # tau_est = raw_data['tau_est']
+        tau_est = raw_data['tau_est']
+
+        # Have to prepare a table in matlab to convert the 16 contact combinations to decimal values.
         # F = raw_data['F']
 
         # concatenate current data. 
-        data = np.concatenate((q,qd,acc,omega,p,v),axis=1)
+        data = np.concatenate((q,qd,acc,omega,p,v,tau_est),axis=1)
         
         # convert labels from binary to decimal
         label = binary2decimal(contacts).reshape((-1,1)) 
@@ -118,13 +120,18 @@ def mat2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
     - 
     """
 
-    num_features = 54    
+    num_features = 54 #  q, qd, acc, omega, p, v, tau_est:    12+12+3+3+6+6+12 = 54 (bipdeal)
     train_data = np.zeros((0,num_features))
     val_data = np.zeros((0,num_features))
     test_data = np.zeros((0,num_features))
     train_label = np.zeros((0,1))
     val_label = np.zeros((0,1))
     test_label = np.zeros((0,1))
+    
+    # Track boundaries between different runs to prevent window bleeding
+    train_boundaries = []
+    val_boundaries = []
+    test_boundaries = []
 
     # for all dataset in the folder
     for data_name in glob.glob(data_pth+'*'): 
@@ -141,12 +148,14 @@ def mat2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
         v = raw_data['v']
         acc = raw_data['imu_acc']
         omega = raw_data['imu_omega']
+        
+        tau_est = raw_data['tau_est']
 
-        # tau_est = raw_data['tau_est']
-        # F = raw_data['F']
+        # F = raw_data['F'] # We have to use F for supervised learning but we have to use teacher - student distallation
+        # Without F in real time, the NN will overrely on F and you can't expect it to approximate an input
         
         # concatenate current data. First we try without GRF
-        cur_data = np.concatenate((q,qd,acc,omega,p,v),axis=1)
+        cur_data = np.concatenate((q,qd,acc,omega,p,v,tau_est),axis=1)
         
         # separate data into train/val/test
         num_data = np.shape(q)[0]
@@ -161,6 +170,11 @@ def mat2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
         train_data = np.vstack((train_data,cur_train))
         val_data = np.vstack((val_data,cur_val))
         test_data = np.vstack((test_data,cur_test))
+        
+        # Record boundary indices (end of each run)
+        train_boundaries.append(train_data.shape[0])
+        val_boundaries.append(val_data.shape[0])
+        test_boundaries.append(test_data.shape[0])
 
         
         # convert labels from binary to decimal
@@ -184,6 +198,11 @@ def mat2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
     np.save(save_pth+"train_label.npy",train_label)
     np.save(save_pth+"val_label.npy",val_label)
     np.save(save_pth+"test_label.npy",test_label)
+    
+    # Save boundary information to prevent window bleeding across runs
+    np.save(save_pth+"train_boundaries.npy",np.array(train_boundaries))
+    np.save(save_pth+"val_boundaries.npy",np.array(val_boundaries))
+    np.save(save_pth+"test_boundaries.npy",np.array(test_boundaries))
 
     print("Generated ", train_data.shape[0], " training data.")
     print("Generated ", val_data.shape[0], " validation data.")
@@ -221,7 +240,7 @@ def mat2lcm(config):
                     'leg_control_data', leg_control_data_msg.encode())
         
         contact_msg = contact_t()
-        contact_msg.num_legs = 4
+        contact_msg.num_legs = 2
         contact_msg.timestamp = imu_time[data_idx]
         if config['contact_type'] == 'GRF':
             contact_msg.contact = mat_data['F_contacts'][data_idx]

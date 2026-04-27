@@ -1,13 +1,17 @@
-data_folder: "/home/justin/data/contact_data/train/numpy/"
-model_load_path: "/home/justin/code/deep-contact-estimator/results/0913_auto_contact_best_val_loss.pt"
-# model_load_path: "/home/justin/code/deep-contact-estimator/results/0616_2blocks_best_val_loss.pt"
+data_folder: "/home/saakee/Research/deep-contact-estimator/Data/NumpyFiles/"
+model_load_path: "/home/saakee/Research/deep-contact-estimator/results/bipedal_contact_best_val_leg_acc.pt"
 
 # data params
-window_size: 150
+window_size: 10
+shuffle: True  # Must match training config for consistent splits
+random_seed: 42  # Must match training config for consistent splits
+train_ratio: 0.7  # Must match training config
+val_ratio: 0.15  # Must match training config
 
 # network params
 batch_size: 30
 
 save_to_mat: False
-mat_save_path: "/home/justin/code/deep-contact-estimator/results/0913_auto_contact_best_val_loss.mat"
+mat_save_path: "/home/saakee/Research/deep-contact-estimator/results/bipedal_test_results.mat"
 
+# python3 src/test.py --config_name config/test_params.yaml
