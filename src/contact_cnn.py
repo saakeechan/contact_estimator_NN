@@ -5,16 +5,16 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 
 class contact_cnn(nn.Module):
-    def __init__(self, window_size=150):
+    def __init__(self, window_size=10):
         super(contact_cnn, self).__init__()
         self.block1 = nn.Sequential(
             # First convolutional layer
-            # Takes 54 input feature channels (q, qd, IMU, p, v)
+            # Takes 67 input feature channels (q, qd, IMU, p, v, tau, tau_cmd, cmd_vel)
             # Produces 64 learned feature maps (filters)
             # kernel_size=3: each filter looks at 3 consecutive timesteps
             # stride=1: moves one timestep at a time
             # padding=1: adds 1 zero on each side to maintain length
-            nn.Conv1d(in_channels=54,      # Input: 54 sensor features
+            nn.Conv1d(in_channels=30,      # Input: 30 sensor features (IMU, p, v, tau)
                     out_channels=64,      # Output: 64 learned patterns
                     kernel_size=3,        # Look at 3 timesteps at once
                     stride=1,             # Slide by 1 timestep
@@ -56,7 +56,7 @@ class contact_cnn(nn.Module):
             nn.MaxPool1d(kernel_size=2,     # Window size of 2
                         stride=2)           # Move by 2 (no overlap)
         )
-        # After block1: (batch, 150, 54) → (batch, 75, 64)
+        # After block1: (batch, 150, 67) → (batch, 75, 64)
 
         self.block2 = nn.Sequential(
             nn.Conv1d(in_channels=64,
@@ -82,7 +82,8 @@ class contact_cnn(nn.Module):
         # Final conv outputs 128 channels
         fc_input_size = (window_size // 4) * 128
         
-        self.fc = nn.Sequential(
+        # Contact detection branch (classification)
+        self.fc_contact = nn.Sequential(
             nn.Linear(in_features=fc_input_size,
                       out_features=2048),
             nn.ReLU(),
@@ -92,7 +93,21 @@ class contact_cnn(nn.Module):
             nn.ReLU(),
             nn.Dropout(p=0.5),
             nn.Linear(in_features=512,
-                      out_features=4),  # 2 legs: 2^2 = 4 contact combinations
+                      out_features=2),  # 2 legs: independent binary classification
+        )
+        
+        # Foot velocity regression branch (parallel to contact branch)
+        self.fc_velocity = nn.Sequential(
+            nn.Linear(in_features=fc_input_size,
+                      out_features=2048),
+            nn.ReLU(),
+            nn.Dropout(p=0.5),
+            nn.Linear(in_features=2048,
+                      out_features=512),
+            nn.ReLU(),
+            nn.Dropout(p=0.5),
+            nn.Linear(in_features=512,
+                      out_features=6),  # 6 outputs: 3D velocity for each foot (left xyz, right xyz)
         )
 
     def forward(self, x):
@@ -100,15 +115,19 @@ class contact_cnn(nn.Module):
         block1_out = self.block1(x)
         block2_out = self.block2(block1_out)
         block2_out_reshape = block2_out.view(block2_out.shape[0], -1)
-        fc_out = self.fc(block2_out_reshape)
-        return fc_out
+        
+        # Two parallel outputs
+        contact_out = self.fc_contact(block2_out_reshape)
+        velocity_out = self.fc_velocity(block2_out_reshape)
+        
+        return contact_out, velocity_out
 
 
 class contact_cnn_1block(nn.Module):
     def __init__(self):
         super(contact_cnn_1block, self).__init__()
         self.block1 = nn.Sequential(
-            nn.Conv1d(in_channels=54,
+            nn.Conv1d(in_channels=67,
                       out_channels=64,
                       kernel_size=3,
                       stride=1,
@@ -136,7 +155,7 @@ class contact_cnn_1block(nn.Module):
             nn.ReLU(),
             nn.Dropout(p=0.5),
             nn.Linear(in_features=512,
-                      out_features=4),  # 2 legs: 2^2 = 4 contact combinations
+                      out_features=2),  # 2 legs: independent binary classification
         )
 
     def forward(self, x):
@@ -152,7 +171,7 @@ class contact_cnn_1conv_2blocks(nn.Module):
     def __init__(self):
         super(contact_cnn_1conv_2blocks, self).__init__()
         self.block1 = nn.Sequential(
-            nn.Conv1d(in_channels=54,
+            nn.Conv1d(in_channels=67,
                       out_channels=64,
                       kernel_size=3,
                       stride=1,
@@ -186,7 +205,7 @@ class contact_cnn_1conv_2blocks(nn.Module):
             nn.ReLU(),
             nn.Dropout(p=0.5),
             nn.Linear(in_features=512,
-                      out_features=4),  # 2 legs: 2^2 = 4 contact combinations
+                      out_features=2),  # 2 legs: independent binary classification
         )
 
     def forward(self, x):
@@ -202,7 +221,7 @@ class contact_cnn_4blocks(nn.Module):
     def __init__(self):
         super(contact_cnn_4blocks, self).__init__()
         self.block1 = nn.Sequential(
-            nn.Conv1d(in_channels=54,
+            nn.Conv1d(in_channels=67,
                       out_channels=64,
                       kernel_size=3,
                       stride=1,
@@ -299,7 +318,7 @@ class contact_cnn_4blocks(nn.Module):
             nn.ReLU(),
             nn.Dropout(p=0.5),
             nn.Linear(in_features=512,
-                      out_features=4),  # 2 legs: 2^2 = 4 contact combinations
+                      out_features=2),  # 2 legs: independent binary classification
         )
 
     def forward(self, x):
@@ -317,7 +336,7 @@ class contact_cnn_256(nn.Module):
     def __init__(self):
         super(contact_cnn_256, self).__init__()
         self.block1 = nn.Sequential(
-            nn.Conv1d(in_channels=54,
+            nn.Conv1d(in_channels=67,
                       out_channels=128,
                       kernel_size=3,
                       stride=1,
@@ -414,7 +433,7 @@ class contact_cnn_256(nn.Module):
             nn.ReLU(),
             nn.Dropout(p=0.5),
             nn.Linear(in_features=512,
-                      out_features=4),  # 2 legs: 2^2 = 4 contact combinations
+                      out_features=2),  # 2 legs: independent binary classification
         )
 
     def forward(self, x):
@@ -527,7 +546,7 @@ class contact_2d_cnn(nn.Module):
             nn.ReLU(),
             nn.Dropout(p=0.5),
             nn.Linear(in_features=512,
-                      out_features=4),  # 2 legs: 2^2 = 4 contact combinations
+                      out_features=2),  # 2 legs: independent binary classification
         )
 
     def forward(self, x):
@@ -539,3 +558,86 @@ class contact_2d_cnn(nn.Module):
         block4_out_reshape = block4_out.view(block4_out.shape[0], -1)
         fc_out = self.fc(block4_out_reshape)
         return fc_out
+
+
+class ContactCNNWithNormalization(nn.Module):
+    """
+    Wrapper class that adds per-window normalization to the contact_cnn model.
+    This wrapper can be exported to ONNX so normalization is done inside the model
+    during inference, eliminating the need to normalize data externally in C++.
+    
+    Normalization: z-score normalization per window
+    - Compute mean and std along time dimension (dim=1) per feature
+    - Normalize: (x - mean) / std
+    - Handle std == 0 by replacing with 1 to avoid division by zero
+    
+    Input shape: (batch_size, window_size, num_features)
+    Output shape: (batch_size, 4) for 4 contact combinations
+
+    // Number of features per timestep (q, qd, acc, omega, p, v, tau)
+    """
+    def __init__(self, base_model, eps=1e-8):
+        super(ContactCNNWithNormalization, self).__init__()
+        self.base_model = base_model
+        self.eps = eps  # Small constant to prevent division by zero
+        
+    def forward(self, x):
+        """
+        Args:
+            x: Raw input data (batch_size, window_size, num_features)
+               NOT normalized
+        
+        Returns:
+            Output predictions (batch_size, 4)
+        
+        Feature layout (43 total):
+            acc: 0-2 (3 features) - IMU acceleration
+            omega: 3-5 (3 features) - IMU angular velocity
+            p: 6-11 (6 features) - position
+            v: 12-17 (6 features) - velocity
+            tau: 18-29 (12 features) - joint torques
+            tau_cmd: 30-41 (12 features) - joint torque commands
+            cmd_vel: 42 (1 feature) - command velocity
+        """
+        # Split features into groups
+        x_imu = x[:, :, :6]           # acc and omega (to be normalized)
+        x_others = x[:, :, 6:]          # p, v, tau (not normalized)
+        
+        # Normalize only IMU features (acc and omega)
+        # Compute mean and std per feature across time dimension
+        mean_imu = torch.mean(x_imu, dim=1, keepdim=True)  # (batch, 1, 6)
+        std_imu = torch.std(x_imu, dim=1, keepdim=True)    # (batch, 1, 6)
+        
+        # Replace zero std with 1 to avoid NaN (prevents division by zero)
+        std_imu = torch.where(std_imu == 0, torch.ones_like(std_imu), std_imu)
+        
+        # Normalize IMU features: z-score normalization
+        x_imu_normalized = (x_imu - mean_imu) / std_imu
+        
+        # Concatenate: keep q, qd, others unchanged; replace IMU with normalized
+        x_normalized = torch.cat([x_imu_normalized, x_others], dim=2)
+        
+        # Pass normalized data through the base model
+        return self.base_model(x_normalized)
+    
+        #     # Split features into groups
+        # x_q_qd = x[:, :, 0:24]           # q and qd (not normalized)
+        # x_imu = x[:, :, 24:30]           # acc and omega (to be normalized)
+        # x_others = x[:, :, 30:]          # p, v, tau, tau_cmd, cmd_vel (not normalized)
+        
+        # # Normalize only IMU features (acc and omega)
+        # # Compute mean and std per feature across time dimension
+        # mean_imu = torch.mean(x_imu, dim=1, keepdim=True)  # (batch, 1, 6)
+        # std_imu = torch.std(x_imu, dim=1, keepdim=True)    # (batch, 1, 6)
+        
+        # # Replace zero std with 1 to avoid NaN (prevents division by zero)
+        # std_imu = torch.where(std_imu == 0, torch.ones_like(std_imu), std_imu)
+        
+        # # Normalize IMU features: z-score normalization
+        # x_imu_normalized = (x_imu - mean_imu) / std_imu
+        
+        # # Concatenate: keep q, qd, others unchanged; replace IMU with normalized
+        # x_normalized = torch.cat([x_q_qd, x_imu_normalized, x_others], dim=2)
+        
+        # # Pass normalized data through the base model
+        # return self.base_model(x_normalized)

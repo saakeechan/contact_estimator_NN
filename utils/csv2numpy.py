@@ -18,14 +18,16 @@ def csv2numpy_one_seq(data_pth, save_pth):
     Expected CSV columns for bipedal robot:
     - Joint positions (12): left/right hip_pitch, hip_roll, hip_yaw, knee, ankle_pitch, ankle_roll
     - Joint velocities (12): same joints as positions
-    - Joint torques (12): same joints as positions
     - IMU data (6): acc_body_x/y/z, gyro_body_x/y/z
     - FK foot positions (6): fk_left/right_foot_pos_x/y/z
     - FK foot velocities (6): fk_left/right_foot_vel_x/y/z
+    - Joint torques (12): same joints as positions
+    - Joint commands (12): same joints as positions
+    - Command velocity (1): cmd_vel_x (forward velocity command)
     - Contact labels (2): lfoot-contact, rfoot-contact (binary)
     
     Output:
-    - data array: (num_data, 54) = q(12) + qd(12) + acc(3) + omega(3) + p(6) + v(6) + tau(12)
+    - data array: (num_data, 67) = q(12) + qd(12) + acc(3) + omega(3) + p(6) + v(6) + tau(12) + tau_cmd(12) + cmd_vel(1)
     - label array: (num_data, 1) = binary contacts converted to decimal
     """
     
@@ -43,17 +45,14 @@ def csv2numpy_one_seq(data_pth, save_pth):
         # Load CSV data
         df = pd.read_csv(data_name)
         
-        # Extract joint positions (q) - 12 values
-        q_cols = ['joint_pos_' + j for j in joint_names]
-        q = df[q_cols].values
+            # # Extract joint positions (q) - 12 values
+            # q_cols = ['joint_pos_' + j for j in joint_names]
+            # q = df[q_cols].values
+            
+            # # Extract joint velocities (qd) - 12 values
+            # qd_cols = ['joint_vel_' + j for j in joint_names]
+            # qd = df[qd_cols].values
         
-        # Extract joint velocities (qd) - 12 values
-        qd_cols = ['joint_vel_' + j for j in joint_names]
-        qd = df[qd_cols].values
-        
-        # Extract joint torques (tau_est) - 12 values
-        tau_cols = ['joint_torque_' + j for j in joint_names]
-        tau_est = df[tau_cols].values
         
         # Extract IMU data in body frame
         imu_acc = df[['acc_body_x', 'acc_body_y', 'acc_body_z']].values  # 3 values
@@ -67,12 +66,22 @@ def csv2numpy_one_seq(data_pth, save_pth):
         v = df[['fk_left_foot_vel_x', 'fk_left_foot_vel_y', 'fk_left_foot_vel_z',
                 'fk_right_foot_vel_x', 'fk_right_foot_vel_y', 'fk_right_foot_vel_z']].values
         
+        # Extract joint torques (tau_est) - 12 values
+        tau_cols = ['joint_torque_' + j for j in joint_names]
+        tau_est = df[tau_cols].values
+
+        tau_cmd_cols = ['joint_action_' + j for j in joint_names]
+        tau_cmd = df[tau_cmd_cols].values
+
+        # Extract command velocity - 1 value
+        cmd_vel = df[['cmd_vel_x']].values  # 1 value
+        
         # Extract contact labels - binary (2 values)
         # Contacts are ordered as [left_foot, right_foot]
         contacts = df[['lfoot-contact', 'rfoot-contact']].values.astype(int)
         
-        # Concatenate all features: q(12) + qd(12) + acc(3) + omega(3) + p(6) + v(6) + tau(12) = 54
-        data = np.concatenate((q, qd, imu_acc, imu_omega, p, v, tau_est), axis=1)
+        # Concatenate data: acc(3) + omega(3) + p(6) + v(6) + tau(12) + tau_cmd(12) + cmd_vel(1) = 43 features
+        data = np.concatenate((imu_acc, imu_omega, p, v, tau_est, tau_cmd, cmd_vel), axis=1)
         
         # Convert binary contact labels to decimal
         label = binary2decimal(contacts).reshape((-1, 1))
@@ -100,14 +109,16 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
     - val_ratio: not used (kept for backward compatibility)
     
     Output:
-    - all_data.npy: all data concatenated
-    - all_labels.npy: all labels
-    - boundaries.npy: indices marking end of each run (to prevent window bleeding)
+    - all_data.npy: all data concatenated (input features)
+    - all_labels.npy: contact labels (decimal encoded)
+    - all_foot_velocities.npy: foot velocities in world frame (6D: left xyz + right xyz)
+    - all_data_boundaries.npy: indices marking end of each run (to prevent window bleeding)
     """
     
-    num_features = 54  # q(12) + qd(12) + acc(3) + omega(3) + p(6) + v(6) + tau(12)
+    num_features = 30  # acc(3) + omega(3) + p(6) + v(6) + tau(12) + tau_cmd(12) + cmd_vel(1)
     all_data = np.zeros((0, num_features))
     all_labels = np.zeros((0, 1))
+    all_foot_velocities = np.zeros((0, 6))  # World frame foot velocities: left(3) + right(3)
     
     # Track boundaries between different runs to prevent window bleeding
     all_boundaries = []
@@ -149,17 +160,14 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
             
             df_run = df.iloc[start_idx:end_idx]
             
-            # Extract joint positions (q) - 12 values
-            q_cols = ['joint_pos_' + j for j in joint_names]
-            q = df_run[q_cols].values
+            # # Extract joint positions (q) - 12 values
+            # q_cols = ['joint_pos_' + j for j in joint_names]
+            # q = df_run[q_cols].values
             
-            # Extract joint velocities (qd) - 12 values
-            qd_cols = ['joint_vel_' + j for j in joint_names]
-            qd = df_run[qd_cols].values
+            # # Extract joint velocities (qd) - 12 values
+            # qd_cols = ['joint_vel_' + j for j in joint_names]
+            # qd = df_run[qd_cols].values
             
-            # Extract joint torques (tau_est) - 12 values
-            tau_cols = ['joint_torque_' + j for j in joint_names]
-            tau_est = df_run[tau_cols].values
             
             # Extract IMU data in body frame
             imu_acc = df_run[['acc_body_x', 'acc_body_y', 'acc_body_z']].values
@@ -173,11 +181,31 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
             v = df_run[['fk_left_foot_vel_x', 'fk_left_foot_vel_y', 'fk_left_foot_vel_z',
                     'fk_right_foot_vel_x', 'fk_right_foot_vel_y', 'fk_right_foot_vel_z']].values
             
+            # Extract joint torques (tau_est) - 12 values
+            tau_cols = ['joint_torque_' + j for j in joint_names]
+            tau_est = df_run[tau_cols].values
+
+            # tau_cmd_cols = ['joint_action_' + j for j in joint_names]
+            # tau_cmd = df_run[tau_cmd_cols].values
+
+            # # Extract command velocity - 1 value
+            # cmd_vel = df_run[['cmd_vel_x']].values
+            
             # Extract contact labels - binary (2 values)
             contacts = df_run[['lfoot-contact', 'rfoot-contact']].values.astype(int)
+
+            # Calculate foot velocity in world frame by numerical differentiation
+            foot_position_world = ['lfoot_pos_x', 'lfoot_pos_y', 'lfoot_pos_z', 
+                                   'rfoot_pos_x', 'rfoot_pos_y', 'rfoot_pos_z']
+            foot_velocity_world = np.diff(df_run[foot_position_world].values, axis=0) / \
+                                  np.diff(df_run['timestamp'].values.reshape(-1, 1), axis=0)
+            # Keep size consistent after diff by repeating last velocity
+            foot_velocity_world = np.vstack((foot_velocity_world, foot_velocity_world[-1, :]))
             
-            # Concatenate current run data: q(12) + qd(12) + acc(3) + omega(3) + p(6) + v(6) + tau(12) = 54
-            cur_data = np.concatenate((q, qd, imu_acc, imu_omega, p, v, tau_est), axis=1)
+            # Concatenate current run data: q(12) + qd(12) + acc(3) + omega(3) + p(6) + v(6) + tau(12) + tau_cmd(12) + cmd_vel(1) = 67
+            # cur_data = np.concatenate((q, qd, imu_acc, imu_omega, p, v, tau_est, tau_cmd, cmd_vel), axis=1)
+
+            cur_data = np.concatenate((imu_acc, imu_omega, p, v, tau_est), axis=1)  # 43 features (no q/qdot)
             
             # Convert labels from binary to decimal
             cur_label = binary2decimal(contacts).reshape((-1, 1))
@@ -185,6 +213,7 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
             # Append to full dataset
             all_data = np.vstack((all_data, cur_data))
             all_labels = np.vstack((all_labels, cur_label))
+            all_foot_velocities = np.vstack((all_foot_velocities, foot_velocity_world))
             
             # Record boundary index (end of this run in the full dataset)
             all_boundaries.append(all_data.shape[0])
@@ -199,9 +228,12 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
     # Save all data as single files - splitting will happen in train.py after windowing
     np.save(save_pth + "all_data.npy", all_data)
     np.save(save_pth + "all_labels.npy", all_labels)
+    np.save(save_pth + "all_foot_velocities.npy", all_foot_velocities)
     np.save(save_pth + "all_data_boundaries.npy", np.array(all_boundaries))
     
     print(f"Saved {all_data.shape[0]} samples to all_data.npy")
+    print(f"Saved {all_data.shape[0]} contact labels to all_labels.npy")
+    print(f"Saved {all_foot_velocities.shape[0]} foot velocity labels to all_foot_velocities.npy")
     print(f"Saved {len(all_boundaries)} run boundaries to all_data_boundaries.npy")
     print("Done!")
 

@@ -1,4 +1,4 @@
-docker start contact_estimator_train && docker exec -it contact_estimator_train /bin/bash 
+docker start contact_estimator_NN && docker exec -it contact_estimator_NN /bin/bash 
 
 python3 utils/csv2numpy.py --config_name config/csv2numpy_config.yaml
 

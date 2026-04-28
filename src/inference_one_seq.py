@@ -19,15 +19,16 @@ from utils.data_handler import *
 def inference(dataloader, model, device):
     
     infer_results = torch.empty(0,2,dtype=torch.uint8).to(device)  # 2 legs for biped
+    velocity_results = torch.empty(0,6,dtype=torch.float32).to(device)  # 6D foot velocities
     with torch.no_grad():
         for sample in tqdm(dataloader):
             input_data = sample['data']
-            output = model(input_data)
-            _, prediction = torch.max(output,1)
-            bin_pred = decimal2binary(prediction)
-            infer_results = torch.cat((infer_results, bin_pred), 0)
+            contact_output, velocity_output = model(input_data)  # Two outputs
+            contact_prediction = (torch.sigmoid(contact_output) > 0.5).byte()  # Binary predictions
+            infer_results = torch.cat((infer_results, contact_prediction), 0)
+            velocity_results = torch.cat((velocity_results, velocity_output), 0)
 
-    return infer_results
+    return infer_results, velocity_results
 
 
 def inference_and_compute_acc(dataloader, model, device):
@@ -36,25 +37,30 @@ def inference_and_compute_acc(dataloader, model, device):
     num_data = 0
     correct_per_leg = np.zeros(2)  # 2 legs for biped
     infer_results = torch.empty(0,2,dtype=torch.uint8).to(device)  # 2 legs for biped
+    velocity_results = torch.empty(0,6,dtype=torch.float32).to(device)  # 6D foot velocities
+    velocity_mse_sum = 0.0
+    
     with torch.no_grad():
         for sample in tqdm(dataloader):
             input_data = sample['data']
-            gt_label = sample['label']
+            gt_label = sample['label']  # Shape: (batch, 2) - binary labels
+            gt_velocity = sample['velocity']  # Shape: (batch, 6) - foot velocities
 
+            contact_output, velocity_output = model(input_data)  # Two outputs
+            contact_prediction = (torch.sigmoid(contact_output) > 0.5).float()  # Binary predictions
+            infer_results = torch.cat((infer_results, contact_prediction.byte()), 0)
+            velocity_results = torch.cat((velocity_results, velocity_output), 0)
 
-            output = model(input_data)
-            _, prediction = torch.max(output,1)
-            bin_pred = decimal2binary(prediction)
-            bin_gt = decimal2binary(gt_label).view(-1,2)  # 2 legs for biped
-            infer_results = torch.cat((infer_results, bin_pred), 0)
-
-
-            correct_per_leg += (bin_pred==bin_gt).sum(axis=0).cpu().numpy()
+            # Per-leg accuracy
+            correct_per_leg += (contact_prediction == gt_label).sum(axis=0).cpu().numpy()
             num_data += input_data.size(0)
-            num_correct += (prediction==gt_label).sum().item()
+            # Overall accuracy (both legs correct)
+            num_correct += ((contact_prediction == gt_label).all(dim=1)).sum().item()
+            
+            # Velocity MSE
+            velocity_mse_sum += ((velocity_output - gt_velocity) ** 2).mean().item()
 
-    # return infer_results
-    return infer_results, num_correct/num_data,  correct_per_leg/num_data
+    return infer_results, velocity_results, num_correct/num_data, correct_per_leg/num_data, velocity_mse_sum/len(dataloader)
 
 def decimal2binary(x):
     mask = 2**torch.arange(2-1,-1,-1).to(x.device, x.dtype)  # 2 legs for biped
@@ -64,13 +70,19 @@ def decimal2binary(x):
 def save2mat(pred, config):
     mat_raw_data = sio.loadmat(config['mat_data_path'])
     data = np.load(config['data_path'])
-    label_deci_np = np.load(config['label_path'])
-    label_deci = torch.from_numpy(label_deci_np)
-    label = decimal2binary(label_deci).reshape(-1,2)  # 2 legs for biped
+    label = np.load(config['label_path'])  # Now loads binary labels directly from data_handler
+
+    # Convert to proper shape if needed
+    if label.ndim == 1:
+        # Old decimal format - convert to binary
+        label_binary = np.zeros((len(label), 2), dtype=np.float32)
+        label_binary[:, 0] = (label & 2) >> 1  # Left foot
+        label_binary[:, 1] = label & 1          # Right foot
+        label = label_binary
 
     out = {}
     out['contacts_est'] = pred.cpu().numpy()
-    out['contacts_gt'] = label[config['window_size']-1:,:].numpy()
+    out['contacts_gt'] = label[config['window_size']-1:,:]
     out['q'] = data[config['window_size']-1:,:12]
     out['qd'] = data[config['window_size']-1:,12:24]
     out['imu_acc'] = data[config['window_size']-1:,24:27]
@@ -143,7 +155,7 @@ def main():
     parser.add_argument('--config_name', type=str, default=os.path.dirname(os.path.abspath(__file__))+'/../config/inference_one_seq_params.yaml')
     args = parser.parse_args()
 
-    config = yaml.load(open(args.config_name))
+    config = yaml.load(open(args.config_name), Loader=yaml.FullLoader)
     
     dataset = contact_dataset(data_path=config['data_path'],\
                                 label_path=config['label_path'],\
@@ -151,19 +163,23 @@ def main():
     dataloader = DataLoader(dataset=dataset, batch_size=config['batch_size'])
 
     model = contact_cnn(window_size=config['window_size'])
+    from contact_cnn import ContactCNNWithNormalization
+    model = ContactCNNWithNormalization(model)
     checkpoint = torch.load(config['model_load_path'])
     model.load_state_dict(checkpoint['model_state_dict'])
     model = model.eval().to(device)
 
     pred = []
+    velocity_pred = []
     if(config['calculate_accuracy']):
-        pred, acc, acc_per_leg = inference_and_compute_acc(dataloader, model, device)
-        print("Accuracy in terms of class: %.4f" % acc)
-        print("Accuracy of leg 0 is: %.4f" % acc_per_leg[0])
-        print("Accuracy of leg 1 is: %.4f" % acc_per_leg[1])
-        print("Accuracy is: %.4f" % (np.sum(acc_per_leg)/2.0))  # 2 legs for biped
+        pred, velocity_pred, acc, acc_per_leg, velocity_mse = inference_and_compute_acc(dataloader, model, device)
+        print("Contact Accuracy (both legs): %.4f" % acc)
+        print("Accuracy of leg 0 (left): %.4f" % acc_per_leg[0])
+        print("Accuracy of leg 1 (right): %.4f" % acc_per_leg[1])
+        print("Average leg accuracy: %.4f" % (np.sum(acc_per_leg)/2.0))  # 2 legs for biped
+        print("Foot Velocity MSE: %.6f" % velocity_mse)
     else:
-        pred = inference(dataloader, model, device)
+        pred, velocity_pred = inference(dataloader, model, device)
 
     
 

@@ -42,27 +42,23 @@ def compute_confusion_mat(bin_contact_pred_arr, bin_contact_gt_arr):
     return confusion_mat, fn_rate, fp_rate
 
 
-def compute_precision(bin_pred_arr, bin_gt_arr, pred_arr, gt_arr):
-
-
-    precision_of_class = precision_score(gt_arr,pred_arr,average='weighted')
+def compute_precision(bin_pred_arr, bin_gt_arr):
+    """Compute precision for per-leg binary classification."""
     precision_of_all_legs = precision_score(bin_gt_arr.flatten(),bin_pred_arr.flatten())
     precision_of_legs = []
     for i in range(2):  # 2 legs for biped
         precision_of_legs.append(precision_score(bin_gt_arr[:,i],bin_pred_arr[:,i]))
 
-    return precision_of_class, precision_of_legs, precision_of_all_legs
+    return precision_of_legs, precision_of_all_legs
 
-def compute_jaccard(bin_pred_arr, bin_gt_arr, pred_arr, gt_arr):
-
-
-    jaccard_of_class = jaccard_score(gt_arr,pred_arr,average='weighted')
+def compute_jaccard(bin_pred_arr, bin_gt_arr):
+    """Compute Jaccard score for per-leg binary classification."""
     jaccard_of_all_legs = jaccard_score(bin_gt_arr.flatten(),bin_pred_arr.flatten())
     jaccard_of_legs = []
     for i in range(2):  # 2 legs for biped
         jaccard_of_legs.append(jaccard_score(bin_gt_arr[:,i],bin_pred_arr[:,i]))
 
-    return jaccard_of_class, jaccard_of_legs, jaccard_of_all_legs
+    return jaccard_of_legs, jaccard_of_all_legs
 
 def compute_accuracy(dataloader, model):
     # compute accuracy in batch
@@ -72,34 +68,35 @@ def compute_accuracy(dataloader, model):
     correct_per_leg = np.zeros(2)  # 2 legs for biped
     bin_pred_arr = np.zeros((0,2))  # 2 legs for biped
     bin_gt_arr = np.zeros((0,2))  # 2 legs for biped
-    pred_arr = np.zeros((0))
-    gt_arr = np.zeros((0))
+    velocity_pred_arr = np.zeros((0,6))  # 6D foot velocities
+    velocity_gt_arr = np.zeros((0,6))
+    
     with torch.no_grad():
         for sample in tqdm(dataloader):
             input_data = sample['data']
-            gt_label = sample['label']
+            gt_label = sample['label']  # Shape: (batch, 2) - binary labels
+            gt_velocity = sample['velocity']  # Shape: (batch, 6) - foot velocities
 
-            output = model(input_data)
+            contact_output, velocity_output = model(input_data)  # Two outputs
+            contact_prediction = (torch.sigmoid(contact_output) > 0.5).float()  # Binary predictions
 
-            _, prediction = torch.max(output,1)
+            bin_pred_arr = np.vstack((bin_pred_arr, contact_prediction.cpu().numpy()))
+            bin_gt_arr = np.vstack((bin_gt_arr, gt_label.cpu().numpy()))
+            velocity_pred_arr = np.vstack((velocity_pred_arr, velocity_output.cpu().numpy()))
+            velocity_gt_arr = np.vstack((velocity_gt_arr, gt_velocity.cpu().numpy()))
 
-            
-
-            bin_pred = decimal2binary(prediction)
-            bin_gt = decimal2binary(gt_label)
-
-            bin_pred_arr = np.vstack((bin_pred_arr,bin_pred.cpu().numpy()))
-            bin_gt_arr = np.vstack((bin_gt_arr,bin_gt.cpu().numpy()))
-
-            pred_arr = np.hstack((pred_arr,prediction.cpu().numpy()))
-            gt_arr = np.hstack((gt_arr,gt_label.cpu().numpy()))
-
-            correct_per_leg += (bin_pred==bin_gt).sum(axis=0).cpu().numpy()
+            # Per-leg accuracy
+            correct_per_leg += (contact_prediction == gt_label).sum(axis=0).cpu().numpy()
             num_data += input_data.size(0)
-            num_correct += (prediction==gt_label).sum().item()
+            # Overall accuracy (both legs correct)
+            num_correct += ((contact_prediction == gt_label).all(dim=1)).sum().item()
 
+    # Compute velocity metrics
+    velocity_mse = np.mean((velocity_pred_arr - velocity_gt_arr) ** 2)
+    velocity_mae = np.mean(np.abs(velocity_pred_arr - velocity_gt_arr))
 
-    return num_correct/num_data, correct_per_leg/num_data, bin_pred_arr, bin_gt_arr, pred_arr, gt_arr
+    return (num_correct/num_data, correct_per_leg/num_data, bin_pred_arr, bin_gt_arr, 
+            velocity_pred_arr, velocity_gt_arr, velocity_mse, velocity_mae)
 
 def decimal2binary(x):
     mask = 2**torch.arange(2-1,-1,-1).to(x.device, x.dtype)  # 2 legs for biped
@@ -113,7 +110,7 @@ def main():
     parser.add_argument('--config_name', type=str, default=os.path.dirname(os.path.abspath(__file__))+'/../config/test_params.yaml')
     args = parser.parse_args()
 
-    config = yaml.load(open(args.config_name))
+    config = yaml.load(open(args.config_name), Loader=yaml.FullLoader)
 
     # Load ALL data (not pre-split) - use same splitting logic as train.py
     all_dataset = contact_dataset(data_path=config['data_folder']+"all_data.npy",\
@@ -147,30 +144,35 @@ def main():
                                  sampler=test_sampler)
 
 
-    # init network
-    model = contact_cnn(window_size=config['window_size'])
+    # init network with built-in normalization (same as training)
+    base_model = contact_cnn(window_size=config['window_size'])
+    from contact_cnn import ContactCNNWithNormalization
+    model = ContactCNNWithNormalization(base_model)
 
     checkpoint = torch.load(config['model_load_path'])
     model.load_state_dict(checkpoint['model_state_dict'])
     model = model.eval().to(device)
 
-    test_acc, acc_per_leg, bin_pred_arr, bin_gt_arr, pred_arr, gt_arr = compute_accuracy(test_dataloader, model)
-    precision_of_class, precision_of_legs, precision_of_all_legs = compute_precision(bin_pred_arr,bin_gt_arr,pred_arr, gt_arr)
-    jaccard_of_class, jaccard_of_legs, jaccard_of_all_legs = compute_jaccard(bin_pred_arr,bin_gt_arr,pred_arr, gt_arr)
-    confusion_mat, fn_rate, fp_rate = compute_confusion_mat(bin_pred_arr,bin_gt_arr)
+    test_acc, acc_per_leg, bin_pred_arr, bin_gt_arr, velocity_pred_arr, velocity_gt_arr, velocity_mse, velocity_mae = compute_accuracy(test_dataloader, model)
+    precision_of_legs, precision_of_all_legs = compute_precision(bin_pred_arr, bin_gt_arr)
+    jaccard_of_legs, jaccard_of_all_legs = compute_jaccard(bin_pred_arr, bin_gt_arr)
+    confusion_mat, fn_rate, fp_rate = compute_confusion_mat(bin_pred_arr, bin_gt_arr)
 
-
-    print("Test accuracy in terms of class is: %.4f" % test_acc)
-    print("Accuracy of leg 0 is: %.4f" % acc_per_leg[0])
-    print("Accuracy of leg 1 is: %.4f" % acc_per_leg[1])
-    print("Accuracy is: %.4f" % (np.sum(acc_per_leg)/2.0))  # 2 legs for biped
+    print("Test accuracy (both legs correct): %.4f" % test_acc)
+    print("Accuracy of leg 0 (left): %.4f" % acc_per_leg[0])
+    print("Accuracy of leg 1 (right): %.4f" % acc_per_leg[1])
+    print("Average leg accuracy: %.4f" % (np.sum(acc_per_leg)/2.0))  # 2 legs for biped
     print("---------------")
-    print("Precision of class is: %.4f" % precision_of_class)
-    print("Precision of leg 0 is: %.4f" % precision_of_legs[0])
-    print("Precision of leg 1 is: %.4f" % precision_of_legs[1])
-    print("Precision of all legs is: %.4f" % precision_of_all_legs)
+    print("Foot Velocity MSE: %.6f" % velocity_mse)
+    print("Foot Velocity MAE: %.6f" % velocity_mae)
     print("---------------")
-    print("jaccard of class is: %.4f" % jaccard_of_class)
+    print("Precision of leg 0 (left): %.4f" % precision_of_legs[0])
+    print("Precision of leg 1 (right): %.4f" % precision_of_legs[1])
+    print("Precision of all legs: %.4f" % precision_of_all_legs)
+    print("---------------")
+    print("Jaccard of leg 0 (left): %.4f" % jaccard_of_legs[0])
+    print("Jaccard of leg 1 (right): %.4f" % jaccard_of_legs[1])
+    print("Jaccard of all legs: %.4f" % jaccard_of_all_legs)
     print("jaccard of leg 0 is: %.4f" % jaccard_of_legs[0])
     print("jaccard of leg 1 is: %.4f" % jaccard_of_legs[1])
     print("jaccard of all legs is: %.4f" % jaccard_of_all_legs)
@@ -198,16 +200,13 @@ def main():
     print(acc_per_leg[1])
     print((np.sum(acc_per_leg)/2.0))  # 2 legs for biped
     print("---------------")
-    print(precision_of_class)
     print(precision_of_legs[0])
     print(precision_of_legs[1])
     print("---------------")
-    print(precision_of_class)
     print(precision_of_legs[0])
     print(precision_of_legs[1])
     print(precision_of_all_legs)
     print("---------------")
-    print(jaccard_of_class)
     print(jaccard_of_legs[0])
     print(jaccard_of_legs[1])
     print(jaccard_of_all_legs)

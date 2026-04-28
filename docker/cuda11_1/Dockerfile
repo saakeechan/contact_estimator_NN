@@ -1,14 +1,18 @@
-FROM pytorch/pytorch:1.8.0-cuda11.1-cudnn8-runtime
+FROM pytorch/pytorch:2.11.0-cuda12.8-cudnn9-runtime
 
-LABEL version="0.5"
+LABEL version="0.6"
 
 USER root
 
-# scipy, tensorboard, pandas
-RUN pip install scipy
-RUN pip install tensorboard
-RUN pip install -U scikit-learn
-RUN pip install pandas
+# scipy, tensorboard, pandas, onnx, tqdm, pyyaml, onnxscript
+RUN pip install --break-system-packages scipy
+RUN pip install --break-system-packages tensorboard
+RUN pip install --break-system-packages -U scikit-learn
+RUN pip install --break-system-packages pandas
+RUN pip install --break-system-packages onnx
+RUN pip install --break-system-packages onnxscript
+RUN pip install --break-system-packages tqdm
+RUN pip install --break-system-packages pyyaml
 
 # build essential, cmake, vim, git
 ENV DEBIAN_FRONTEND=noninteractive
@@ -27,10 +31,8 @@ RUN mkdir -p /home/root/tmp/
 RUN cd /home/root/tmp/ \
     && git clone https://github.com/lcm-proj/lcm.git \
     && cd lcm \
-    && git checkout v1.4.0
+    && git checkout v1.5.1
 RUN cd /home/root/tmp/lcm/ \
     && mkdir build \
-    && cd build \ 
-    && cmake .. && make -j && make install
-RUN cd /home/root/tmp/lcm/lcm-python/\
-    && python setup.py install
+    && cd build \
+    && cmake -DLCM_ENABLE_PYTHON=ON .. && make -j && make install

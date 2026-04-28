@@ -14,16 +14,37 @@ class contact_dataset(Dataset):
 
     def __init__(self, data_path, label_path, window_size, device='cuda'):
         """
-        At initialization we load .npy files for data and label.
+        At initialization we load .npy files for data, label, and foot velocities.
         self.data: a 2D array of all data points. rows are time axis, columns are features. (num_data, num_features)
         self.label: a vector of the corresponding contact states (in decimal). (num_data, 1)
+        self.foot_velocity: a 2D array of foot velocities in world frame. (num_data, 6) - 3D per foot
         """
         data = np.load(data_path)
         label = np.load(label_path)
         
+        # Load foot velocities (6D: left xyz + right xyz)
+        velocity_path = data_path.replace('_data.npy', '_foot_velocities.npy')
+        if not os.path.exists(velocity_path):
+            velocity_path = data_path.replace('.npy', '_foot_velocities.npy')
+        
+        if os.path.exists(velocity_path):
+            foot_velocity = np.load(velocity_path)
+            print(f"Loaded foot velocities from {velocity_path}")
+        else:
+            print(f"Warning: No foot velocity file found. Creating zero velocities.")
+            foot_velocity = np.zeros((len(data), 6), dtype=np.float32)
+        
         self.window_size = window_size
         self.data = torch.from_numpy(data).type('torch.FloatTensor').to(device)
-        self.label = torch.from_numpy(label).type('torch.LongTensor').to(device)
+        self.foot_velocity = torch.from_numpy(foot_velocity).type('torch.FloatTensor').to(device)
+        
+        # Convert decimal labels to binary format for BCEWithLogitsLoss
+        # Decimal: 0=[0,0], 1=[0,1], 2=[1,0], 3=[1,1]
+        label_int = label.astype(np.int32)  # Convert to integer for bitwise operations
+        label_binary = np.zeros((len(label), 2), dtype=np.float32)
+        label_binary[:, 0] = (label_int & 2) >> 1  # Left foot (bit 1)
+        label_binary[:, 1] = label_int & 1          # Right foot (bit 0)
+        self.label = torch.from_numpy(label_binary).type('torch.FloatTensor').to(device)
         
         # Load run boundaries to prevent window bleeding across different runs
         boundary_path = data_path.replace('.npy', '_boundaries.npy')
@@ -68,14 +89,15 @@ class contact_dataset(Dataset):
         to inference along the time axis. After this, at each time step we will have
         window_size x num_features. Thus we can take window_size of data into consideration each time.
 
-        The data is normalized along time domain.
+        The data is normalized along time domain in the model, so we return raw unnormalized data here.
 
         Ex. If the window size = 10. new_data[0,:,:] = data[0:10,:], new_data[1,:,:] = data[1:11,:].
                                      new_label[0] = label[9],        new_label[1] = label[10].
         
         Output: 
         - data: (batch_size, window_size, num_features)
-        - label: (batch_size, 1)
+        - label: (batch_size, 2) - binary contact per leg
+        - velocity: (batch_size, 6) - 3D velocity per foot
         """
         if torch.is_tensor(idx):
             idx = idx.tolist()
@@ -83,14 +105,12 @@ class contact_dataset(Dataset):
         # Map from valid index to actual data index
         real_idx = self.valid_indices[idx]
         
-        # Normalize with protection against division by zero
-        mean = torch.mean(self.data[real_idx:real_idx+self.window_size,:],dim=0)
-        std = torch.std(self.data[real_idx:real_idx+self.window_size,:],dim=0)
-        std = torch.where(std == 0, torch.ones_like(std), std)  # Replace 0 std with 1 to avoid NaN
-        this_data = (self.data[real_idx:real_idx+self.window_size,:] - mean) / std
-        this_label = self.label[real_idx+self.window_size-1] 
+        # Return raw unnormalized data (normalization now done inside the model)
+        this_data = self.data[real_idx:real_idx+self.window_size,:]
+        this_label = self.label[real_idx+self.window_size-1]
+        this_velocity = self.foot_velocity[real_idx+self.window_size-1]
             
-        sample = {'data': this_data, 'label': this_label}
+        sample = {'data': this_data, 'label': this_label, 'velocity': this_velocity}
 
         return sample
 
