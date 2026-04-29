@@ -549,6 +549,9 @@ class contact_2d_cnn(nn.Module):
                       out_features=2),  # 2 legs: independent binary classification
         )
 
+        # 4 seperate ones
+        # and then left-right based 2 MLPs
+
     def forward(self, x):
         x = x.reshape(x.shape[0], 1, x.shape[1], x.shape[2])
         block1_out = self.block1(x)
@@ -582,7 +585,7 @@ class ContactCNNWithNormalization(nn.Module):
         self.eps = eps  # Small constant to prevent division by zero
         
     def forward(self, x):
-        """
+        """Same input and output as base_model, but with normalization applied to IMU features before passing through the model.
         Args:
             x: Raw input data (batch_size, window_size, num_features)
                NOT normalized

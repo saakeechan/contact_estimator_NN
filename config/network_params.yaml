@@ -8,7 +8,7 @@ model_save_path: "/home/saakee/Research/deep-contact-estimator/results/bipedal_c
 log_writer_path: "/home/saakee/Research/deep-contact-estimator/logs/bipedal_contact"
 
 
-model_description: "Bipedal 2-leg contact, 43 features, 4 output classes, 2block CNN, batch:30, ws:20, lr:1e-4"
+model_description: "Bipedal 2-leg contact, 30 features, 2 output classes, 2block CNN, batch:30, ws:10, lr:1e-4"
 
 print_every: 1000
 
@@ -26,8 +26,8 @@ num_epoch: 10  # Reduced for quick training with small dataset
 
 # Elastic Net Regularization (L1 + L2)
 # Loss = BCE_loss + l1_lambda * ||w||_1 + l2_lambda * ||w||_2^2
-l1_lambda: 0     # L1 (Lasso): encourages sparsity (many weights → 0)
-l2_lambda: 0     # L2 (Ridge): encourages small weights, prevents large values
+l1_lambda: 1e-4     # L1 (Lasso): encourages sparsity (many weights → 0)
+l2_lambda: 1e-3     # L2 (Ridge): encourages small weights, prevents large values
 # Typical values: 1e-5 to 1e-3 for each
 # Example combinations:
 #   l1_lambda: 1e-4, l2_lambda: 1e-4  # Balanced elastic net
@@ -50,7 +50,7 @@ velocity_weight: 1.0    # Weight for velocity regression loss
                         # Higher values = prioritize velocity accuracy
                         # Lower values = prioritize contact accuracy
                         # Set based on which task is more important
-Huber_delta: 1.0      # Delta parameter for Huber loss in velocity regression
+Huber_delta: 0.7      # Delta parameter for Huber loss in velocity regression
 
 
 # python3 src/train.py --config_name config/network_params.yaml

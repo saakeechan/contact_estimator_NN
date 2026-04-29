@@ -5,6 +5,7 @@ import sys
 sys.path.append('.')
 import yaml
 from tqdm import tqdm
+import warnings
 
 import torch.optim as optim
 
@@ -12,6 +13,13 @@ from contact_cnn import *
 from utils.data_handler import *
 
 from torch.utils.tensorboard import SummaryWriter
+
+
+warnings.filterwarnings(
+    "ignore",
+    category=FutureWarning,
+    message=".*LeafSpec.*"
+)
 
 def compute_accuracy(dataloader, model):
 
@@ -89,6 +97,7 @@ def decimal2binary(x):
     return x.unsqueeze(-1).bitwise_and(mask).ne(0).byte()
 
 
+
 def save_onnx_model(model, checkpoint_path, window_size):
     """
     Save ONNX version of the model for C++ deployment.
@@ -119,7 +128,9 @@ def save_onnx_model(model, checkpoint_path, window_size):
                 'input': {0: 'batch_size'},
                 'contact_output': {0: 'batch_size'},
                 'velocity_output': {0: 'batch_size'}
-            }
+            },
+            verbose=False,
+            dynamo=False
         )
         print(f"  ✓ ONNX model saved with two outputs (contact, velocity): {onnx_path}")
         

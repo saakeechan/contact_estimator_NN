@@ -34,9 +34,7 @@ def csv2numpy_one_seq(data_pth, save_pth):
     # Define column names for data extraction
     joint_names = [
         'left_hip_pitch_joint', 'left_hip_roll_joint', 'left_hip_yaw_joint',
-        'left_knee_joint', 'left_ankle_pitch_joint', 'left_ankle_roll_joint',
-        'right_hip_pitch_joint', 'right_hip_roll_joint', 'right_hip_yaw_joint',
-        'right_knee_joint', 'right_ankle_pitch_joint', 'right_ankle_roll_joint'
+        'left_knee_joint', 'left_ankle_pitch_joint', 'left_ankle_roll_joint'
     ]
     
     for data_name in glob.glob(data_pth + '*.csv'):
@@ -58,13 +56,11 @@ def csv2numpy_one_seq(data_pth, save_pth):
         imu_acc = df[['acc_body_x', 'acc_body_y', 'acc_body_z']].values  # 3 values
         imu_omega = df[['gyro_body_x', 'gyro_body_y', 'gyro_body_z']].values  # 3 values
         
-        # Extract foot positions from FK - 6 values (3 per foot)
-        p = df[['fk_left_foot_pos_x', 'fk_left_foot_pos_y', 'fk_left_foot_pos_z',
-                'fk_right_foot_pos_x', 'fk_right_foot_pos_y', 'fk_right_foot_pos_z']].values
+        # Extract foot positions from FK - 3 values (left foot)
+        p = df[['fk_left_foot_pos_x', 'fk_left_foot_pos_y', 'fk_left_foot_pos_z']].values
         
-        # Extract foot velocities from FK - 6 values (3 per foot)
-        v = df[['fk_left_foot_vel_x', 'fk_left_foot_vel_y', 'fk_left_foot_vel_z',
-                'fk_right_foot_vel_x', 'fk_right_foot_vel_y', 'fk_right_foot_vel_z']].values
+        # Extract foot velocities from FK - 3 values (left foot)
+        v = df[['fk_left_foot_vel_x', 'fk_left_foot_vel_y', 'fk_left_foot_vel_z']].values
         
         # Extract joint torques (tau_est) - 12 values
         tau_cols = ['joint_torque_' + j for j in joint_names]
@@ -76,11 +72,11 @@ def csv2numpy_one_seq(data_pth, save_pth):
         # Extract command velocity - 1 value
         cmd_vel = df[['cmd_vel_x']].values  # 1 value
         
-        # Extract contact labels - binary (2 values)
-        # Contacts are ordered as [left_foot, right_foot]
-        contacts = df[['lfoot-contact', 'rfoot-contact']].values.astype(int)
+        # Extract contact labels - binary (1 value)
+        # Contacts are ordered as [left_foot, right_foot], but we will only use left foot for this example
+        contacts = df[['lfoot-contact']].values.astype(int)
         
-        # Concatenate data: acc(3) + omega(3) + p(6) + v(6) + tau(12) + tau_cmd(12) + cmd_vel(1) = 43 features
+        # Concatenate data: acc(3) + omega(3) + p(3) + v(3) + tau(12) + tau_cmd(12) + cmd_vel(1) = 37 features
         data = np.concatenate((imu_acc, imu_omega, p, v, tau_est, tau_cmd, cmd_vel), axis=1)
         
         # Convert binary contact labels to decimal
