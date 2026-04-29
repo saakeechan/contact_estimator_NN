@@ -25,22 +25,22 @@ def compute_accuracy(dataloader, model):
 
     num_correct = 0
     num_data = 0
-    correct_per_leg = np.zeros(1)  # 1 leg for biped
+    correct_per_leg = np.zeros(1)  # 1 leg (left) for this branch
     velocity_mse_sum = 0.0  # Track velocity prediction error
     
     for sample in tqdm(dataloader):
         input_data = sample['data']
-        gt_label = sample['label']  # Shape: (batch, 1) - binary labels
-        gt_velocity = sample['velocity']  # Shape: (batch, 6) - foot velocities
+        gt_label = sample['label']  # Shape: (batch, 1) - binary labels for left leg
+        gt_velocity = sample['velocity']  # Shape: (batch, 1) - left foot velocity norm
 
         contact_output, velocity_output = model(input_data)  # Two outputs now
         contact_prediction = (torch.sigmoid(contact_output) > 0.5).float()  # Binary predictions
 
-        # Per-leg accuracy
+        # Per-leg accuracy (just left leg)
         correct_per_leg += (contact_prediction == gt_label).sum(axis=0).cpu().numpy()
         num_data += input_data.size(0)
-        # Overall accuracy (both legs correct)
-        num_correct += ((contact_prediction == gt_label).all(dim=1)).sum().item()
+        # Overall accuracy (same as leg accuracy since only 1 leg)
+        num_correct += (contact_prediction == gt_label).sum().item()
         
         # Velocity MSE (for monitoring)
         velocity_mse_sum += ((velocity_output - gt_velocity) ** 2).mean().item()
@@ -55,12 +55,12 @@ def compute_accuracy_and_loss(dataloader, model, contact_criterion, velocity_cri
     velocity_loss_sum = 0
     total_loss_sum = 0
     velocity_mse_sum = 0.0
-    correct_per_leg = np.zeros(1)  # 1 leg for biped
+    correct_per_leg = np.zeros(1)  # 1 leg (left) for this branch
     with torch.no_grad():
         for sample in tqdm(dataloader):
             input_data = sample['data']
-            gt_label = sample['label']  # Shape: (batch, 1) - binary labels
-            gt_velocity = sample['velocity']  # Shape: (batch, 1) - foot velocities
+            gt_label = sample['label']  # Shape: (batch, 1) - binary labels for left leg
+            gt_velocity = sample['velocity']  # Shape: (batch, 1) - left foot velocity norm
 
             contact_output, velocity_output = model(input_data)  # Two outputs
             contact_prediction = (torch.sigmoid(contact_output) > 0.5).float()  # Binary predictions
@@ -68,7 +68,7 @@ def compute_accuracy_and_loss(dataloader, model, contact_criterion, velocity_cri
             contact_loss = contact_criterion(contact_output, gt_label)
             
             # Mask velocity loss by ground truth contact labels
-            # gt_label shape: (batch, 1), velocity shape: (batch, 1) -> 1 velocity per leg
+            # gt_label shape: (batch, 1), velocity shape: (batch, 1)
             contact_mask = gt_label  # (batch, 1)
             velocity_loss_elementwise = velocity_criterion(velocity_output, gt_velocity)
             # Multiply by contact mask (only penalize velocities in contact)
@@ -76,11 +76,11 @@ def compute_accuracy_and_loss(dataloader, model, contact_criterion, velocity_cri
             
             total_loss = contact_loss + velocity_weight * velocity_loss
 
-            # Per-leg accuracy
+            # Per-leg accuracy (just left leg)
             correct_per_leg += (contact_prediction == gt_label).sum(axis=0).cpu().numpy()
             num_data += input_data.size(0)
-            # Overall accuracy (both legs correct)
-            num_correct += ((contact_prediction == gt_label).all(dim=1)).sum().item()
+            # Overall accuracy (same as leg accuracy since only 1 leg)
+            num_correct += (contact_prediction == gt_label).sum().item()
 
             contact_loss_sum += contact_loss.item()
             velocity_loss_sum += velocity_loss.item()
@@ -91,18 +91,23 @@ def compute_accuracy_and_loss(dataloader, model, contact_criterion, velocity_cri
             contact_loss_sum/len(dataloader), velocity_loss_sum/len(dataloader), 
             total_loss_sum/len(dataloader), velocity_mse_sum/len(dataloader))
 
-def decimal2binary(x):
-    mask = 2**torch.arange(2-1,-1,-1).to(x.device, x.dtype)  # 2 legs for biped
-
-    return x.unsqueeze(-1).bitwise_and(mask).ne(0).byte()
+# def decimal2binary(x):
+#     # LEFT LEG ONLY: extract bit 1 (left foot) from decimal labels
+#     # Decimal: 0=[0,0], 1=[0,1], 2=[1,0], 3=[1,1]
+#     # We only care about bit 1 (left foot)
+#     mask = torch.tensor([2], device=x.device, dtype=x.dtype)  # Bit 1 mask
+#     return x.unsqueeze(-1).bitwise_and(mask).ne(0).byte()
 
 
 
 def save_onnx_model(model, checkpoint_path, window_size):
     """
     Save ONNX version of the model for C++ deployment.
-    The model now has two outputs: contact predictions and foot velocities.
+    The model now has two outputs: 
+    - contact predictions (left leg only)
+    - foot velocity norm (left foot only)
     ONNX provides 1.5-3x faster inference than TorchScript.
+    Uses the new torch.export-based ONNX exporter (PyTorch 2.9+).
     """
     try:
         # Create ONNX path (replace .pt with .onnx)
@@ -111,31 +116,50 @@ def save_onnx_model(model, checkpoint_path, window_size):
         device = next(model.parameters()).device
         model.eval()
         
-        # Create example input (raw unnormalized data)
-        example_input = torch.randn(1, window_size, 30).to(device)
+        # Create example input (raw unnormalized data - 19 features, tau_mse computed internally)
+        example_input = torch.randn(1, window_size, 19).to(device)
         
-        # Export to ONNX (model has two outputs now)
-        torch.onnx.export(
+        # Step 1: Export to torch.export format
+        export_options = torch.onnx.ExportOptions(dynamic_shapes=True)
+        exported_program = torch.onnx.dynamo_export(
             model,
             example_input,
-            onnx_path,
-            export_params=True,
-            opset_version=18,
-            do_constant_folding=True,
-            input_names=['input'],
-            output_names=['contact_output', 'velocity_output'],
-            dynamic_axes={
-                'input': {0: 'batch_size'},
-                'contact_output': {0: 'batch_size'},
-                'velocity_output': {0: 'batch_size'}
-            },
-            verbose=False,
-            dynamo=False
+            export_options=export_options
         )
+        
+        # Step 2: Save to ONNX file
+        exported_program.save(onnx_path)
+        
         print(f"  ✓ ONNX model saved with two outputs (contact, velocity): {onnx_path}")
         
     except Exception as e:
-        print(f"  ⚠ Warning: Failed to save ONNX model: {e}")
+        # Fallback to legacy TorchScript-based export if new API fails
+        print(f"  ⚠ Warning: New ONNX export failed ({e}), trying legacy export...")
+        try:
+            onnx_path = checkpoint_path.replace('.pt', '.onnx')
+            device = next(model.parameters()).device
+            model.eval()
+            example_input = torch.randn(1, window_size, 19).to(device)
+            
+            torch.onnx.export(
+                model,
+                example_input,
+                onnx_path,
+                export_params=True,
+                opset_version=18,
+                do_constant_folding=True,
+                input_names=['input'],
+                output_names=['contact_output', 'velocity_output'],
+                dynamic_axes={
+                    'input': {0: 'batch_size'},
+                    'contact_output': {0: 'batch_size'},
+                    'velocity_output': {0: 'batch_size'}
+                },
+                verbose=False
+            )
+            print(f"  ✓ ONNX model saved (legacy) with two outputs: {onnx_path}")
+        except Exception as e2:
+            print(f"  ⚠ Warning: Failed to save ONNX model: {e2}")
 
 
 def train(model, train_dataloader, val_dataloader, config):
@@ -153,12 +177,12 @@ def train(model, train_dataloader, val_dataloader, config):
     writer.add_text("l2_lambda: ",str(config.get('l2_lambda', 0.0)))
     writer.add_text("temporal_lambda: ",str(config.get('temporal_lambda', 0.0)))
     writer.add_text("velocity_weight: ",str(config.get('velocity_weight', 1.0)))
-    writer.add_text("Huber_delta: ",str(config.get('Huber_delta', 1.0)))
+    writer.add_text("Huber_delta: ",str(config.get('Huber_delta', 0.5)))
 
 
     # Multi-task learning: contact classification + velocity regression
     contact_criterion = nn.BCEWithLogitsLoss()  # For contact detection
-    huber_delta = float(config.get('Huber_delta', 1.0))
+    huber_delta = float(config.get('Huber_delta', 0.5))
     velocity_criterion = nn.HuberLoss(delta=huber_delta, reduction='none')  # Element-wise Huber loss for masking
     optimizer = optim.Adam(model.parameters(), lr=config['init_lr'])
     
@@ -190,8 +214,8 @@ def train(model, train_dataloader, val_dataloader, config):
             contact_loss = contact_criterion(contact_output, contact_label)
             
             # Mask velocity loss by ground truth contact labels
-            # contact_label shape: (batch, 2), velocity shape: (batch, 6) -> 3 velocities per leg
-            contact_mask = contact_label.repeat_interleave(3, dim=1)  # (batch, 6)
+            # contact_label shape: (batch, 1), velocity shape: (batch, 1)
+            contact_mask = contact_label  # (batch, 1) - left leg only
             velocity_loss_elementwise = velocity_criterion(velocity_output, velocity_label)
             # Multiply by contact mask (only penalize velocities in contact)
             velocity_loss = (velocity_loss_elementwise * contact_mask).sum() / (contact_mask.sum() + 1e-8)
@@ -259,8 +283,8 @@ def train(model, train_dataloader, val_dataloader, config):
          val_loss_avg, val_velocity_mse) = compute_accuracy_and_loss(
             val_dataloader, model, contact_criterion, velocity_criterion, velocity_weight)
 
-        train_acc_per_leg_avg = (np.sum(train_acc_per_leg)/2.0)  # 2 legs for biped
-        val_acc_per_leg_avg = (np.sum(val_acc_per_leg)/2.0)  # 2 legs for biped
+        train_acc_per_leg_avg = train_acc_per_leg[0]  # Only 1 leg (left)
+        val_acc_per_leg_avg = val_acc_per_leg[0]  # Only 1 leg (left)
 
         # log down info in tensorboard
         writer.add_scalar('training loss', train_loss_avg, epoch)
@@ -268,8 +292,7 @@ def train(model, train_dataloader, val_dataloader, config):
         writer.add_scalar('training velocity loss', train_velocity_loss_avg, epoch)
         writer.add_scalar('training velocity MSE', train_velocity_mse, epoch)
         writer.add_scalar('training accuracy', train_acc, epoch)
-        writer.add_scalar('training acc leg0', train_acc_per_leg[0], epoch)
-        writer.add_scalar('training acc leg1', train_acc_per_leg[1], epoch)
+        writer.add_scalar('training acc left leg', train_acc_per_leg[0], epoch)
         writer.add_scalar('training acc leg avg', train_acc_per_leg_avg, epoch)
         
         writer.add_scalar('validation loss', val_loss_avg, epoch)
@@ -277,8 +300,7 @@ def train(model, train_dataloader, val_dataloader, config):
         writer.add_scalar('validation velocity loss', val_velocity_loss_avg, epoch)
         writer.add_scalar('validation velocity MSE', val_velocity_mse, epoch)
         writer.add_scalar('validation accuracy', val_acc, epoch)
-        writer.add_scalar('validation acc leg0', val_acc_per_leg[0], epoch)
-        writer.add_scalar('validation acc leg1', val_acc_per_leg[1], epoch)
+        writer.add_scalar('validation acc left leg', val_acc_per_leg[0], epoch)
         writer.add_scalar('validation acc leg avg', val_acc_per_leg_avg, epoch)
 
         # if we achieve best val acc, save the model.
@@ -335,10 +357,8 @@ def train(model, train_dataloader, val_dataloader, config):
 
         print("Finished epoch %d / %d, training acc: %.4f, validation acc: %.4f" %\
             (epoch, config['num_epoch'], train_acc, val_acc)) 
-        print("train leg0 acc: %.4f, train leg1 acc: %.4f, train leg acc avg: %.4f" %\
-            (train_acc_per_leg[0],train_acc_per_leg[1],train_acc_per_leg_avg))    
-        print("val leg0 acc: %.4f, val leg1 acc: %.4f, val leg acc avg: %.4f" %\
-            (val_acc_per_leg[0],val_acc_per_leg[1],val_acc_per_leg_avg))
+        print("train left leg acc: %.4f, val left leg acc: %.4f" %\
+            (train_acc_per_leg[0], val_acc_per_leg[0]))    
         print("train velocity MSE: %.6f, val velocity MSE: %.6f" %\
             (train_velocity_mse, val_velocity_mse))
     
@@ -420,6 +440,39 @@ def main():
     train_dataset = Subset(all_dataset, train_indices)
     val_dataset = Subset(all_dataset, val_indices)
     
+    # Compute global normalization statistics from TRAINING data only
+    # Extract only training samples to compute unbiased statistics
+    train_data_samples = all_dataset.data[train_indices]  # Get only training data points (19 features)
+    
+    # IMPORTANT: Compute tau_mse from RAW data before normalization
+    # This preserves the physical meaning of mean squared torque
+    tau_est_train = train_data_samples[:, 12:18]  # Extract tau_est: (num_train_samples, 6)
+    tau_mse_train = torch.mean(tau_est_train ** 2, dim=1, keepdim=True)  # (num_train_samples, 1)
+    
+    # Concatenate tau_mse to training data
+    train_data_with_tau_mse = torch.cat([train_data_samples, tau_mse_train], dim=1)  # (num_train_samples, 20)
+    # Compute 1st and 99th percentiles for each feature to clip outliers
+    percentile_1 = torch.quantile(train_data_with_tau_mse, 0.01, dim=0, keepdim=True)  # (1, 20)
+    percentile_99 = torch.quantile(train_data_with_tau_mse, 0.99, dim=0, keepdim=True)  # (1, 20)
+    
+    # Clip training data to percentile bounds
+    train_data_clipped = torch.clamp(train_data_with_tau_mse, min=percentile_1, max=percentile_99)
+    
+    # Compute mean and std per feature from clipped data (20 features now: original 19 + tau_mse)
+    global_mean = train_data_clipped.mean(dim=0, keepdim=True).unsqueeze(0)  # Shape: (1, 1, 20)
+    global_std = train_data_clipped.std(dim=0, keepdim=True).unsqueeze(0)    # Shape: (1, 1, 20)
+    
+    # Handle features with zero std (constant values) to avoid division by zero
+    global_std = torch.where(global_std == 0, torch.ones_like(global_std), global_std)
+    
+    print(f"\nGlobal normalization statistics computed from clipped training data:")
+    print(f"  Clipped to [1st, 99th] percentiles per feature")
+    print(f"  Mean shape: {global_mean.shape}")
+    print(f"  Std shape: {global_std.shape}")
+    print(f"  Mean range: [{global_mean.min().item():.4f}, {global_mean.max().item():.4f}]")
+    print(f"  Std range: [{global_std.min().item():.4f}, {global_std.max().item():.4f}]")
+    print(f"  tau_mse mean: {global_mean[0, 0, 19].item():.4f}, std: {global_std[0, 0, 19].item():.4f}")
+    
     # Create dataloaders
     # Train: shuffle each epoch for better training (but with reproducible seed from config)
     # Val: don't shuffle - we want consistent validation across epochs
@@ -428,10 +481,10 @@ def main():
     val_dataloader = DataLoader(dataset=val_dataset, batch_size=config['batch_size'],\
                                 shuffle=False)
 
-    # init network with built-in normalization
+    # init network with built-in normalization using global training statistics
     base_model = contact_cnn(window_size=config['window_size'])
     from contact_cnn import ContactCNNWithNormalization
-    model = ContactCNNWithNormalization(base_model)
+    model = ContactCNNWithNormalization(base_model, global_mean=global_mean, global_std=global_std)
     model = model.to(device)
 
     train(model, train_dataloader, val_dataloader, config)

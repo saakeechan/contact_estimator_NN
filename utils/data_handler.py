@@ -16,13 +16,13 @@ class contact_dataset(Dataset):
         """
         At initialization we load .npy files for data, label, and foot velocities.
         self.data: a 2D array of all data points. rows are time axis, columns are features. (num_data, num_features)
-        self.label: a vector of the corresponding contact states (in decimal). (num_data, 1)
-        self.foot_velocity: a 2D array of foot velocities in world frame. (num_data, 6) - 3D per foot
+        self.label: a vector of left foot contact states (0 or 1). (num_data, 1)
+        self.foot_velocity: left foot velocity magnitude (norm). (num_data, 1)
         """
         data = np.load(data_path)
         label = np.load(label_path)
         
-        # Load foot velocities (6D: left xyz + right xyz)
+        # Load foot velocities - LEFT FOOT NORM ONLY
         velocity_path = data_path.replace('_data.npy', '_foot_velocities.npy')
         if not os.path.exists(velocity_path):
             velocity_path = data_path.replace('.npy', '_foot_velocities.npy')
@@ -32,18 +32,15 @@ class contact_dataset(Dataset):
             print(f"Loaded foot velocities from {velocity_path}")
         else:
             print(f"Warning: No foot velocity file found. Creating zero velocities.")
-            foot_velocity = np.zeros((len(data), 6), dtype=np.float32)
+            foot_velocity = np.zeros((len(data), 1), dtype=np.float32)
         
         self.window_size = window_size
         self.data = torch.from_numpy(data).type('torch.FloatTensor').to(device)
         self.foot_velocity = torch.from_numpy(foot_velocity).type('torch.FloatTensor').to(device)
         
-        # Convert decimal labels to binary format for BCEWithLogitsLoss
-        # Decimal: 0=[0,0], 1=[0,1], 2=[1,0], 3=[1,1]
-        label_int = label.astype(np.int32)  # Convert to integer for bitwise operations
-        label_binary = np.zeros((len(label), 2), dtype=np.float32)
-        label_binary[:, 0] = (label_int & 2) >> 1  # Left foot (bit 1)
-        label_binary[:, 1] = label_int & 1          # Right foot (bit 0)
+        # Labels are already left foot contact only (0 or 1) from csv2numpy.py
+        # No need for bit manipulation - use directly for BCEWithLogitsLoss
+        label_binary = label.astype(np.float32).reshape(-1, 1)  # Shape: (num_data, 1)
         self.label = torch.from_numpy(label_binary).type('torch.FloatTensor').to(device)
         
         # Load run boundaries to prevent window bleeding across different runs
@@ -96,8 +93,8 @@ class contact_dataset(Dataset):
         
         Output: 
         - data: (batch_size, window_size, num_features)
-        - label: (batch_size, 2) - binary contact per leg
-        - velocity: (batch_size, 6) - 3D velocity per foot
+        - label: (batch_size, 1) - binary contact for left leg only
+        - velocity: (batch_size, 1) - norm (magnitude) of left foot velocity
         """
         if torch.is_tensor(idx):
             idx = idx.tolist()
@@ -105,8 +102,11 @@ class contact_dataset(Dataset):
         # Map from valid index to actual data index
         real_idx = self.valid_indices[idx]
         
-        # Return raw unnormalized data (normalization now done inside the model)
+        # Return raw unnormalized data (normalization and feature engineering done inside the model)
+        # Feature layout (37 features): q(0-5) + qd(6-11) + acc(12-14) + omega(15-17) + p(18-20) + v(21-23) + tau_est(24-29) + tau_cmd(30-35) + cmd_vel(36)
+        # Note: tau_mse is calculated from tau_est inside the model's forward pass
         this_data = self.data[real_idx:real_idx+self.window_size,:]
+        
         this_label = self.label[real_idx+self.window_size-1]
         this_velocity = self.foot_velocity[real_idx+self.window_size-1]
             

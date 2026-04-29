@@ -9,12 +9,12 @@ class contact_cnn(nn.Module):
         super(contact_cnn, self).__init__()
         self.block1 = nn.Sequential(
             # First convolutional layer
-            # Takes 67 input feature channels (q, qd, IMU, p, v, tau, tau_cmd, cmd_vel)
+            # Takes 20 input feature channels (q, qd, IMU, p, v, tau_est, tau_cmd, cmd_vel, tau_mse)
             # Produces 64 learned feature maps (filters)
             # kernel_size=3: each filter looks at 3 consecutive timesteps
             # stride=1: moves one timestep at a time
             # padding=1: adds 1 zero on each side to maintain length
-            nn.Conv1d(in_channels=18,      # Input: 18 sensor features (IMU, p, v, tau)
+            nn.Conv1d(in_channels=20,      # Input: 20 features after τ_mse augmentation (19 base + 1 computed in forward)
                     out_channels=64,      # Output: 64 learned patterns
                     kernel_size=3,        # Look at 3 timesteps at once
                     stride=1,             # Slide by 1 timestep
@@ -83,13 +83,13 @@ class contact_cnn(nn.Module):
         fc_input_size = (window_size // 4) * 128
         
         # Contact detection branch (classification)
-        self.fc_contact = nn.Sequential(
+        self.fc_contact_left = nn.Sequential(
             nn.Linear(in_features=fc_input_size,
-                      out_features=2048),
+                      out_features=5096),  # Intermediate layer for contact features
             nn.ReLU(),
             nn.Dropout(p=0.5),
-            nn.Linear(in_features=2048,
-                      out_features=512),
+            nn.Linear(in_features=5096,
+                      out_features=512),  # Intermediate layer for contact features
             nn.ReLU(),
             nn.Dropout(p=0.5),
             nn.Linear(in_features=512,
@@ -97,28 +97,31 @@ class contact_cnn(nn.Module):
         )
         
         # Foot velocity regression branch (parallel to contact branch)
-        self.fc_velocity = nn.Sequential(
+        self.fc_velocity_left = nn.Sequential(
             nn.Linear(in_features=fc_input_size,
-                      out_features=2048),
+                      out_features=4),  # Intermediate layer for velocity features
             nn.ReLU(),
             nn.Dropout(p=0.5),
-            nn.Linear(in_features=2048,
-                      out_features=512),
+            nn.Linear(in_features=4,
+                      out_features=2),  # Intermediate layer for velocity features
             nn.ReLU(),
             nn.Dropout(p=0.5),
-            nn.Linear(in_features=512,
-                      out_features=1),  # 1 output: 1D velocity for left foot (normalized)
+            nn.Linear(in_features=2,
+                      out_features=1),  # 1 output: velocity norm (magnitude) for left foot
         )
 
     def forward(self, x):
+        # x shape: (batch_size, window_size, 20) - includes tau_mse
+        # Feature layout: acc(0-2) + omega(3-5) + p(6-8) + v(9-11) + tau_est(12-17) + cmd_vel(18) + tau_mse(19)
+        
         x = x.permute(0,2,1)
         block1_out = self.block1(x)
         block2_out = self.block2(block1_out)
         block2_out_reshape = block2_out.view(block2_out.shape[0], -1)
         
-        # Two parallel outputs
-        contact_out = self.fc_contact(block2_out_reshape)
-        velocity_out = self.fc_velocity(block2_out_reshape)
+        # Two parallel outputs: contact classification and velocity regression
+        contact_out = self.fc_contact_left(block2_out_reshape)  # Left leg contact (binary)
+        velocity_out = self.fc_velocity_left(block2_out_reshape)  # Left foot velocity norm
         
         return contact_out, velocity_out
 
@@ -565,82 +568,75 @@ class contact_2d_cnn(nn.Module):
 
 class ContactCNNWithNormalization(nn.Module):
     """
-    Wrapper class that adds per-window normalization to the contact_cnn model.
+    Wrapper class that embeds global normalization statistics into the model.
     This wrapper can be exported to ONNX so normalization is done inside the model
     during inference, eliminating the need to normalize data externally in C++.
     
-    Normalization: z-score normalization per window
-    - Compute mean and std along time dimension (dim=1) per feature
-    - Normalize: (x - mean) / std
-    - Handle std == 0 by replacing with 1 to avoid division by zero
+    Normalization strategy: Global z-score normalization
+    - Uses mean and std computed from training data (stored as buffers)
+    - Normalize: (x - global_mean) / (global_std + eps)
+    - Statistics are saved with the model and exported to ONNX
     
-    Input shape: (batch_size, window_size, num_features)
-    Output shape: (batch_size, 4) for 4 contact combinations
-
-    // Number of features per timestep (q, qd, acc, omega, p, v, tau)
+    Input shape: (batch_size, window_size, 37) - RAW unnormalized data
+    Output shape: (batch_size, 1) for contact + (batch_size, 1) for velocity
+    
+    Feature layout (19 features input, 20 after tau_mse):
+        acc: 0-2 (3) - IMU acceleration
+        omega: 3-5 (3) - IMU angular velocity
+        p: 6-8 (3) - foot position
+        v: 9-11 (3) - foot velocity
+        tau_est: 12-17 (6) - joint torques estimated
+        cmd_vel: 18 (1) - command velocity
+        tau_mse: 19 (1) - computed from RAW tau_est BEFORE normalization
     """
-    def __init__(self, base_model, eps=1e-8):
+    def __init__(self, base_model, global_mean=None, global_std=None, eps=1e-8):
+        """
+        Args:
+            base_model: The contact_cnn model to wrap
+            global_mean: Tensor of shape (1, 1, 20) with training data mean per feature (including tau_mse)
+            global_std: Tensor of shape (1, 1, 20) with training data std per feature (including tau_mse)
+            eps: Small constant to prevent division by zero
+        """
         super(ContactCNNWithNormalization, self).__init__()
         self.base_model = base_model
-        self.eps = eps  # Small constant to prevent division by zero
+        self.eps = eps
+        
+        # Register as buffers (not parameters - won't be trained, but saved with model and exported to ONNX)
+        if global_mean is not None:
+            self.register_buffer('global_mean', global_mean)
+        else:
+            # Fallback: no normalization if stats not provided
+            self.register_buffer('global_mean', torch.zeros(1, 1, 20))
+            
+        if global_std is not None:
+            self.register_buffer('global_std', global_std)
+        else:
+            # Fallback: no normalization if stats not provided
+            self.register_buffer('global_std', torch.ones(1, 1, 20))
         
     def forward(self, x):
-        """Same input and output as base_model, but with normalization applied to IMU features before passing through the model.
+        """
+        Apply feature engineering, then normalization, then pass through base model.
+        
         Args:
-            x: Raw input data (batch_size, window_size, num_features)
-               NOT normalized
+            x: Raw input data (batch_size, window_size, 19) - NOT normalized
         
         Returns:
-            Output predictions (batch_size, 4)
-        
-        Feature layout (43 total):
-            acc: 0-2 (3 features) - IMU acceleration
-            omega: 3-5 (3 features) - IMU angular velocity
-            p: 6-11 (6 features) - position
-            v: 12-17 (6 features) - velocity
-            tau: 18-29 (12 features) - joint torques
-            tau_cmd: 30-41 (12 features) - joint torque commands
-            cmd_vel: 42 (1 feature) - command velocity
+            contact_out: (batch_size, 1) - contact prediction logits
+            velocity_out: (batch_size, 1) - velocity prediction
         """
-        # Split features into groups
-        # x_imu = x[:, :, :6]           # acc and omega (to be normalized)
-        # x_others = x[:, :, 6:]          # p, v, tau (not normalized)
+        # STEP 1: Compute tau_mse from RAW tau_est (before normalization)
+        # This preserves the physical meaning of mean squared torque
+        tau_est = x[:, :, 12:18]  # Extract raw tau_est: (batch_size, window_size, 6)
+        tau_mse = torch.mean(tau_est ** 2, dim=2, keepdim=True)  # (batch_size, window_size, 1)
         
-        # # Normalize only IMU features (acc and omega)
-        # # Compute mean and std per feature across time dimension
-        # mean_imu = torch.mean(x_imu, dim=1, keepdim=True)  # (batch, 1, 6)
-        # std_imu = torch.std(x_imu, dim=1, keepdim=True)    # (batch, 1, 6)
+        # Concatenate tau_mse as 20th feature
+        x_with_tau_mse = torch.cat([x, tau_mse], dim=2)  # (batch_size, window_size, 20)
         
-        # # Replace zero std with 1 to avoid NaN (prevents division by zero)
-        # std_imu = torch.where(std_imu == 0, torch.ones_like(std_imu), std_imu)
+        # STEP 2: Apply global z-score normalization to ALL 20 features
+        # These statistics are embedded in the model and exported to ONNX
+        x_normalized = (x_with_tau_mse - self.global_mean) / (self.global_std + self.eps)
         
-        # # Normalize IMU features: z-score normalization
-        # x_imu_normalized = (x_imu - mean_imu) / std_imu
-        
-        # Concatenate: keep q, qd, others unchanged; replace IMU with normalized
-        # x_normalized = torch.cat([x_imu, x_others], dim=2)
-        
-        # Pass normalized data through the base model
-        return self.base_model(x)
-    
-        #     # Split features into groups
-        # x_q_qd = x[:, :, 0:24]           # q and qd (not normalized)
-        # x_imu = x[:, :, 24:30]           # acc and omega (to be normalized)
-        # x_others = x[:, :, 30:]          # p, v, tau, tau_cmd, cmd_vel (not normalized)
-        
-        # # Normalize only IMU features (acc and omega)
-        # # Compute mean and std per feature across time dimension
-        # mean_imu = torch.mean(x_imu, dim=1, keepdim=True)  # (batch, 1, 6)
-        # std_imu = torch.std(x_imu, dim=1, keepdim=True)    # (batch, 1, 6)
-        
-        # # Replace zero std with 1 to avoid NaN (prevents division by zero)
-        # std_imu = torch.where(std_imu == 0, torch.ones_like(std_imu), std_imu)
-        
-        # # Normalize IMU features: z-score normalization
-        # x_imu_normalized = (x_imu - mean_imu) / std_imu
-        
-        # # Concatenate: keep q, qd, others unchanged; replace IMU with normalized
-        # x_normalized = torch.cat([x_q_qd, x_imu_normalized, x_others], dim=2)
-        
-        # # Pass normalized data through the base model
-        # return self.base_model(x_normalized)
+        # STEP 3: Pass normalized data through the base model
+        return self.base_model(x_normalized)
+

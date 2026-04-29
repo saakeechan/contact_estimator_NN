@@ -20,42 +20,39 @@ def compute_confusion_mat(bin_contact_pred_arr, bin_contact_gt_arr):
     
     confusion_mat = {}
     
-    # For biped: only 2 legs (leg 0 and leg 1)
-    confusion_mat['leg_0'] = confusion_matrix(bin_contact_gt_arr[:,0],bin_contact_pred_arr[:,0], labels=[0,1])
-    confusion_mat['leg_1'] = confusion_matrix(bin_contact_gt_arr[:,1],bin_contact_pred_arr[:,1], labels=[0,1])
-    confusion_mat['total'] = confusion_mat['leg_0'] + confusion_mat['leg_1']
+    # Left leg only
+    confusion_mat['left_leg'] = confusion_matrix(bin_contact_gt_arr[:,0],bin_contact_pred_arr[:,0], labels=[0,1])
+    confusion_mat['total'] = confusion_mat['left_leg']
     confusion_mat['total_ratio'] = confusion_mat['total'] / np.sum(confusion_mat['total'])
     
-    # false negative and false postivie rate
+    # false negative and false positive rate
     # false negative = FN/P; false positive = FP/N
     fn_rate = {}
     fp_rate = {}
 
-    fn_rate['leg_0'] = confusion_mat['leg_0'][0,1] / (confusion_mat['leg_0'][0,0]+confusion_mat['leg_0'][0,1])
-    fn_rate['leg_1'] = confusion_mat['leg_1'][0,1] / (confusion_mat['leg_1'][0,0]+confusion_mat['leg_1'][0,1])
+    fn_rate['left_leg'] = confusion_mat['left_leg'][0,1] / (confusion_mat['left_leg'][0,0]+confusion_mat['left_leg'][0,1])
     fn_rate['total'] = confusion_mat['total'][0,1] / (confusion_mat['total'][0,0]+confusion_mat['total'][0,1])
 
-    fp_rate['leg_0'] = confusion_mat['leg_0'][1,0] / (confusion_mat['leg_0'][1,0] + confusion_mat['leg_0'][1,1]) 
-    fp_rate['leg_1'] = confusion_mat['leg_1'][1,0] / (confusion_mat['leg_1'][1,0] + confusion_mat['leg_1'][1,1])
+    fp_rate['left_leg'] = confusion_mat['left_leg'][1,0] / (confusion_mat['left_leg'][1,0] + confusion_mat['left_leg'][1,1]) 
     fp_rate['total'] = confusion_mat['total'][1,0] / (confusion_mat['total'][1,0] + confusion_mat['total'][1,1])
 
     return confusion_mat, fn_rate, fp_rate
 
 
 def compute_precision(bin_pred_arr, bin_gt_arr):
-    """Compute precision for per-leg binary classification."""
+    """Compute precision for left leg binary classification."""
     precision_of_all_legs = precision_score(bin_gt_arr.flatten(),bin_pred_arr.flatten())
     precision_of_legs = []
-    for i in range(2):  # 2 legs for biped
+    for i in range(1):  # 1 leg (left)
         precision_of_legs.append(precision_score(bin_gt_arr[:,i],bin_pred_arr[:,i]))
 
     return precision_of_legs, precision_of_all_legs
 
 def compute_jaccard(bin_pred_arr, bin_gt_arr):
-    """Compute Jaccard score for per-leg binary classification."""
+    """Compute Jaccard score for left leg binary classification."""
     jaccard_of_all_legs = jaccard_score(bin_gt_arr.flatten(),bin_pred_arr.flatten())
     jaccard_of_legs = []
-    for i in range(2):  # 2 legs for biped
+    for i in range(1):  # 1 leg (left)
         jaccard_of_legs.append(jaccard_score(bin_gt_arr[:,i],bin_pred_arr[:,i]))
 
     return jaccard_of_legs, jaccard_of_all_legs
@@ -65,17 +62,17 @@ def compute_accuracy(dataloader, model):
 
     num_correct = 0
     num_data = 0
-    correct_per_leg = np.zeros(2)  # 2 legs for biped
-    bin_pred_arr = np.zeros((0,2))  # 2 legs for biped
-    bin_gt_arr = np.zeros((0,2))  # 2 legs for biped
-    velocity_pred_arr = np.zeros((0,6))  # 6D foot velocities
-    velocity_gt_arr = np.zeros((0,6))
+    correct_per_leg = np.zeros(1)  # 1 leg for biped
+    bin_pred_arr = np.zeros((0,1))  # 1 leg for biped
+    bin_gt_arr = np.zeros((0,1))  # 1 leg for biped
+    velocity_pred_arr = np.zeros((0,1))  # 1D foot velocities
+    velocity_gt_arr = np.zeros((0,1))  # 1D foot velocities
     
     with torch.no_grad():
         for sample in tqdm(dataloader):
             input_data = sample['data']
-            gt_label = sample['label']  # Shape: (batch, 2) - binary labels
-            gt_velocity = sample['velocity']  # Shape: (batch, 6) - foot velocities
+            gt_label = sample['label']  # Shape: (batch, 1) - binary labels
+            gt_velocity = sample['velocity']  # Shape: (batch, 1) - foot velocities
 
             contact_output, velocity_output = model(input_data)  # Two outputs
             contact_prediction = (torch.sigmoid(contact_output) > 0.5).float()  # Binary predictions
@@ -85,11 +82,11 @@ def compute_accuracy(dataloader, model):
             velocity_pred_arr = np.vstack((velocity_pred_arr, velocity_output.cpu().numpy()))
             velocity_gt_arr = np.vstack((velocity_gt_arr, gt_velocity.cpu().numpy()))
 
-            # Per-leg accuracy
+            # Per-leg accuracy (just left leg)
             correct_per_leg += (contact_prediction == gt_label).sum(axis=0).cpu().numpy()
             num_data += input_data.size(0)
-            # Overall accuracy (both legs correct)
-            num_correct += ((contact_prediction == gt_label).all(dim=1)).sum().item()
+            # Overall accuracy (same as per-leg since only 1 leg)
+            num_correct += (contact_prediction == gt_label).sum().item()
 
     # Compute velocity metrics
     velocity_mse = np.mean((velocity_pred_arr - velocity_gt_arr) ** 2)
@@ -158,65 +155,51 @@ def main():
     jaccard_of_legs, jaccard_of_all_legs = compute_jaccard(bin_pred_arr, bin_gt_arr)
     confusion_mat, fn_rate, fp_rate = compute_confusion_mat(bin_pred_arr, bin_gt_arr)
 
-    print("Test accuracy (both legs correct): %.4f" % test_acc)
-    print("Accuracy of leg 0 (left): %.4f" % acc_per_leg[0])
-    print("Accuracy of leg 1 (right): %.4f" % acc_per_leg[1])
-    print("Average leg accuracy: %.4f" % (np.sum(acc_per_leg)/2.0))  # 2 legs for biped
+    print("Test accuracy (left leg): %.4f" % test_acc)
+    print("Accuracy of left leg: %.4f" % acc_per_leg[0])
+    print("Average leg accuracy: %.4f" % acc_per_leg[0])  # Same as left leg since only 1 leg
     print("---------------")
     print("Foot Velocity MSE: %.6f" % velocity_mse)
     print("Foot Velocity MAE: %.6f" % velocity_mae)
     print("---------------")
-    print("Precision of leg 0 (left): %.4f" % precision_of_legs[0])
-    print("Precision of leg 1 (right): %.4f" % precision_of_legs[1])
+    print("Precision of left leg: %.4f" % precision_of_legs[0])
     print("Precision of all legs: %.4f" % precision_of_all_legs)
     print("---------------")
-    print("Jaccard of leg 0 (left): %.4f" % jaccard_of_legs[0])
-    print("Jaccard of leg 1 (right): %.4f" % jaccard_of_legs[1])
+    print("Jaccard of left leg: %.4f" % jaccard_of_legs[0])
     print("Jaccard of all legs: %.4f" % jaccard_of_all_legs)
-    print("jaccard of leg 0 is: %.4f" % jaccard_of_legs[0])
-    print("jaccard of leg 1 is: %.4f" % jaccard_of_legs[1])
+    print("jaccard of left leg is: %.4f" % jaccard_of_legs[0])
     print("jaccard of all legs is: %.4f" % jaccard_of_all_legs)
     print("---------------")
-    print("confusion matrix of leg 0 is: ")
-    print(confusion_mat['leg_0'])
-    print("confusion matrix of leg 1 is: ")
-    print(confusion_mat['leg_1'])
+    print("confusion matrix of left leg is: ")
+    print(confusion_mat['left_leg'])
     print("confusion matrix sum is: ")
     print(confusion_mat['total'])
     print("confusion matrix ratio: ")
     print(confusion_mat['total_ratio'])
     print("---------------")
-    print("false negative rate of leg 0 is: %.4f" % fn_rate['leg_0'])
-    print("false negative rate of leg 1 is: %.4f" % fn_rate['leg_1'])
+    print("false negative rate of left leg is: %.4f" % fn_rate['left_leg'])
     print("AVG false negative rate is: %.4f" % fn_rate['total'])
     print("---------------")
-    print("false positive rate of leg 0 is: %.4f" % fp_rate['leg_0'])
-    print("false positive rate of leg 1 is: %.4f" % fp_rate['leg_1'])
+    print("false positive rate of left leg is: %.4f" % fp_rate['left_leg'])
     print("AVG false positive rate is: %.4f" % fp_rate['total'])
     print("---------------")
 
     print(test_acc)
     print(acc_per_leg[0])
-    print(acc_per_leg[1])
-    print((np.sum(acc_per_leg)/2.0))  # 2 legs for biped
+    print(acc_per_leg[0])  # Same as left leg since only 1 leg
     print("---------------")
     print(precision_of_legs[0])
-    print(precision_of_legs[1])
     print("---------------")
     print(precision_of_legs[0])
-    print(precision_of_legs[1])
     print(precision_of_all_legs)
     print("---------------")
     print(jaccard_of_legs[0])
-    print(jaccard_of_legs[1])
     print(jaccard_of_all_legs)
     print("---------------")
-    print(fn_rate['leg_0'])
-    print(fn_rate['leg_1'])
+    print(fn_rate['left_leg'])
     print(fn_rate['total'])
     print("---------------")
-    print(fp_rate['leg_0'])
-    print(fp_rate['leg_1'])
+    print(fp_rate['left_leg'])
     print(fp_rate['total'])
 
 if __name__ == '__main__':
