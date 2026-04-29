@@ -25,12 +25,12 @@ def compute_accuracy(dataloader, model):
 
     num_correct = 0
     num_data = 0
-    correct_per_leg = np.zeros(2)  # 2 legs for biped
+    correct_per_leg = np.zeros(1)  # 1 leg for biped
     velocity_mse_sum = 0.0  # Track velocity prediction error
     
     for sample in tqdm(dataloader):
         input_data = sample['data']
-        gt_label = sample['label']  # Shape: (batch, 2) - binary labels
+        gt_label = sample['label']  # Shape: (batch, 1) - binary labels
         gt_velocity = sample['velocity']  # Shape: (batch, 6) - foot velocities
 
         contact_output, velocity_output = model(input_data)  # Two outputs now
@@ -55,12 +55,12 @@ def compute_accuracy_and_loss(dataloader, model, contact_criterion, velocity_cri
     velocity_loss_sum = 0
     total_loss_sum = 0
     velocity_mse_sum = 0.0
-    correct_per_leg = np.zeros(2)  # 2 legs for biped
+    correct_per_leg = np.zeros(1)  # 1 leg for biped
     with torch.no_grad():
         for sample in tqdm(dataloader):
             input_data = sample['data']
-            gt_label = sample['label']  # Shape: (batch, 2) - binary labels
-            gt_velocity = sample['velocity']  # Shape: (batch, 6) - foot velocities
+            gt_label = sample['label']  # Shape: (batch, 1) - binary labels
+            gt_velocity = sample['velocity']  # Shape: (batch, 1) - foot velocities
 
             contact_output, velocity_output = model(input_data)  # Two outputs
             contact_prediction = (torch.sigmoid(contact_output) > 0.5).float()  # Binary predictions
@@ -68,8 +68,8 @@ def compute_accuracy_and_loss(dataloader, model, contact_criterion, velocity_cri
             contact_loss = contact_criterion(contact_output, gt_label)
             
             # Mask velocity loss by ground truth contact labels
-            # gt_label shape: (batch, 2), velocity shape: (batch, 6) -> 3 velocities per leg
-            contact_mask = gt_label.repeat_interleave(3, dim=1)  # (batch, 6)
+            # gt_label shape: (batch, 1), velocity shape: (batch, 1) -> 1 velocity per leg
+            contact_mask = gt_label  # (batch, 1)
             velocity_loss_elementwise = velocity_criterion(velocity_output, gt_velocity)
             # Multiply by contact mask (only penalize velocities in contact)
             velocity_loss = (velocity_loss_elementwise * contact_mask).sum() / (contact_mask.sum() + 1e-8)

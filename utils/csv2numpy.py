@@ -77,7 +77,7 @@ def csv2numpy_one_seq(data_pth, save_pth):
         contacts = df[['lfoot-contact']].values.astype(int)
         
         # Concatenate data: acc(3) + omega(3) + p(3) + v(3) + tau(12) + tau_cmd(12) + cmd_vel(1) = 37 features
-        data = np.concatenate((imu_acc, imu_omega, p, v, tau_est, tau_cmd, cmd_vel), axis=1)
+        data = np.concatenate((imu_acc, imu_omega, p, v, tau_est), axis=1)
         
         # Convert binary contact labels to decimal
         label = binary2decimal(contacts).reshape((-1, 1))
@@ -111,10 +111,10 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
     - all_data_boundaries.npy: indices marking end of each run (to prevent window bleeding)
     """
     
-    num_features = 30  # acc(3) + omega(3) + p(6) + v(6) + tau(12) + tau_cmd(12) + cmd_vel(1)
+    num_features = 18  # acc(3) + omega(3) + p(3) + v(3) + tau(6)
     all_data = np.zeros((0, num_features))
     all_labels = np.zeros((0, 1))
-    all_foot_velocities = np.zeros((0, 6))  # World frame foot velocities: left(3) + right(3)
+    all_foot_velocities = np.zeros((0, 1))  # World frame foot velocities: left(1) - magnitude
     
     # Track boundaries between different runs to prevent window bleeding
     all_boundaries = []
@@ -122,9 +122,7 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
     # Define column names for data extraction
     joint_names = [
         'left_hip_pitch_joint', 'left_hip_roll_joint', 'left_hip_yaw_joint',
-        'left_knee_joint', 'left_ankle_pitch_joint', 'left_ankle_roll_joint',
-        'right_hip_pitch_joint', 'right_hip_roll_joint', 'right_hip_yaw_joint',
-        'right_knee_joint', 'right_ankle_pitch_joint', 'right_ankle_roll_joint'
+        'left_knee_joint', 'left_ankle_pitch_joint', 'left_ankle_roll_joint'
     ]
     
     # Process all CSV files in the folder
@@ -170,12 +168,10 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
             imu_omega = df_run[['gyro_body_x', 'gyro_body_y', 'gyro_body_z']].values
             
             # Extract foot positions from FK
-            p = df_run[['fk_left_foot_pos_x', 'fk_left_foot_pos_y', 'fk_left_foot_pos_z',
-                    'fk_right_foot_pos_x', 'fk_right_foot_pos_y', 'fk_right_foot_pos_z']].values
+            p = df_run[['fk_left_foot_pos_x', 'fk_left_foot_pos_y', 'fk_left_foot_pos_z']].values
             
             # Extract foot velocities from FK
-            v = df_run[['fk_left_foot_vel_x', 'fk_left_foot_vel_y', 'fk_left_foot_vel_z',
-                    'fk_right_foot_vel_x', 'fk_right_foot_vel_y', 'fk_right_foot_vel_z']].values
+            v = df_run[['fk_left_foot_vel_x', 'fk_left_foot_vel_y', 'fk_left_foot_vel_z']].values
             
             # Extract joint torques (tau_est) - 12 values
             tau_cols = ['joint_torque_' + j for j in joint_names]
@@ -187,16 +183,15 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
             # # Extract command velocity - 1 value
             # cmd_vel = df_run[['cmd_vel_x']].values
             
-            # Extract contact labels - binary (2 values)
-            contacts = df_run[['lfoot-contact', 'rfoot-contact']].values.astype(int)
+            # Extract contact labels - binary (1 value)
+            contacts = df_run[['lfoot-contact']].values.astype(int)
 
             # Calculate foot velocity in world frame by numerical differentiation
-            foot_position_world = ['lfoot_pos_x', 'lfoot_pos_y', 'lfoot_pos_z', 
-                                   'rfoot_pos_x', 'rfoot_pos_y', 'rfoot_pos_z']
-            foot_velocity_world = np.diff(df_run[foot_position_world].values, axis=0) / \
-                                  np.diff(df_run['timestamp'].values.reshape(-1, 1), axis=0)
+            foot_position_world = ['lfoot_pos_x', 'lfoot_pos_y', 'lfoot_pos_z']
+            foot_velocity_world = np.diff(df_run[foot_position_world].values, axis=0) / np.diff(df_run['timestamp'].values.reshape(-1, 1), axis=0)  # Numerical differentiation
             # Keep size consistent after diff by repeating last velocity
             foot_velocity_world = np.vstack((foot_velocity_world, foot_velocity_world[-1, :]))
+            foot_velocity_world_norm = np.linalg.norm(foot_velocity_world, axis=1, keepdims=True) + 1e-8  # Use magnitude of foot velocity as label (can also use full 3D velocity if desired)
             
             # Concatenate current run data: q(12) + qd(12) + acc(3) + omega(3) + p(6) + v(6) + tau(12) + tau_cmd(12) + cmd_vel(1) = 67
             # cur_data = np.concatenate((q, qd, imu_acc, imu_omega, p, v, tau_est, tau_cmd, cmd_vel), axis=1)
@@ -209,7 +204,7 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
             # Append to full dataset
             all_data = np.vstack((all_data, cur_data))
             all_labels = np.vstack((all_labels, cur_label))
-            all_foot_velocities = np.vstack((all_foot_velocities, foot_velocity_world))
+            all_foot_velocities = np.vstack((all_foot_velocities, foot_velocity_world_norm))  # Use world frame foot velocity magnitude as label
             
             # Record boundary index (end of this run in the full dataset)
             all_boundaries.append(all_data.shape[0])

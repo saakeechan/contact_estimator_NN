@@ -14,7 +14,7 @@ class contact_cnn(nn.Module):
             # kernel_size=3: each filter looks at 3 consecutive timesteps
             # stride=1: moves one timestep at a time
             # padding=1: adds 1 zero on each side to maintain length
-            nn.Conv1d(in_channels=30,      # Input: 30 sensor features (IMU, p, v, tau)
+            nn.Conv1d(in_channels=18,      # Input: 18 sensor features (IMU, p, v, tau)
                     out_channels=64,      # Output: 64 learned patterns
                     kernel_size=3,        # Look at 3 timesteps at once
                     stride=1,             # Slide by 1 timestep
@@ -93,7 +93,7 @@ class contact_cnn(nn.Module):
             nn.ReLU(),
             nn.Dropout(p=0.5),
             nn.Linear(in_features=512,
-                      out_features=2),  # 2 legs: independent binary classification
+                      out_features=1),  # 1 leg: independent binary classification
         )
         
         # Foot velocity regression branch (parallel to contact branch)
@@ -107,7 +107,7 @@ class contact_cnn(nn.Module):
             nn.ReLU(),
             nn.Dropout(p=0.5),
             nn.Linear(in_features=512,
-                      out_features=6),  # 6 outputs: 3D velocity for each foot (left xyz, right xyz)
+                      out_features=1),  # 1 output: 1D velocity for left foot (normalized)
         )
 
     def forward(self, x):
@@ -603,25 +603,25 @@ class ContactCNNWithNormalization(nn.Module):
             cmd_vel: 42 (1 feature) - command velocity
         """
         # Split features into groups
-        x_imu = x[:, :, :6]           # acc and omega (to be normalized)
-        x_others = x[:, :, 6:]          # p, v, tau (not normalized)
+        # x_imu = x[:, :, :6]           # acc and omega (to be normalized)
+        # x_others = x[:, :, 6:]          # p, v, tau (not normalized)
         
-        # Normalize only IMU features (acc and omega)
-        # Compute mean and std per feature across time dimension
-        mean_imu = torch.mean(x_imu, dim=1, keepdim=True)  # (batch, 1, 6)
-        std_imu = torch.std(x_imu, dim=1, keepdim=True)    # (batch, 1, 6)
+        # # Normalize only IMU features (acc and omega)
+        # # Compute mean and std per feature across time dimension
+        # mean_imu = torch.mean(x_imu, dim=1, keepdim=True)  # (batch, 1, 6)
+        # std_imu = torch.std(x_imu, dim=1, keepdim=True)    # (batch, 1, 6)
         
-        # Replace zero std with 1 to avoid NaN (prevents division by zero)
-        std_imu = torch.where(std_imu == 0, torch.ones_like(std_imu), std_imu)
+        # # Replace zero std with 1 to avoid NaN (prevents division by zero)
+        # std_imu = torch.where(std_imu == 0, torch.ones_like(std_imu), std_imu)
         
-        # Normalize IMU features: z-score normalization
-        x_imu_normalized = (x_imu - mean_imu) / std_imu
+        # # Normalize IMU features: z-score normalization
+        # x_imu_normalized = (x_imu - mean_imu) / std_imu
         
         # Concatenate: keep q, qd, others unchanged; replace IMU with normalized
-        x_normalized = torch.cat([x_imu_normalized, x_others], dim=2)
+        # x_normalized = torch.cat([x_imu, x_others], dim=2)
         
         # Pass normalized data through the base model
-        return self.base_model(x_normalized)
+        return self.base_model(x)
     
         #     # Split features into groups
         # x_q_qd = x[:, :, 0:24]           # q and qd (not normalized)
