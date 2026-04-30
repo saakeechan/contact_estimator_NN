@@ -22,19 +22,19 @@ val_ratio: 0.15
 # Network params
 batch_size: 30
 init_lr: 0.0001
-num_epoch: 5  # Reduced for quick training with small dataset
+num_epoch: 10  # Reduced for quick training with small dataset
 
 # Elastic Net Regularization (L1 + L2)
 # Loss = BCE_loss + l1_lambda * ||w||_1 + l2_lambda * ||w||_2^2
 l1_lambda: 0     # L1 (Lasso): encourages sparsity (many weights → 0)
-l2_lambda: 0    # L2 (Ridge): encourages small weights, prevents large values
+l2_lambda: 0     # L2 (Ridge): encourages small weights, prevents large values
 # Typical values: 1e-5 to 1e-3 for each
 
 
 # Temporal Consistency Loss for Contact Continuity
 # Penalizes large changes between consecutive predictions to reduce noise/jitter
 # Loss = BCE_loss + temporal_lambda * mean(|pred[t+1] - pred[t]|)
-temporal_lambda: 0.0   # Weight for temporal smoothness penalty
+temporal_lambda: 0.00   # Weight for temporal smoothness penalty
                         # Typical: 0.01-0.1. Start with 0.05
                         # Higher values = smoother predictions but may lag real transitions
                         # Set to 0.0 to disable
@@ -42,7 +42,7 @@ temporal_lambda: 0.0   # Weight for temporal smoothness penalty
 # Multi-task Learning: Foot Velocity Regression Weight
 # Balances contact classification loss vs. velocity regression loss
 # Total Loss = contact_BCE_loss + velocity_weight * velocity_Huber_loss
-velocity_weight: 0.0    # Weight for velocity regression loss
+velocity_weight: 1.0    # Weight for velocity regression loss
                         # Typical: 0.5-2.0. Start with 1.0
                         # Higher values = prioritize velocity accuracy
                         # Lower values = prioritize contact accuracy

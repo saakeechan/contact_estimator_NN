@@ -102,9 +102,8 @@ class contact_dataset(Dataset):
         # Map from valid index to actual data index
         real_idx = self.valid_indices[idx]
         
-        # Return raw unnormalized data (normalization and feature engineering done inside the model)
-        # Feature layout (37 features): q(0-5) + qd(6-11) + acc(12-14) + omega(15-17) + p(18-20) + v(21-23) + tau_est(24-29) + tau_cmd(30-35) + cmd_vel(36)
-        # Note: tau_mse is calculated from tau_est inside the model's forward pass
+        # Return raw unnormalized data (normalization done inside the model)
+        # Feature layout (32 features): acc(0-2) + omega(3-5) + q(6-11) + qd(12-17) + p(18-20) + v(21-23) + tau_est(24-29) + tau_mse(30) + cmd_vel(31)
         this_data = self.data[real_idx:real_idx+self.window_size,:]
         
         this_label = self.label[real_idx+self.window_size-1]

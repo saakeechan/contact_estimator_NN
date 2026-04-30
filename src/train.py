@@ -106,40 +106,23 @@ def save_onnx_model(model, checkpoint_path, window_size):
     The model now has two outputs: 
     - contact predictions (left leg only)
     - foot velocity norm (left foot only)
-    ONNX provides 1.5-3x faster inference than TorchScript.
-    Uses the new torch.export-based ONNX exporter (PyTorch 2.9+).
     """
     try:
+        import warnings
+        
         # Create ONNX path (replace .pt with .onnx)
         onnx_path = checkpoint_path.replace('.pt', '.onnx')
         
         device = next(model.parameters()).device
         model.eval()
         
-        # Create example input (raw unnormalized data - 19 features, tau_mse computed internally)
-        example_input = torch.randn(1, window_size, 19).to(device)
+        # Create example input (pre-engineered data - 31 features from csv2numpy.py)
+        example_input = torch.randn(1, window_size, 32).to(device)
         
-        # Step 1: Export to torch.export format
-        export_options = torch.onnx.ExportOptions(dynamic_shapes=True)
-        exported_program = torch.onnx.dynamo_export(
-            model,
-            example_input,
-            export_options=export_options
-        )
-        
-        # Step 2: Save to ONNX file
-        exported_program.save(onnx_path)
-        
-        print(f"  ✓ ONNX model saved with two outputs (contact, velocity): {onnx_path}")
-        
-    except Exception as e:
-        # Fallback to legacy TorchScript-based export if new API fails
-        print(f"  ⚠ Warning: New ONNX export failed ({e}), trying legacy export...")
-        try:
-            onnx_path = checkpoint_path.replace('.pt', '.onnx')
-            device = next(model.parameters()).device
-            model.eval()
-            example_input = torch.randn(1, window_size, 19).to(device)
+        # Suppress warnings and use standard export
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=DeprecationWarning)
+            warnings.filterwarnings("ignore", category=UserWarning)
             
             torch.onnx.export(
                 model,
@@ -147,7 +130,6 @@ def save_onnx_model(model, checkpoint_path, window_size):
                 onnx_path,
                 export_params=True,
                 opset_version=18,
-                do_constant_folding=True,
                 input_names=['input'],
                 output_names=['contact_output', 'velocity_output'],
                 dynamic_axes={
@@ -157,9 +139,11 @@ def save_onnx_model(model, checkpoint_path, window_size):
                 },
                 verbose=False
             )
-            print(f"  ✓ ONNX model saved (legacy) with two outputs: {onnx_path}")
-        except Exception as e2:
-            print(f"  ⚠ Warning: Failed to save ONNX model: {e2}")
+        
+        print(f"  ✓ ONNX model saved with two outputs (contact, velocity): {onnx_path}")
+        
+    except Exception as e:
+        print(f"  ⚠ Warning: Failed to save ONNX model: {e}")
 
 
 def train(model, train_dataloader, val_dataloader, config):
@@ -442,36 +426,40 @@ def main():
     
     # Compute global normalization statistics from TRAINING data only
     # Extract only training samples to compute unbiased statistics
-    train_data_samples = all_dataset.data[train_indices]  # Get only training data points (19 features)
+    # Features are already engineered in csv2numpy.py (qd_norm, tau_est_norm, tau_mse, cmd_vel)
+    train_data_samples = all_dataset.data[train_indices]  # Get only training data points (32 features)
     
-    # IMPORTANT: Compute tau_mse from RAW data before normalization
-    # This preserves the physical meaning of mean squared torque
-    tau_est_train = train_data_samples[:, 12:18]  # Extract tau_est: (num_train_samples, 6)
-    tau_mse_train = torch.mean(tau_est_train ** 2, dim=1, keepdim=True)  # (num_train_samples, 1)
-    
-    # Concatenate tau_mse to training data
-    train_data_with_tau_mse = torch.cat([train_data_samples, tau_mse_train], dim=1)  # (num_train_samples, 20)
+    # Feature layout (32 features): acc(3) + omega(3) + q(6) + qd_norm(6) + p(3) + v(3) + tau_est_norm(6) + tau_mse(1) + cmd_vel(1)
+    # No additional feature engineering needed - already done in csv2numpy.py
+    train_data_engineered = train_data_samples  # (num_train_samples, 32)
+
+
+
     # Compute 1st and 99th percentiles for each feature to clip outliers
-    percentile_1 = torch.quantile(train_data_with_tau_mse, 0.01, dim=0, keepdim=True)  # (1, 20)
-    percentile_99 = torch.quantile(train_data_with_tau_mse, 0.99, dim=0, keepdim=True)  # (1, 20)
+    percentile_1 = torch.quantile(train_data_engineered, 0.01, dim=0, keepdim=True)  # (1, 31)
+    percentile_99 = torch.quantile(train_data_engineered, 0.99, dim=0, keepdim=True)  # (1, 31)
     
     # Clip training data to percentile bounds
-    train_data_clipped = torch.clamp(train_data_with_tau_mse, min=percentile_1, max=percentile_99)
+    train_data_clipped = torch.clamp(train_data_engineered, min=percentile_1, max=percentile_99)
     
-    # Compute mean and std per feature from clipped data (20 features now: original 19 + tau_mse)
-    global_mean = train_data_clipped.mean(dim=0, keepdim=True).unsqueeze(0)  # Shape: (1, 1, 20)
-    global_std = train_data_clipped.std(dim=0, keepdim=True).unsqueeze(0)    # Shape: (1, 1, 20)
+    # Compute mean and std per feature from clipped data (31 features total)
+    # Layout: acc(0-2) + omega(3-5) + q(6-11) + qd_norm(12-17) + p(18-20) + v(21-23) + tau_est_norm(24-29) + tau_mse(30)
+    global_mean = train_data_clipped.mean(dim=0, keepdim=True).unsqueeze(0)  # Shape: (1, 1, 31)
+    global_std = train_data_clipped.std(dim=0, keepdim=True).unsqueeze(0)    # Shape: (1, 1, 31)
     
     # Handle features with zero std (constant values) to avoid division by zero
     global_std = torch.where(global_std == 0, torch.ones_like(global_std), global_std)
     
     print(f"\nGlobal normalization statistics computed from clipped training data:")
+    print(f"  Total features: 32 (acc + omega + q + qd_norm + p + v + tau_est_norm + tau_mse + cmd_vel)")
+    print(f"  Features engineered in csv2numpy.py (qd and tau_est normalized by cmd_vel)")
     print(f"  Clipped to [1st, 99th] percentiles per feature")
     print(f"  Mean shape: {global_mean.shape}")
     print(f"  Std shape: {global_std.shape}")
     print(f"  Mean range: [{global_mean.min().item():.4f}, {global_mean.max().item():.4f}]")
     print(f"  Std range: [{global_std.min().item():.4f}, {global_std.max().item():.4f}]")
-    print(f"  tau_mse mean: {global_mean[0, 0, 19].item():.4f}, std: {global_std[0, 0, 19].item():.4f}")
+    print(f"  tau_mse mean: {global_mean[0, 0, 30].item():.4f}, std: {global_std[0, 0, 30].item():.4f}")
+    print(f"  cmd_vel mean: {global_mean[0, 0, 31].item():.4f}, std: {global_std[0, 0, 31].item():.4f}")
     
     # Create dataloaders
     # Train: shuffle each epoch for better training (but with reproducible seed from config)

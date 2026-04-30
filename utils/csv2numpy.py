@@ -7,84 +7,6 @@ import numpy as np
 import pandas as pd
 import yaml
 
-def csv2numpy_one_seq(data_pth, save_pth):
-    """
-    Load data from CSV files and generate numpy files for single sequence inference.
-    LEFT LEG BRANCH: Only processes left foot data.
-    
-    Inputs:
-    - data_pth: path to CSV data folder
-    - save_pth: path to numpy saving directory
-    
-    Expected CSV columns:
-    - IMU data (6): acc_body_x/y/z, gyro_body_x/y/z
-    - FK foot positions (3): fk_left_foot_pos_x/y/z (left only)
-    - FK foot velocities (3): fk_left_foot_vel_x/y/z (left only)
-    - Joint torques (6): left leg joints only
-    - Contact labels (1): lfoot-contact (binary 0/1)
-    
-    Output:
-    - data array: (num_data, 18) = acc(3) + omega(3) + p(3) + v(3) + tau(6)
-    - label array: (num_data, 1) = left foot contact (0 or 1)
-    """
-    
-    # Define column names for data extraction
-    joint_names = [
-        'left_hip_pitch_joint', 'left_hip_roll_joint', 'left_hip_yaw_joint',
-        'left_knee_joint', 'left_ankle_pitch_joint', 'left_ankle_roll_joint'
-    ]
-    
-    for data_name in glob.glob(data_pth + '*.csv'):
-        print("loading... ", data_name)
-        
-        # Load CSV data
-        df = pd.read_csv(data_name)
-        
-        
-        # Extract IMU data in body frame
-        imu_acc = df[['acc_body_x', 'acc_body_y', 'acc_body_z']].values  # 3 values
-        imu_omega = df[['gyro_body_x', 'gyro_body_y', 'gyro_body_z']].values  # 3 values
-
-        # # Extract joint positions (q) - 6 values (left leg only)
-        # q_cols = ['joint_pos_' + j for j in joint_names]
-        # q = df[q_cols].values
-        
-        # # Extract joint velocities (qd) - 6 values (left leg only)
-        # qd_cols = ['joint_vel_' + j for j in joint_names]
-        # qd = df[qd_cols].values
-        
-        # Extract foot positions from FK - 3 values (left foot)
-        p = df[['fk_left_foot_pos_x', 'fk_left_foot_pos_y', 'fk_left_foot_pos_z']].values
-        
-        # Extract foot velocities from FK - 3 values (left foot)
-        v = df[['fk_left_foot_vel_x', 'fk_left_foot_vel_y', 'fk_left_foot_vel_z']].values
-        
-        # Extract joint torques (tau_est) - 6 values (left leg only)
-        tau_cols = ['joint_torque_' + j for j in joint_names]
-        tau_est = df[tau_cols].values
-
-        # tau_cmd_cols = ['joint_action_' + j for j in joint_names]
-        # tau_cmd = df[tau_cmd_cols].values
-
-        # Extract command velocity - 1 value
-        cmd_vel = df[['cmd_vel_x']].values  # 1 value
-        
-        # Extract contact labels - left foot only (binary: 0 or 1)
-        contacts = df[['lfoot-contact']].values.astype(int)
-        
-        # Concatenate data: acc(3) + omega(3) + p(3) + v(3) + tau(6) = 18 features
-        data = np.concatenate((imu_acc, imu_omega, p, v, tau_est), axis=1)
-        
-        # Left foot contact label (already 0 or 1, no conversion needed)
-        label = contacts  # Shape: (num_samples, 1)
-        
-        print("Saving data to: " + save_pth + os.path.splitext(os.path.basename(data_name))[0] + ".npy")
-        
-        np.save(save_pth + os.path.splitext(os.path.basename(data_name))[0] + ".npy", data)
-        np.save(save_pth + os.path.splitext(os.path.basename(data_name))[0] + "_label.npy", label)
-        
-        print("Done!")
-
 
 def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
     """
@@ -94,6 +16,9 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
     The train/val/test split should happen in train.py AFTER windowing to avoid
     losing data at split boundaries.
     
+    Features are raw sensor data without cmd_vel normalization.
+    tau_mse is calculated here from tau_est and included as a feature.
+    
     Inputs:
     - data_pth: path to CSV data folder
     - save_pth: path to numpy saving directory
@@ -101,13 +26,14 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
     - val_ratio: not used (kept for backward compatibility)
     
     Output:
-    - all_data.npy: all data concatenated (input features)
+    - all_data.npy: all data concatenated (32 features)
+      Layout: acc(3) + omega(3) + q(6) + qd(6) + p(3) + v(3) + tau_est(6) + tau_mse(1) + cmd_vel(1)
     - all_labels.npy: left foot contact labels (0 or 1, not decimal encoded)
     - all_foot_velocities.npy: left foot velocity magnitude in world frame (1D norm)
     - all_data_boundaries.npy: indices marking end of each run (to prevent window bleeding)
     """
     
-    num_features = 19  # acc(3) + omega(3) + p(3) + v(3) + tau_est(6) + cmd_vel(1) = 19
+    num_features = 32  # acc(3) + omega(3) + q(6) + qd(6) + p(3) + v(3) + tau_est(6) + tau_mse(1) + cmd_vel(1)
     all_data = np.zeros((0, num_features))
     all_labels = np.zeros((0, 1))
     all_foot_velocities = np.zeros((0, 1))  # World frame foot velocities: left(1) - magnitude
@@ -155,13 +81,13 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
             imu_acc = df_run[['acc_body_x', 'acc_body_y', 'acc_body_z']].values
             imu_omega = df_run[['gyro_body_x', 'gyro_body_y', 'gyro_body_z']].values
 
-            # # Extract joint positions (q) - 6 values (left leg only)
-            # q_cols = ['joint_pos_' + j for j in joint_names]
-            # q = df_run[q_cols].values
+            # Extract joint positions (q) - 6 values (left leg only)
+            q_cols = ['joint_pos_' + j for j in joint_names]
+            q = df_run[q_cols].values
             
-            # # Extract joint velocities (qd) - 6 values (left leg only)
-            # qd_cols = ['joint_vel_' + j for j in joint_names]
-            # qd = df_run[qd_cols].values
+            # Extract joint velocities (qd) - 6 values (left leg only)
+            qd_cols = ['joint_vel_' + j for j in joint_names]
+            qd = df_run[qd_cols].values
             
             # Extract foot positions from FK
             p = df_run[['fk_left_foot_pos_x', 'fk_left_foot_pos_y', 'fk_left_foot_pos_z']].values
@@ -193,14 +119,11 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
             foot_velocity_world = np.vstack((foot_velocity_world, foot_velocity_world[-1, :]))
             foot_velocity_world_norm = np.linalg.norm(foot_velocity_world, axis=1, keepdims=True) + 1e-8  # Use magnitude of foot velocity as label (can also use full 3D velocity if desired)
 
+            # Calculate tau_mse from tau_est
+            tau_mse = np.mean(tau_est ** 2, axis=1, keepdims=True)  # Shape: (num_samples, 1)
 
-            # -------------
-
-            
-            # # Concatenate current run data: q(6) + qd(6) + acc(3) + omega(3) + p(3) + v(3) + tau_est(6) + tau_cmd(6) + cmd_vel(1) = 37
-            # cur_data = np.concatenate((q, qd, imu_acc, imu_omega, p, v, tau_est, tau_cmd, cmd_vel), axis=1)
-
-            cur_data = np.concatenate((imu_acc, imu_omega, p, v, tau_est, cmd_vel), axis=1)  # 3 + 3 + 3 + 3 + 6 + 1 = 19 features
+            # Concatenate features: acc(3) + omega(3) + q(6) + qd(6) + p(3) + v(3) + tau_est(6) + tau_mse(1) + cmd_vel(1) = 32
+            cur_data = np.concatenate((imu_acc, imu_omega, q, qd, p, v, tau_est, tau_mse, cmd_vel), axis=1)
             
             # Left foot contact label (already 0 or 1, no conversion needed)
             cur_label = contacts  # Shape: (num_samples, 1)
@@ -292,7 +215,9 @@ def main():
         csv2numpy_split(config['csv_folder'], config['save_path'], 
                         config['train_ratio'], config['val_ratio'])
     elif config['mode'] == 'inference':
-        csv2numpy_one_seq(config['csv_folder'], config['save_path'])
+        error = "Inference mode is not implemented in this script. Please implement inference logic if needed."
+        print(f"Error: {error}")
+        raise NotImplementedError(error)
     else:
         print(f"Error: Unknown mode '{config['mode']}'. Use 'train' or 'inference'.")
 

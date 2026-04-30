@@ -9,16 +9,17 @@ class contact_cnn(nn.Module):
         super(contact_cnn, self).__init__()
         self.block1 = nn.Sequential(
             # First convolutional layer
-            # Takes 20 input feature channels (q, qd, IMU, p, v, tau_est, tau_cmd, cmd_vel, tau_mse)
+            # Takes 32 input feature channels from csv2numpy.py
+            # Input layout: acc(3) + omega(3) + q(6) + qd(6) + p(3) + v(3) + tau_est(6) + tau_mse(1) + cmd_vel(1) = 32 features
             # Produces 64 learned feature maps (filters)
             # kernel_size=3: each filter looks at 3 consecutive timesteps
             # stride=1: moves one timestep at a time
             # padding=1: adds 1 zero on each side to maintain length
-            nn.Conv1d(in_channels=20,      # Input: 20 features after τ_mse augmentation (19 base + 1 computed in forward)
+            nn.Conv1d(in_channels=32,      # Input: 32 features from csv2numpy.py
                     out_channels=64,      # Output: 64 learned patterns
                     kernel_size=3,        # Look at 3 timesteps at once
                     stride=1,             # Slide by 1 timestep
-                    padding=1),           # Keep same length (150→150)
+                    padding=1),           # Keep same length (window_size→window_size)
             
             # Activation function
             # Introduces non-linearity (allows learning complex patterns)
@@ -85,10 +86,10 @@ class contact_cnn(nn.Module):
         # Contact detection branch (classification)
         self.fc_contact_left = nn.Sequential(
             nn.Linear(in_features=fc_input_size,
-                      out_features=5096),  # Intermediate layer for contact features
+                      out_features=2048),  # Intermediate layer for contact features
             nn.ReLU(),
             nn.Dropout(p=0.5),
-            nn.Linear(in_features=5096,
+            nn.Linear(in_features=2048,
                       out_features=512),  # Intermediate layer for contact features
             nn.ReLU(),
             nn.Dropout(p=0.5),
@@ -99,20 +100,20 @@ class contact_cnn(nn.Module):
         # Foot velocity regression branch (parallel to contact branch)
         self.fc_velocity_left = nn.Sequential(
             nn.Linear(in_features=fc_input_size,
-                      out_features=4),  # Intermediate layer for velocity features
+                      out_features=2048),  # Intermediate layer for velocity features
             nn.ReLU(),
             nn.Dropout(p=0.5),
-            nn.Linear(in_features=4,
-                      out_features=2),  # Intermediate layer for velocity features
+            nn.Linear(in_features=2048,
+                      out_features=512),  # Intermediate layer for velocity features
             nn.ReLU(),
             nn.Dropout(p=0.5),
-            nn.Linear(in_features=2,
+            nn.Linear(in_features=512,
                       out_features=1),  # 1 output: velocity norm (magnitude) for left foot
         )
 
     def forward(self, x):
-        # x shape: (batch_size, window_size, 20) - includes tau_mse
-        # Feature layout: acc(0-2) + omega(3-5) + p(6-8) + v(9-11) + tau_est(12-17) + cmd_vel(18) + tau_mse(19)
+        # x shape: (batch_size, window_size, 32) - features from csv2numpy.py
+        # Feature layout: acc(0-2) + omega(3-5) + q(6-11) + qd(12-17) + p(18-20) + v(21-23) + tau_est(24-29) + tau_mse(30) + cmd_vel(31)
         
         x = x.permute(0,2,1)
         block1_out = self.block1(x)
@@ -577,24 +578,19 @@ class ContactCNNWithNormalization(nn.Module):
     - Normalize: (x - global_mean) / (global_std + eps)
     - Statistics are saved with the model and exported to ONNX
     
-    Input shape: (batch_size, window_size, 37) - RAW unnormalized data
+    Input shape: (batch_size, window_size, 32) - Features from csv2numpy.py
     Output shape: (batch_size, 1) for contact + (batch_size, 1) for velocity
     
-    Feature layout (19 features input, 20 after tau_mse):
-        acc: 0-2 (3) - IMU acceleration
-        omega: 3-5 (3) - IMU angular velocity
-        p: 6-8 (3) - foot position
-        v: 9-11 (3) - foot velocity
-        tau_est: 12-17 (6) - joint torques estimated
-        cmd_vel: 18 (1) - command velocity
-        tau_mse: 19 (1) - computed from RAW tau_est BEFORE normalization
+    Feature layout:
+    - Input: 32 features from csv2numpy.py: acc(3) + omega(3) + q(6) + qd(6) + p(3) + v(3) + tau_est(6) + tau_mse(1) + cmd_vel(1)
+    - Z-score normalization is applied to all input features
     """
     def __init__(self, base_model, global_mean=None, global_std=None, eps=1e-8):
         """
         Args:
             base_model: The contact_cnn model to wrap
-            global_mean: Tensor of shape (1, 1, 20) with training data mean per feature (including tau_mse)
-            global_std: Tensor of shape (1, 1, 20) with training data std per feature (including tau_mse)
+            global_mean: Tensor of shape (1, 1, 32) with training data mean per feature
+            global_std: Tensor of shape (1, 1, 32) with training data std per feature
             eps: Small constant to prevent division by zero
         """
         super(ContactCNNWithNormalization, self).__init__()
@@ -606,37 +602,31 @@ class ContactCNNWithNormalization(nn.Module):
             self.register_buffer('global_mean', global_mean)
         else:
             # Fallback: no normalization if stats not provided
-            self.register_buffer('global_mean', torch.zeros(1, 1, 20))
+            self.register_buffer('global_mean', torch.zeros(1, 1, 32))
             
         if global_std is not None:
             self.register_buffer('global_std', global_std)
         else:
             # Fallback: no normalization if stats not provided
-            self.register_buffer('global_std', torch.ones(1, 1, 20))
+            self.register_buffer('global_std', torch.ones(1, 1, 32))
         
     def forward(self, x):
         """
-        Apply feature engineering, then normalization, then pass through base model.
+        Apply z-score normalization, then pass through base model.
         
         Args:
-            x: Raw input data (batch_size, window_size, 19) - NOT normalized
+            x: Raw input data (batch_size, window_size, 32) - NOT z-score normalized
+               Features: acc(0-2) + omega(3-5) + q(6-11) + qd(12-17) + p(18-20) + 
+                        v(21-23) + tau_est(24-29) + tau_mse(30) + cmd_vel(31)
         
         Returns:
             contact_out: (batch_size, 1) - contact prediction logits
             velocity_out: (batch_size, 1) - velocity prediction
         """
-        # STEP 1: Compute tau_mse from RAW tau_est (before normalization)
-        # This preserves the physical meaning of mean squared torque
-        tau_est = x[:, :, 12:18]  # Extract raw tau_est: (batch_size, window_size, 6)
-        tau_mse = torch.mean(tau_est ** 2, dim=2, keepdim=True)  # (batch_size, window_size, 1)
-        
-        # Concatenate tau_mse as 20th feature
-        x_with_tau_mse = torch.cat([x, tau_mse], dim=2)  # (batch_size, window_size, 20)
-        
-        # STEP 2: Apply global z-score normalization to ALL 20 features
+        # Apply global z-score normalization to all 32 input features
         # These statistics are embedded in the model and exported to ONNX
-        x_normalized = (x_with_tau_mse - self.global_mean) / (self.global_std + self.eps)
+        x_normalized = (x - self.global_mean) / (self.global_std + self.eps)
         
-        # STEP 3: Pass normalized data through the base model
+        # Pass normalized data through the base model
         return self.base_model(x_normalized)
 
