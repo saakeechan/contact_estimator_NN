@@ -113,6 +113,14 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
             # Extract command velocity - 1 value
             cmd_vel = df_run[['cmd_vel_x']].values
 
+                        # Calculate tau_mse from tau_est separately for each leg
+            tau_mse_left = np.mean(tau_est[:, :6] ** 2, axis=1, keepdims=True)  # Left leg (first 6 joints)
+            tau_mse_right = np.mean(tau_est[:, 6:] ** 2, axis=1, keepdims=True)  # Right leg (last 6 joints)
+            tau_mse = np.hstack((tau_mse_left, tau_mse_right))  # Shape: (num_samples, 2)
+
+            # Concatenate features: acc(3) + omega(3) + q(12) + qd(12) + p(6) + v(6) + tau_est(12) + tau_mse(2) + cmd_vel(1) = 57
+            cur_data = np.concatenate((imu_acc, imu_omega, q, qd, p, v, tau_est, tau_mse, cmd_vel), axis=1)
+
             # ------------------------------
 
             # Output extraction
@@ -138,13 +146,7 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
             # Combine velocities: [left, right]
             foot_velocities = np.hstack((lfoot_velocity_norm, rfoot_velocity_norm))  # Shape: (num_samples, 2)
 
-            # Calculate tau_mse from tau_est separately for each leg
-            tau_mse_left = np.mean(tau_est[:, :6] ** 2, axis=1, keepdims=True)  # Left leg (first 6 joints)
-            tau_mse_right = np.mean(tau_est[:, 6:] ** 2, axis=1, keepdims=True)  # Right leg (last 6 joints)
-            tau_mse = np.hstack((tau_mse_left, tau_mse_right))  # Shape: (num_samples, 2)
 
-            # Concatenate features: acc(3) + omega(3) + q(12) + qd(12) + p(6) + v(6) + tau_est(12) + tau_mse(2) + cmd_vel(1) = 57
-            cur_data = np.concatenate((imu_acc, imu_omega, q, qd, p, v, tau_est, tau_mse, cmd_vel), axis=1)
             
             # Both legs contact labels (already 0 or 1, no conversion needed)
             cur_label = contacts  # Shape: (num_samples, 2) - [left, right]
