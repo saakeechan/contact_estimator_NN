@@ -14,15 +14,15 @@ class contact_dataset(Dataset):
 
     def __init__(self, data_path, label_path, window_size, device='cuda'):
         """
-        At initialization we load .npy files for data, label, and foot velocities.
+        At initialization we load .npy files for data, labels, and foot velocities.
         self.data: a 2D array of all data points. rows are time axis, columns are features. (num_data, num_features)
-        self.label: a vector of left foot contact states (0 or 1). (num_data, 1)
-        self.foot_velocity: left foot velocity magnitude (norm). (num_data, 1)
+        self.label: both legs contact states (0 or 1). Shape: (num_data, 2) - [left, right]
+        self.foot_velocity: both legs foot velocity magnitudes (norm). Shape: (num_data, 2) - [left, right]
         """
         data = np.load(data_path)
         label = np.load(label_path)
         
-        # Load foot velocities - LEFT FOOT NORM ONLY
+        # Load foot velocities - BOTH LEGS
         velocity_path = data_path.replace('_data.npy', '_foot_velocities.npy')
         if not os.path.exists(velocity_path):
             velocity_path = data_path.replace('.npy', '_foot_velocities.npy')
@@ -32,15 +32,14 @@ class contact_dataset(Dataset):
             print(f"Loaded foot velocities from {velocity_path}")
         else:
             print(f"Warning: No foot velocity file found. Creating zero velocities.")
-            foot_velocity = np.zeros((len(data), 1), dtype=np.float32)
+            foot_velocity = np.zeros((len(data), 2), dtype=np.float32)  # Both legs
         
         self.window_size = window_size
         self.data = torch.from_numpy(data).type('torch.FloatTensor').to(device)
         self.foot_velocity = torch.from_numpy(foot_velocity).type('torch.FloatTensor').to(device)
         
-        # Labels are already left foot contact only (0 or 1) from csv2numpy.py
-        # No need for bit manipulation - use directly for BCEWithLogitsLoss
-        label_binary = label.astype(np.float32).reshape(-1, 1)  # Shape: (num_data, 1)
+        # Labels are both legs contact (0 or 1 for each) - Shape: (num_data, 2) - [left, right]
+        label_binary = label.astype(np.float32)  # Shape: (num_data, 2)
         self.label = torch.from_numpy(label_binary).type('torch.FloatTensor').to(device)
         
         # Load run boundaries to prevent window bleeding across different runs
@@ -93,8 +92,8 @@ class contact_dataset(Dataset):
         
         Output: 
         - data: (batch_size, window_size, num_features)
-        - label: (batch_size, 1) - binary contact for left leg only
-        - velocity: (batch_size, 1) - norm (magnitude) of left foot velocity
+        - label: (batch_size, 2) - binary contact for both legs [left, right]
+        - velocity: (batch_size, 2) - velocity norms for both legs [left, right]
         """
         if torch.is_tensor(idx):
             idx = idx.tolist()
@@ -103,11 +102,11 @@ class contact_dataset(Dataset):
         real_idx = self.valid_indices[idx]
         
         # Return raw unnormalized data (normalization done inside the model)
-        # Feature layout (32 features): acc(0-2) + omega(3-5) + q(6-11) + qd(12-17) + p(18-20) + v(21-23) + tau_est(24-29) + tau_mse(30) + cmd_vel(31)
+        # Feature layout (57 features): acc(0-2) + omega(3-5) + q(6-17) + qd(18-29) + p(30-35) + v(36-41) + tau_est(42-53) + tau_mse(54-55) + cmd_vel(56)
         this_data = self.data[real_idx:real_idx+self.window_size,:]
         
-        this_label = self.label[real_idx+self.window_size-1]
-        this_velocity = self.foot_velocity[real_idx+self.window_size-1]
+        this_label = self.label[real_idx+self.window_size-1]  # Shape: (2,) - [left, right]
+        this_velocity = self.foot_velocity[real_idx+self.window_size-1]  # Shape: (2,) - [left, right]
             
         sample = {'data': this_data, 'label': this_label, 'velocity': this_velocity}
 

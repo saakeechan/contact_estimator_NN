@@ -17,50 +17,68 @@ from contact_cnn import *
 from utils.data_handler import *
 
 def inference(dataloader, model, device):
+    """
+    Run inference and return contact and velocity predictions.
+    Returns:
+        contact_results: (N, 2) contact predictions [left, right]
+        velocity_results: (N, 2) velocity predictions [left, right]
+    """
+    contact_results = torch.empty(0, 2, dtype=torch.uint8).to(device)  # 2 legs for biped [left, right]
+    velocity_results = torch.empty(0, 2, dtype=torch.float32).to(device)  # 2 legs for biped [left, right]
     
-    infer_results = torch.empty(0,2,dtype=torch.uint8).to(device)  # 2 legs for biped
-    velocity_results = torch.empty(0,6,dtype=torch.float32).to(device)  # 6D foot velocities
     with torch.no_grad():
         for sample in tqdm(dataloader):
             input_data = sample['data']
-            contact_output, velocity_output = model(input_data)  # Two outputs
+            contact_output, velocity_output = model(input_data)  # Two outputs: (batch, 2) each
             contact_prediction = (torch.sigmoid(contact_output) > 0.5).byte()  # Binary predictions
-            infer_results = torch.cat((infer_results, contact_prediction), 0)
+            contact_results = torch.cat((contact_results, contact_prediction), 0)
             velocity_results = torch.cat((velocity_results, velocity_output), 0)
 
-    return infer_results, velocity_results
+    return contact_results, velocity_results
 
 
 def inference_and_compute_acc(dataloader, model, device):
-
+    """
+    Run inference and compute accuracy metrics for contact and velocity.
+    Returns:
+        contact_results: (N, 2) contact predictions [left, right]
+        velocity_results: (N, 2) velocity predictions [left, right]
+        accuracy: overall contact accuracy
+        per_leg_accuracy: (2,) per-leg contact accuracy [left, right]
+        velocity_mse: overall velocity MSE
+    """
     num_correct = 0
     num_data = 0
-    correct_per_leg = np.zeros(2)  # 2 legs for biped
-    infer_results = torch.empty(0,2,dtype=torch.uint8).to(device)  # 2 legs for biped
-    velocity_results = torch.empty(0,6,dtype=torch.float32).to(device)  # 6D foot velocities
+    correct_per_leg = np.zeros(2)  # 2 legs for biped [left, right]
+    contact_results = torch.empty(0, 2, dtype=torch.uint8).to(device)  # 2 legs for biped
+    velocity_results = torch.empty(0, 2, dtype=torch.float32).to(device)  # 2 legs for biped
     velocity_mse_sum = 0.0
     
     with torch.no_grad():
         for sample in tqdm(dataloader):
             input_data = sample['data']
-            gt_label = sample['label']  # Shape: (batch, 2) - binary labels
-            gt_velocity = sample['velocity']  # Shape: (batch, 6) - foot velocities
+            gt_label = sample['label']  # Shape: (batch, 2) - binary labels [left, right]
+            gt_velocity = sample['velocity']  # Shape: (batch, 2) - velocity [left, right]
 
-            contact_output, velocity_output = model(input_data)  # Two outputs
+            contact_output, velocity_output = model(input_data)  # Two outputs: (batch, 2) each
             contact_prediction = (torch.sigmoid(contact_output) > 0.5).float()  # Binary predictions
-            infer_results = torch.cat((infer_results, contact_prediction.byte()), 0)
+            contact_results = torch.cat((contact_results, contact_prediction.byte()), 0)
             velocity_results = torch.cat((velocity_results, velocity_output), 0)
 
-            # Per-leg accuracy
+            # Per-leg contact accuracy
             correct_per_leg += (contact_prediction == gt_label).sum(axis=0).cpu().numpy()
             num_data += input_data.size(0)
-            # Overall accuracy (both legs correct)
-            num_correct += ((contact_prediction == gt_label).all(dim=1)).sum().item()
+            # Overall contact accuracy (averaged across both legs)
+            num_correct += (contact_prediction == gt_label).sum().item()
             
             # Velocity MSE
-            velocity_mse_sum += ((velocity_output - gt_velocity) ** 2).mean().item()
+            velocity_mse_sum += ((velocity_output - gt_velocity) ** 2).sum().item()
 
-    return infer_results, velocity_results, num_correct/num_data, correct_per_leg/num_data, velocity_mse_sum/len(dataloader)
+    # Total accuracy considers all predictions (both legs)
+    total_predictions = num_data * 2  # 2 legs per sample
+    velocity_mse = velocity_mse_sum / total_predictions
+    
+    return contact_results, velocity_results, num_correct/total_predictions, correct_per_leg/num_data, velocity_mse
 
 def decimal2binary(x):
     mask = 2**torch.arange(2-1,-1,-1).to(x.device, x.dtype)  # 2 legs for biped
@@ -169,25 +187,25 @@ def main():
     model.load_state_dict(checkpoint['model_state_dict'])
     model = model.eval().to(device)
 
-    pred = []
-    velocity_pred = []
+    pred_contact = []
+    pred_velocity = []
     if(config['calculate_accuracy']):
-        pred, velocity_pred, acc, acc_per_leg, velocity_mse = inference_and_compute_acc(dataloader, model, device)
+        pred_contact, pred_velocity, acc, acc_per_leg, velocity_mse = inference_and_compute_acc(dataloader, model, device)
         print("Contact Accuracy (both legs): %.4f" % acc)
         print("Accuracy of leg 0 (left): %.4f" % acc_per_leg[0])
         print("Accuracy of leg 1 (right): %.4f" % acc_per_leg[1])
         print("Average leg accuracy: %.4f" % (np.sum(acc_per_leg)/2.0))  # 2 legs for biped
-        print("Foot Velocity MSE: %.6f" % velocity_mse)
+        print("Velocity MSE (both legs): %.6f" % velocity_mse)
     else:
-        pred, velocity_pred = inference(dataloader, model, device)
+        pred_contact, pred_velocity = inference(dataloader, model, device)
 
     
 
     if(config['save_mat']):
-        save2mat(pred,config)
+        save2mat(pred_contact, config)
 
     if(config['save_lcm']):
-        save2lcm(pred,config)
+        save2lcm(pred_contact, config)
 
 if __name__ == '__main__':
     main()

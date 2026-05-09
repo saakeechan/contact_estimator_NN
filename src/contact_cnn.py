@@ -9,13 +9,13 @@ class contact_cnn(nn.Module):
         super(contact_cnn, self).__init__()
         self.block1 = nn.Sequential(
             # First convolutional layer
-            # Takes 32 input feature channels from csv2numpy.py
-            # Input layout: acc(3) + omega(3) + q(6) + qd(6) + p(3) + v(3) + tau_est(6) + tau_mse(1) + cmd_vel(1) = 32 features
+            # Takes 57 input feature channels from csv2numpy.py (BOTH LEGS)
+            # Input layout: acc(3) + omega(3) + q(12) + qd(12) + p(6) + v(6) + tau_est(12) + tau_mse(2) + cmd_vel(1) = 57 features
             # Produces 64 learned feature maps (filters)
             # kernel_size=3: each filter looks at 3 consecutive timesteps
             # stride=1: moves one timestep at a time
             # padding=1: adds 1 zero on each side to maintain length
-            nn.Conv1d(in_channels=32,      # Input: 32 features from csv2numpy.py
+            nn.Conv1d(in_channels=57,      # Input: 57 features from csv2numpy.py (both legs)
                     out_channels=64,      # Output: 64 learned patterns
                     kernel_size=3,        # Look at 3 timesteps at once
                     stride=1,             # Slide by 1 timestep
@@ -83,46 +83,80 @@ class contact_cnn(nn.Module):
         # Final conv outputs 128 channels
         fc_input_size = (window_size // 4) * 128
         
-        # Contact detection branch (classification)
+        # Separate MLP for left leg contact detection (classification)
         self.fc_contact_left = nn.Sequential(
             nn.Linear(in_features=fc_input_size,
-                      out_features=2048),  # Intermediate layer for contact features
+                      out_features=2048),
             nn.ReLU(),
             nn.Dropout(p=0.5),
             nn.Linear(in_features=2048,
-                      out_features=512),  # Intermediate layer for contact features
+                      out_features=512),
             nn.ReLU(),
             nn.Dropout(p=0.5),
             nn.Linear(in_features=512,
-                      out_features=1),  # 1 leg: independent binary classification
+                      out_features=1),  # 1 output: binary contact for left leg
         )
         
-        # Foot velocity regression branch (parallel to contact branch)
-        self.fc_velocity_left = nn.Sequential(
+        # Separate MLP for right leg contact detection (classification)
+        self.fc_contact_right = nn.Sequential(
             nn.Linear(in_features=fc_input_size,
-                      out_features=2048),  # Intermediate layer for velocity features
+                      out_features=2048),
             nn.ReLU(),
             nn.Dropout(p=0.5),
             nn.Linear(in_features=2048,
-                      out_features=512),  # Intermediate layer for velocity features
+                      out_features=512),
             nn.ReLU(),
             nn.Dropout(p=0.5),
             nn.Linear(in_features=512,
-                      out_features=1),  # 1 output: velocity norm (magnitude) for left foot
+                      out_features=1),  # 1 output: binary contact for right leg
+        )
+        
+        # Separate MLP for left leg velocity regression
+        self.fc_velocity_left = nn.Sequential(
+            nn.Linear(in_features=fc_input_size,
+                      out_features=2048),
+            nn.ReLU(),
+            nn.Dropout(p=0.5),
+            nn.Linear(in_features=2048,
+                      out_features=512),
+            nn.ReLU(),
+            nn.Dropout(p=0.5),
+            nn.Linear(in_features=512,
+                      out_features=1),  # 1 output: velocity norm for left leg
+        )
+        
+        # Separate MLP for right leg velocity regression
+        self.fc_velocity_right = nn.Sequential(
+            nn.Linear(in_features=fc_input_size,
+                      out_features=2048),
+            nn.ReLU(),
+            nn.Dropout(p=0.5),
+            nn.Linear(in_features=2048,
+                      out_features=512),
+            nn.ReLU(),
+            nn.Dropout(p=0.5),
+            nn.Linear(in_features=512,
+                      out_features=1),  # 1 output: velocity norm for right leg
         )
 
     def forward(self, x):
-        # x shape: (batch_size, window_size, 32) - features from csv2numpy.py
-        # Feature layout: acc(0-2) + omega(3-5) + q(6-11) + qd(12-17) + p(18-20) + v(21-23) + tau_est(24-29) + tau_mse(30) + cmd_vel(31)
+        # x shape: (batch_size, window_size, 57) - features from csv2numpy.py (BOTH LEGS)
+        # Feature layout: acc(0-2) + omega(3-5) + q(6-17) + qd(18-29) + p(30-35) + v(36-41) + tau_est(42-53) + tau_mse(54-55) + cmd_vel(56)
         
         x = x.permute(0,2,1)
         block1_out = self.block1(x)
         block2_out = self.block2(block1_out)
         block2_out_reshape = block2_out.view(block2_out.shape[0], -1)
         
-        # Two parallel outputs: contact classification and velocity regression
-        contact_out = self.fc_contact_left(block2_out_reshape)  # Left leg contact (binary)
-        velocity_out = self.fc_velocity_left(block2_out_reshape)  # Left foot velocity norm
+        # Four separate MLPs: contact and velocity for each leg
+        contact_left = self.fc_contact_left(block2_out_reshape)  # Shape: (batch, 1)
+        contact_right = self.fc_contact_right(block2_out_reshape)  # Shape: (batch, 1)
+        velocity_left = self.fc_velocity_left(block2_out_reshape)  # Shape: (batch, 1)
+        velocity_right = self.fc_velocity_right(block2_out_reshape)  # Shape: (batch, 1)
+        
+        # Concatenate outputs: [left, right] for each task
+        contact_out = torch.cat([contact_left, contact_right], dim=1)  # Shape: (batch, 2)
+        velocity_out = torch.cat([velocity_left, velocity_right], dim=1)  # Shape: (batch, 2)
         
         return contact_out, velocity_out
 
@@ -578,19 +612,19 @@ class ContactCNNWithNormalization(nn.Module):
     - Normalize: (x - global_mean) / (global_std + eps)
     - Statistics are saved with the model and exported to ONNX
     
-    Input shape: (batch_size, window_size, 32) - Features from csv2numpy.py
-    Output shape: (batch_size, 1) for contact + (batch_size, 1) for velocity
+    Input shape: (batch_size, window_size, 57) - Features from csv2numpy.py (BOTH LEGS)
+    Output shape: (batch_size, 2) for contact + (batch_size, 2) for velocity (both legs)
     
     Feature layout:
-    - Input: 32 features from csv2numpy.py: acc(3) + omega(3) + q(6) + qd(6) + p(3) + v(3) + tau_est(6) + tau_mse(1) + cmd_vel(1)
+    - Input: 57 features from csv2numpy.py: acc(3) + omega(3) + q(12) + qd(12) + p(6) + v(6) + tau_est(12) + tau_mse(2) + cmd_vel(1)
     - Z-score normalization is applied to all input features
     """
     def __init__(self, base_model, global_mean=None, global_std=None, eps=1e-8):
         """
         Args:
             base_model: The contact_cnn model to wrap
-            global_mean: Tensor of shape (1, 1, 32) with training data mean per feature
-            global_std: Tensor of shape (1, 1, 32) with training data std per feature
+            global_mean: Tensor of shape (1, 1, 57) with training data mean per feature
+            global_std: Tensor of shape (1, 1, 57) with training data std per feature
             eps: Small constant to prevent division by zero
         """
         super(ContactCNNWithNormalization, self).__init__()
@@ -602,28 +636,28 @@ class ContactCNNWithNormalization(nn.Module):
             self.register_buffer('global_mean', global_mean)
         else:
             # Fallback: no normalization if stats not provided
-            self.register_buffer('global_mean', torch.zeros(1, 1, 32))
+            self.register_buffer('global_mean', torch.zeros(1, 1, 57))
             
         if global_std is not None:
             self.register_buffer('global_std', global_std)
         else:
             # Fallback: no normalization if stats not provided
-            self.register_buffer('global_std', torch.ones(1, 1, 32))
+            self.register_buffer('global_std', torch.ones(1, 1, 57))
         
     def forward(self, x):
         """
         Apply z-score normalization, then pass through base model.
         
         Args:
-            x: Raw input data (batch_size, window_size, 32) - NOT z-score normalized
-               Features: acc(0-2) + omega(3-5) + q(6-11) + qd(12-17) + p(18-20) + 
-                        v(21-23) + tau_est(24-29) + tau_mse(30) + cmd_vel(31)
+            x: Raw input data (batch_size, window_size, 57) - NOT z-score normalized (BOTH LEGS)
+               Features: acc(0-2) + omega(3-5) + q(6-17) + qd(18-29) + p(30-35) + 
+                        v(36-41) + tau_est(42-53) + tau_mse(54-55) + cmd_vel(56)
         
         Returns:
-            contact_out: (batch_size, 1) - contact prediction logits
-            velocity_out: (batch_size, 1) - velocity prediction
+            contact_out: (batch_size, 2) - contact prediction logits [left, right]
+            velocity_out: (batch_size, 2) - velocity prediction [left, right]
         """
-        # Apply global z-score normalization to all 32 input features
+        # Apply global z-score normalization to all 57 input features
         # These statistics are embedded in the model and exported to ONNX
         x_normalized = (x - self.global_mean) / (self.global_std + self.eps)
         

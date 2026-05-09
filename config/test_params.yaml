@@ -3,7 +3,7 @@ model_load_path: "/home/saakee/Research/deep-contact-estimator/results/bipedal_c
 
 # data params
 window_size: 10
-shuffle: True  # Must match training config for consistent splits
+shuffle: True  # Only for initial train/val/test split (must match training config)
 random_seed: 42  # Must match training config for consistent splits
 train_ratio: 0.7  # Must match training config
 val_ratio: 0.15  # Must match training config
