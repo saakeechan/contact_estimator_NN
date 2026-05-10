@@ -9,7 +9,7 @@ class contact_cnn(nn.Module):
         super(contact_cnn, self).__init__()
         self.block1 = nn.Sequential(
             # First convolutional layer
-            # Takes 57 input feature channels from csv2numpy.py (BOTH LEGS)
+            # Takes 57 RAW input features from csv2numpy.py (BOTH LEGS)
             # Input layout: acc(3) + omega(3) + q(12) + qd(12) + p(6) + v(6) + tau_est(12) + tau_mse(2) + cmd_vel(1) = 57 features
             # Produces 64 learned feature maps (filters)
             # kernel_size=3: each filter looks at 3 consecutive timesteps
@@ -140,7 +140,7 @@ class contact_cnn(nn.Module):
         )
 
     def forward(self, x):
-        # x shape: (batch_size, window_size, 57) - features from csv2numpy.py (BOTH LEGS)
+        # x shape: (batch_size, window_size, 57) - RAW features from csv2numpy.py (BOTH LEGS)
         # Feature layout: acc(0-2) + omega(3-5) + q(6-17) + qd(18-29) + p(30-35) + v(36-41) + tau_est(42-53) + tau_mse(54-55) + cmd_vel(56)
         
         x = x.permute(0,2,1)
@@ -612,11 +612,11 @@ class ContactCNNWithNormalization(nn.Module):
     - Normalize: (x - global_mean) / (global_std + eps)
     - Statistics are saved with the model and exported to ONNX
     
-    Input shape: (batch_size, window_size, 57) - Features from csv2numpy.py (BOTH LEGS)
+    Input shape: (batch_size, window_size, 57) - RAW features from csv2numpy.py (BOTH LEGS)
     Output shape: (batch_size, 2) for contact + (batch_size, 2) for velocity (both legs)
     
     Feature layout:
-    - Input: 57 features from csv2numpy.py: acc(3) + omega(3) + q(12) + qd(12) + p(6) + v(6) + tau_est(12) + tau_mse(2) + cmd_vel(1)
+    - Input: 57 RAW features from csv2numpy.py: acc(3) + omega(3) + q(12) + qd(12) + p(6) + v(6) + tau_est(12) + tau_mse(2) + cmd_vel(1)
     - Z-score normalization is applied to all input features
     """
     def __init__(self, base_model, global_mean=None, global_std=None, eps=1e-8):

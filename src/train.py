@@ -74,7 +74,8 @@ def compute_accuracy_and_loss(dataloader, model, contact_criterion, velocity_cri
             contact_mask = gt_label  # (batch, 2) - both legs
             velocity_loss_elementwise = velocity_criterion(velocity_output, gt_velocity)
             # Multiply by contact mask (only penalize velocities in contact)
-            velocity_loss = (velocity_loss_elementwise * contact_mask).sum() / (contact_mask.sum() + 1e-8)
+            # Use max(1.0, sum) to avoid explosion when few contacts in batch
+            velocity_loss = (velocity_loss_elementwise * contact_mask).sum() / torch.clamp(contact_mask.sum(), min=1.0)
             
             total_loss = contact_loss + velocity_weight * velocity_loss
 
@@ -120,7 +121,7 @@ def save_onnx_model(model, checkpoint_path, window_size):
         device = next(model.parameters()).device
         model.eval()
         
-        # Create example input (pre-engineered data - 57 features from csv2numpy.py for both legs)
+        # Create example input (RAW features - 57 from csv2numpy.py for both legs)
         example_input = torch.randn(1, window_size, 57).to(device)
         
         # Suppress warnings and use standard export
@@ -181,6 +182,10 @@ def train(model, train_dataloader, val_dataloader, config):
     best_acc = 0
     best_leg_acc = 0
     best_loss = 1000000000
+    
+    # DEBUG: Track if we've printed labels yet
+    printed_labels = False
+    
     for epoch in range(config['num_epoch']):
         running_loss = 0.0
         running_contact_loss = 0.0
@@ -194,6 +199,35 @@ def train(model, train_dataloader, val_dataloader, config):
             input_data = samples['data'] 
             contact_label = samples['label']  # Shape: (batch, 2) - [left, right]
             velocity_label = samples['velocity']  # Shape: (batch, 2) - [left, right]
+            
+            # DEBUG: Print ground truth labels once to verify data correctness
+            if not printed_labels and i == 0:
+                print(f"\n{'='*80}")
+                print(f"DEBUG: Ground Truth Contact Labels (first 100 samples)")
+                print(f"{'='*80}")
+                labels_to_print = contact_label.cpu().numpy()
+                num_to_print = min(100, len(labels_to_print))
+                
+                left_labels = labels_to_print[:num_to_print, 0]
+                right_labels = labels_to_print[:num_to_print, 1]
+                
+                print(f"\nLeft leg labels (first {num_to_print}):")
+                print(left_labels)
+                print(f"\nLeft leg stats: Mean={left_labels.mean():.3f}, "
+                      f"Contact={np.sum(left_labels==1)}, No-contact={np.sum(left_labels==0)}")
+                
+                print(f"\nRight leg labels (first {num_to_print}):")
+                print(right_labels)
+                print(f"\nRight leg stats: Mean={right_labels.mean():.3f}, "
+                      f"Contact={np.sum(right_labels==1)}, No-contact={np.sum(right_labels==0)}")
+                
+                print(f"\nOverall stats for this batch:")
+                print(f"  Batch size: {len(labels_to_print)}")
+                print(f"  Left leg contact ratio: {labels_to_print[:, 0].mean():.3f}")
+                print(f"  Right leg contact ratio: {labels_to_print[:, 1].mean():.3f}")
+                print(f"{'='*80}\n")
+                
+                printed_labels = True
 
             optimizer.zero_grad()
             contact_output, velocity_output = model(input_data)  # Two outputs: (batch, 2) each
@@ -206,7 +240,8 @@ def train(model, train_dataloader, val_dataloader, config):
             contact_mask = contact_label  # (batch, 2) - both legs
             velocity_loss_elementwise = velocity_criterion(velocity_output, velocity_label)
             # Multiply by contact mask (only penalize velocities in contact)
-            velocity_loss = (velocity_loss_elementwise * contact_mask).sum() / (contact_mask.sum() + 1e-8)
+            # Use max(1.0, sum) to avoid explosion when few contacts in batch
+            velocity_loss = (velocity_loss_elementwise * contact_mask).sum() / torch.clamp(contact_mask.sum(), min=1.0)
             
             # Combined loss with weighting
             loss = contact_loss + velocity_weight * velocity_loss
@@ -226,18 +261,8 @@ def train(model, train_dataloader, val_dataloader, config):
                 
                 loss = loss + l1_lambda * l1_norm + l2_lambda * l2_norm
             
-            # Add temporal consistency loss for contact continuity
-            if temporal_lambda > 0 and contact_output.size(0) > 1:
-                # Convert logits to probabilities [0,1] for meaningful distance metric
-                contact_predictions = torch.sigmoid(contact_output)
-                
-                # Compute differences between consecutive predictions
-                temporal_diff = contact_predictions[1:] - contact_predictions[:-1]
-                
-                # L1 loss: penalize absolute differences
-                temporal_loss = torch.abs(temporal_diff).mean()
-                
-                loss = loss + temporal_lambda * temporal_loss
+            # NOTE: Temporal consistency loss removed - requires sequential data, not shuffled batches
+            # If needed, implement by grouping consecutive windows from same trajectory
             
             loss.backward()
             optimizer.step()
@@ -401,47 +426,122 @@ def main():
                                   label_path=config['data_folder']+"all_labels.npy",\
                                   window_size=config['window_size'],device=device)
     
-    # Split the windows into train/val/test
-    dataset_size = len(all_dataset)
-    indices = list(range(dataset_size))
+    # Split by RUNS (not windows) to prevent data leakage from overlapping sliding windows
+    # Get all unique run IDs
+    all_run_ids = np.unique(all_dataset.window_to_run_id)
+    num_runs = len(all_run_ids)
+    
+    # DEBUG: Print run distribution to verify proper splitting
+    print(f"\n{'='*60}")
+    print(f"DEBUG: Run-based splitting verification")
+    print(f"{'='*60}")
+    for run_id in all_run_ids[:min(5, len(all_run_ids))]:  # Show first 5 runs
+        num_windows_in_run = sum(1 for r in all_dataset.window_to_run_id if r == run_id)
+        print(f"  Run {run_id}: {num_windows_in_run} windows")
+    if len(all_run_ids) > 5:
+        print(f"  ... and {len(all_run_ids) - 5} more runs")
+    print(f"{'='*60}\n")
+    
+    # Validate sufficient runs for splitting
+    if num_runs < 3:
+        raise ValueError(f"Need at least 3 runs for train/val/test split, but only have {num_runs}. Collect more data or use fewer splits.")
     
     train_ratio = config.get('train_ratio', 0.7)
     val_ratio = config.get('val_ratio', 0.15)
     
-    train_size = int(train_ratio * dataset_size)
-    val_size = int(val_ratio * dataset_size)
+    train_num_runs = int(train_ratio * num_runs)
+    val_num_runs = int(val_ratio * num_runs)
+    test_num_runs = num_runs - train_num_runs - val_num_runs
     
-    # Shuffle indices if specified
+    # Ensure at least 1 run per split
+    if train_num_runs == 0:
+        train_num_runs = 1
+        val_num_runs = max(1, (num_runs - train_num_runs) // 2)
+        test_num_runs = num_runs - train_num_runs - val_num_runs
+        print(f"Warning: Adjusted split to ensure at least 1 run per split.")
+    
+    # Shuffle run IDs if specified (NOT windows - this prevents leakage)
     if config['shuffle']:
         np.random.seed(config.get('random_seed', 42))
-        np.random.shuffle(indices)
+        np.random.shuffle(all_run_ids)
     
-    train_indices = indices[:train_size]
-    val_indices = indices[train_size:train_size + val_size]
-    test_indices = indices[train_size + val_size:]
+    # Split run IDs into train/val/test
+    train_run_ids = set(all_run_ids[:train_num_runs])
+    val_run_ids = set(all_run_ids[train_num_runs:train_num_runs + val_num_runs])
+    test_run_ids = set(all_run_ids[train_num_runs + val_num_runs:])
     
-    print(f"\nDataset split:")
-    print(f"  Total windows: {dataset_size}")
-    print(f"  Train windows: {len(train_indices)}")
-    print(f"  Val windows: {len(val_indices)}")
-    print(f"  Test windows: {len(test_indices)}")
+    # Get all windows belonging to each split (all windows from a run go to same split)
+    train_indices = all_dataset.get_windows_by_run_ids(train_run_ids)
+    val_indices = all_dataset.get_windows_by_run_ids(val_run_ids)
+    test_indices = all_dataset.get_windows_by_run_ids(test_run_ids)
+    
+    # Validate non-empty splits
+    if len(train_indices) == 0 or len(val_indices) == 0:
+        raise ValueError(f"Empty train or val set after run-based split. Train: {len(train_indices)}, Val: {len(val_indices)}")
+    
+    print(f"\nDataset split BY RUNS (prevents data leakage):")
+    print(f"  Total runs: {num_runs}")
+    print(f"  Train runs: {len(train_run_ids)} -> {len(train_indices)} windows")
+    print(f"  Val runs: {len(val_run_ids)} -> {len(val_indices)} windows")
+    print(f"  Test runs: {len(test_run_ids)} -> {len(test_indices)} windows")
+    print(f"  Total windows: {len(all_dataset)}")
+    
+    # DEBUG: Verify no overlap between splits
+    print(f"\nDEBUG: Verifying split integrity...")
+    train_val_overlap = train_run_ids.intersection(val_run_ids)
+    train_test_overlap = train_run_ids.intersection(test_run_ids)
+    val_test_overlap = val_run_ids.intersection(test_run_ids)
+    
+    if len(train_val_overlap) > 0 or len(train_test_overlap) > 0 or len(val_test_overlap) > 0:
+        print(f"  ❌ ERROR: Run overlap detected!")
+        print(f"     Train-Val overlap: {train_val_overlap}")
+        print(f"     Train-Test overlap: {train_test_overlap}")
+        print(f"     Val-Test overlap: {val_test_overlap}")
+        raise ValueError("Data leakage detected: runs overlap between splits!")
+    else:
+        print(f"  ✓ No run overlap - splits are clean")
+    
+    # DEBUG: Show which runs went to which split (first few)
+    print(f"  Train run IDs (first 5): {sorted(list(train_run_ids))[:5]}")
+    print(f"  Val run IDs (first 5): {sorted(list(val_run_ids))[:5]}")
+    print(f"  Test run IDs (first 5): {sorted(list(test_run_ids))[:5]}")
+    
+    # CRITICAL WARNING: Check if all data is treated as one run
+    if num_runs == 1:
+        print(f"\n{'='*60}")
+        print(f"⚠️  CRITICAL WARNING: Only 1 run detected!")
+        print(f"{'='*60}")
+        print(f"All windows belong to the same run. This means:")
+        print(f"  - Overlapping windows are NOT separated by runs")
+        print(f"  - Data leakage is STILL PRESENT")
+        print(f"  - High test accuracy is ARTIFICIALLY INFLATED")
+        print(f"\nSOLUTION: Your CSV files likely don't have time resets.")
+        print(f"  1. Check csv2numpy.py run boundary detection")
+        print(f"  2. Ensure CSVs have clear run separations")
+        print(f"  3. Or manually split data into separate CSV files per run")
+        print(f"{'='*60}\n")
     
     # Create Subset datasets for deterministic sampling
     from torch.utils.data import Subset
     train_dataset = Subset(all_dataset, train_indices)
     val_dataset = Subset(all_dataset, val_indices)
     
-    # Compute global normalization statistics from TRAINING data only
-    # Extract only training samples to compute unbiased statistics
-    # Features are already engineered in csv2numpy.py (qd_norm, tau_est_norm, tau_mse, cmd_vel)
-    train_data_samples = all_dataset.data[train_indices]  # Get only training data points (57 features)
+    # Compute global normalization statistics from TRAINING WINDOWS only
+    # Extract actual data from training windows to compute unbiased statistics
+    # NOTE: train_indices are window indices, not raw data indices
+    train_windows_data = []
+    for window_idx in train_indices:
+        # Get the actual window data (shape: window_size x 57)
+        window = all_dataset[window_idx]['data']  # Use __getitem__ to get proper windowed data
+        train_windows_data.append(window)  # Keep on same device as dataset
     
-    # Feature layout (57 features): acc(3) + omega(3) + q(12) + qd_norm(12) + p(6) + v(6) + tau_est_norm(12) + tau_mse(2) + cmd_vel(1)
-    # No additional feature engineering needed - already done in csv2numpy.py
-    train_data_engineered = train_data_samples  # (num_train_samples, 57)
-
-
-
+    # Stack all training windows and flatten to get all training samples
+    # Shape: (num_train_windows * window_size, 57)
+    train_data_engineered = torch.cat(train_windows_data, dim=0)
+    
+    # Feature layout (57 features): acc(3) + omega(3) + q(12) + qd(12) + p(6) + v(6) + tau_est(12) + tau_mse(2) + cmd_vel(1)
+    # All features are RAW from csv2numpy.py - no pre-normalization
+    
     # Compute 1st and 99th percentiles for each feature to clip outliers
     percentile_1 = torch.quantile(train_data_engineered, 0.01, dim=0, keepdim=True)  # (1, 57)
     percentile_99 = torch.quantile(train_data_engineered, 0.99, dim=0, keepdim=True)  # (1, 57)
@@ -450,7 +550,7 @@ def main():
     train_data_clipped = torch.clamp(train_data_engineered, min=percentile_1, max=percentile_99)
     
     # Compute mean and std per feature from clipped data (57 features total)
-    # Layout: acc(0-2) + omega(3-5) + q(6-17) + qd_norm(18-29) + p(30-35) + v(36-41) + tau_est_norm(42-53) + tau_mse(54-55) + cmd_vel(56)
+    # Layout: acc(0-2) + omega(3-5) + q(6-17) + qd(18-29) + p(30-35) + v(36-41) + tau_est(42-53) + tau_mse(54-55) + cmd_vel(56)
     global_mean = train_data_clipped.mean(dim=0, keepdim=True).unsqueeze(0)  # Shape: (1, 1, 57)
     global_std = train_data_clipped.std(dim=0, keepdim=True).unsqueeze(0)    # Shape: (1, 1, 57)
     
@@ -458,13 +558,14 @@ def main():
     global_std = torch.where(global_std == 0, torch.ones_like(global_std), global_std)
     
     print(f"\nGlobal normalization statistics computed from clipped training data:")
-    print(f"  Total features: 57 (acc + omega + q + qd_norm + p + v + tau_est_norm + tau_mse + cmd_vel)")
-    print(f"  Features engineered in csv2numpy.py (qd and tau_est normalized by cmd_vel)")
+    print(f"  Total features: 57 (acc + omega + q + qd + p + v + tau_est + tau_mse + cmd_vel)")
+    print(f"  All features are RAW (not pre-normalized in csv2numpy.py)")
     print(f"  Clipped to [1st, 99th] percentiles per feature")
     print(f"  Mean shape: {global_mean.shape}")
     print(f"  Std shape: {global_std.shape}")
     print(f"  Mean range: [{global_mean.min().item():.4f}, {global_mean.max().item():.4f}]")
     print(f"  Std range: [{global_std.min().item():.4f}, {global_std.max().item():.4f}]")
+    print(f"  Device: {global_mean.device}")
     
     # Create dataloaders
     # Train: shuffle each epoch for better training (but with reproducible seed from config)

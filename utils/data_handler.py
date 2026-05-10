@@ -44,35 +44,66 @@ class contact_dataset(Dataset):
         
         # Load run boundaries to prevent window bleeding across different runs
         boundary_path = data_path.replace('.npy', '_boundaries.npy')
-        boundaries = None
         if os.path.exists(boundary_path):
-            boundaries = np.load(boundary_path)
+            boundaries = np.load(boundary_path).tolist()  # Convert to list for consistency
             print(f"Loaded {len(boundaries)} run boundaries from {boundary_path}")
         else:
-            print(f"Warning: No boundary file found at {boundary_path}. Windows may span across different runs.")
+            print(f"Warning: No boundary file found at {boundary_path}. Treating all data as one run.")
+            # If no boundaries, treat all data as one run
+            boundaries = [data.shape[0]]
         
-        # Pre-compute valid window indices (windows that don't cross run boundaries)
+        # Validate boundaries
+        if len(boundaries) == 0:
+            raise ValueError("No run boundaries found. Cannot process data.")
+        
+        # Pre-compute valid window indices AND track which run each window belongs to
+        # This is critical for preventing data leakage - we'll split by runs, not windows
         self.valid_indices = []
+        self.window_to_run_id = []  # Maps window index to run ID
         total_possible_windows = data.shape[0] - window_size + 1
+        
+        if total_possible_windows <= 0:
+            raise ValueError(f"Window size ({window_size}) is larger than data length ({data.shape[0]}). No valid windows.")
+        
+        # Boundaries mark END of each run. Convert to [start, end) pairs
+        run_starts = [0] + boundaries[:-1]
+        run_ends = boundaries
         
         for idx in range(total_possible_windows):
             window_end = idx + window_size
-            is_valid = True
             
-            if boundaries is not None:
-                for boundary in boundaries:
-                    if idx < boundary < window_end:
-                        is_valid = False
-                        break
+            # Find which run this window belongs to
+            # A window belongs to a run if it starts AND ends within that run
+            window_run_id = None
+            for run_id, (run_start, run_end) in enumerate(zip(run_starts, run_ends)):
+                if run_start <= idx and window_end <= run_end:
+                    window_run_id = run_id
+                    break
             
-            if is_valid:
+            # Only include windows that belong entirely to one run (don't cross boundaries)
+            if window_run_id is not None:
                 self.valid_indices.append(idx)
+                self.window_to_run_id.append(window_run_id)
         
         num_invalid = total_possible_windows - len(self.valid_indices)
+        num_runs = len(boundaries)
         print(f"Valid windows: {len(self.valid_indices)} / {total_possible_windows} (skipped {num_invalid} boundary-crossing windows)")
+        print(f"Windows distributed across {num_runs} runs")
+        
+        # Validate that we have valid windows
+        if len(self.valid_indices) == 0:
+            raise ValueError(f"No valid windows found. Check window_size ({window_size}) vs run lengths.")
 
     def __len__(self):
         return len(self.valid_indices)
+    
+    def get_run_id(self, window_idx):
+        """Get the run ID for a given window index."""
+        return self.window_to_run_id[window_idx]
+    
+    def get_windows_by_run_ids(self, run_ids):
+        """Get all window indices that belong to the specified run IDs."""
+        return [i for i, run_id in enumerate(self.window_to_run_id) if run_id in run_ids]
 
     def __getitem__(self, idx):
         
@@ -102,7 +133,7 @@ class contact_dataset(Dataset):
         real_idx = self.valid_indices[idx]
         
         # Return raw unnormalized data (normalization done inside the model)
-        # Feature layout (57 features): acc(0-2) + omega(3-5) + q(6-17) + qd(18-29) + p(30-35) + v(36-41) + tau_est(42-53) + tau_mse(54-55) + cmd_vel(56)
+        # Feature layout (57 RAW features): acc(0-2) + omega(3-5) + q(6-17) + qd(18-29) + p(30-35) + v(36-41) + tau_est(42-53) + tau_mse(54-55) + cmd_vel(56)
         this_data = self.data[real_idx:real_idx+self.window_size,:]
         
         this_label = self.label[real_idx+self.window_size-1]  # Shape: (2,) - [left, right]

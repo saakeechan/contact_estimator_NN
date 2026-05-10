@@ -12,9 +12,14 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
     """
     Load data from CSV files and concatenate into single numpy arrays.
     
-    NOTE: This function now saves ALL data as one dataset without splitting.
-    The train/val/test split should happen in train.py AFTER windowing to avoid
-    losing data at split boundaries.
+    IMPORTANT: This function saves ALL data as one dataset WITHOUT splitting.
+    The train/val/test split happens in train.py BY RUNS (not windows) to prevent
+    data leakage from overlapping sliding windows.
+    
+    Boundaries are saved to mark the end of each run. These are CRITICAL for:
+    1. Preventing windows from spanning across different runs
+    2. Ensuring all windows from a run go to the same split (train/val/test)
+    3. Avoiding data leakage where test windows overlap with training windows
     
     Features are raw sensor data without cmd_vel normalization.
     tau_mse is calculated here from tau_est and included as a feature.
@@ -28,8 +33,10 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
     Output:
     - all_data.npy: all data concatenated (57 features)
       Layout: acc(3) + omega(3) + q(12) + qd(12) + p(6) + v(6) + tau_est(12) + tau_mse(2) + cmd_vel(1)
+      NOTE: All features are RAW - no normalization by cmd_vel or any other feature
     - all_labels.npy: both legs contact labels (shape: N x 2, [left, right], binary 0/1)
-    - all_data_boundaries.npy: indices marking end of each run (to prevent window bleeding)
+    - all_data_boundaries.npy: indices marking end of each run (CRITICAL for preventing data leakage)
+    - all_foot_velocities.npy: foot velocity magnitudes for both legs (shape: N x 2, [left, right])
     """
     
     num_features = 57  # acc(3) + omega(3) + q(12) + qd(12) + p(6) + v(6) + tau_est(12) + tau_mse(2) + cmd_vel(1)
@@ -38,6 +45,8 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
     all_foot_velocities = np.zeros((0, 2))  # World frame foot velocities: [left, right] - magnitudes
     
     # Track boundaries between different runs to prevent window bleeding
+    # CRITICAL: These boundaries are used in train.py to split by RUNS (not windows)
+    # This prevents data leakage from overlapping sliding windows
     all_boundaries = []
     
     # Define column names for data extraction
@@ -114,8 +123,8 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
             cmd_vel = df_run[['cmd_vel_x']].values
 
                         # Calculate tau_mse from tau_est separately for each leg
-            tau_mse_left = np.mean(tau_est[:, :6] ** 2, axis=1, keepdims=True)  # Left leg (first 6 joints)
-            tau_mse_right = np.mean(tau_est[:, 6:] ** 2, axis=1, keepdims=True)  # Right leg (last 6 joints)
+            tau_mse_left = np.sum(tau_est[:, :6] ** 2, axis=1, keepdims=True)  # Left leg (first 6 joints)
+            tau_mse_right = np.sum(tau_est[:, 6:] ** 2, axis=1, keepdims=True)  # Right leg (last 6 joints)
             tau_mse = np.hstack((tau_mse_left, tau_mse_right))  # Shape: (num_samples, 2)
 
             # Concatenate features: acc(3) + omega(3) + q(12) + qd(12) + p(6) + v(6) + tau_est(12) + tau_mse(2) + cmd_vel(1) = 57
@@ -160,6 +169,35 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
             all_boundaries.append(all_data.shape[0])
     
     print(f"\nTotal data collected: {all_data.shape[0]} samples from {len(all_boundaries)} runs")
+    
+    # DEBUG: Show run sizes to verify proper boundary detection
+    print(f"\nDEBUG: Run size distribution:")
+    run_sizes = []
+    prev_boundary = 0
+    for i, boundary in enumerate(all_boundaries):
+        run_size = boundary - prev_boundary
+        run_sizes.append(run_size)
+        if i < 5:  # Show first 5 runs
+            print(f"  Run {i}: {run_size} samples")
+        prev_boundary = boundary
+    if len(all_boundaries) > 5:
+        print(f"  ... and {len(all_boundaries) - 5} more runs")
+    print(f"  Average run size: {np.mean(run_sizes):.1f} samples")
+    print(f"  Min run size: {np.min(run_sizes)} samples")
+    print(f"  Max run size: {np.max(run_sizes)} samples")
+    
+    # CRITICAL WARNING
+    if len(all_boundaries) == 1:
+        print(f"\n{'='*60}")
+        print(f"⚠️  WARNING: Only 1 run boundary detected!")
+        print(f"{'='*60}")
+        print(f"This means ALL data is treated as ONE continuous run.")
+        print(f"Consequence: Data leakage from overlapping windows!")
+        print(f"\nCheck:")
+        print(f"  1. Do your CSV files have timestamp resets (dt > 0.025)?")
+        print(f"  2. Are multiple CSV files being processed?")
+        print(f"  3. Each CSV file creates at least one run")
+        print(f"{'='*60}\n")
     
     # Labels are already 0/1 for left foot (no flattening needed since they're already 1D per sample)
     

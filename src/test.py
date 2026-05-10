@@ -124,24 +124,42 @@ def main():
                                   label_path=config['data_folder']+"all_labels.npy",\
                                   window_size=config['window_size'],device=device)
     
-    # Split the windows - must use same seed as training for consistent splits
-    dataset_size = len(all_dataset)
-    indices = list(range(dataset_size))
+    # Split by RUNS (not windows) to prevent data leakage - must match train.py exactly
+    # Get all unique run IDs
+    all_run_ids = np.unique(all_dataset.window_to_run_id)
+    num_runs = len(all_run_ids)
+    
+    # Validate sufficient runs
+    if num_runs < 3:
+        print(f"Warning: Only {num_runs} runs available. Test split may be empty or small.")
     
     train_ratio = config.get('train_ratio', 0.7)
     val_ratio = config.get('val_ratio', 0.15)
     
-    train_size = int(train_ratio * dataset_size)
-    val_size = int(val_ratio * dataset_size)
+    train_num_runs = int(train_ratio * num_runs)
+    val_num_runs = int(val_ratio * num_runs)
     
-    # Use same random seed and shuffle setting as training to get same split
+    # Ensure at least 1 run per split (same logic as train.py)
+    if train_num_runs == 0:
+        train_num_runs = 1
+        val_num_runs = max(1, (num_runs - train_num_runs) // 2)
+    
+    # Use same random seed and shuffle setting as training to get EXACT same split
     if config.get('shuffle', True):
         np.random.seed(config.get('random_seed', 42))
-        np.random.shuffle(indices)
+        np.random.shuffle(all_run_ids)
     
-    test_indices = indices[train_size + val_size:]
+    # Split run IDs (must match train.py)
+    test_run_ids = set(all_run_ids[train_num_runs + val_num_runs:])
     
-    print(f"Testing on {len(test_indices)} windows")
+    # Get all windows belonging to test runs
+    test_indices = all_dataset.get_windows_by_run_ids(test_run_ids)
+    
+    if len(test_indices) == 0:
+        raise ValueError(f"No test windows found. Dataset may be too small or split ratios may need adjustment.")
+    
+    print(f"\nTesting on {len(test_run_ids)} runs -> {len(test_indices)} windows")
+    print(f"Total runs in dataset: {num_runs}")
     
     # Create subset dataset for test data (no batch shuffling for deterministic results)
     from torch.utils.data import Subset
@@ -154,11 +172,27 @@ def main():
     # init network with built-in normalization (same as training)
     base_model = contact_cnn(window_size=config['window_size'])
     from contact_cnn import ContactCNNWithNormalization
-    model = ContactCNNWithNormalization(base_model)
+    model = ContactCNNWithNormalization(base_model)  # Will load stats from checkpoint
 
     checkpoint = torch.load(config['model_load_path'])
     model.load_state_dict(checkpoint['model_state_dict'])
     model = model.eval().to(device)
+    
+    # DEBUG: Verify normalization stats were loaded correctly
+    print(f"\n{'='*60}")
+    print(f"DEBUG: Normalization stats in test model")
+    print(f"{'='*60}")
+    print(f"Global mean shape: {model.global_mean.shape}")
+    print(f"Global std shape: {model.global_std.shape}")
+    print(f"Global mean range: [{model.global_mean.min().item():.4f}, {model.global_mean.max().item():.4f}]")
+    print(f"Global std range: [{model.global_std.min().item():.4f}, {model.global_std.max().item():.4f}]")
+    
+    # Check if using default fallback values (zeros/ones)
+    if torch.allclose(model.global_mean, torch.zeros_like(model.global_mean)):
+        print(f"⚠️  WARNING: global_mean is all zeros (using fallback - normalization NOT loaded!)")
+    if torch.allclose(model.global_std, torch.ones_like(model.global_std)):
+        print(f"⚠️  WARNING: global_std is all ones (using fallback - normalization NOT loaded!)")
+    print(f"{'='*60}\n")
 
     test_acc, acc_per_leg, bin_pred_arr, bin_gt_arr, velocity_mse = compute_accuracy(test_dataloader, model)
     precision_of_legs, precision_of_all_legs = compute_precision(bin_pred_arr, bin_gt_arr)
