@@ -139,21 +139,21 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
             contacts_right = df_run[['rfoot-contact']].values.astype(int)
             contacts = np.hstack((contacts_left, contacts_right))  # Shape: (num_samples, 2)
             
-            # Calculate foot velocity in world frame by numerical differentiation for BOTH legs
-            # Left foot velocity
-            lfoot_position_world = ['lfoot_pos_x', 'lfoot_pos_y', 'lfoot_pos_z']
-            lfoot_velocity_world = np.diff(df_run[lfoot_position_world].values, axis=0) / np.diff(df_run['timestamp'].values.reshape(-1, 1), axis=0)
-            lfoot_velocity_world = np.vstack((lfoot_velocity_world, lfoot_velocity_world[-1, :]))  # Keep size consistent
-            lfoot_velocity_norm = np.linalg.norm(lfoot_velocity_world, axis=1, keepdims=True) + 1e-8
+            # # Calculate foot velocity in world frame by numerical differentiation for BOTH legs
+            # # Left foot velocity
+            # lfoot_position_world = ['lfoot_pos_x', 'lfoot_pos_y', 'lfoot_pos_z']
+            # lfoot_velocity_world = np.diff(df_run[lfoot_position_world].values, axis=0) / np.diff(df_run['timestamp'].values.reshape(-1, 1), axis=0)
+            # lfoot_velocity_world = np.vstack((lfoot_velocity_world, lfoot_velocity_world[-1, :]))  # Keep size consistent
+            # lfoot_velocity_norm = np.linalg.norm(lfoot_velocity_world, axis=1, keepdims=True) + 1e-8
             
-            # Right foot velocity
-            rfoot_position_world = ['rfoot_pos_x', 'rfoot_pos_y', 'rfoot_pos_z']
-            rfoot_velocity_world = np.diff(df_run[rfoot_position_world].values, axis=0) / np.diff(df_run['timestamp'].values.reshape(-1, 1), axis=0)
-            rfoot_velocity_world = np.vstack((rfoot_velocity_world, rfoot_velocity_world[-1, :]))  # Keep size consistent
-            rfoot_velocity_norm = np.linalg.norm(rfoot_velocity_world, axis=1, keepdims=True) + 1e-8
+            # # Right foot velocity
+            # rfoot_position_world = ['rfoot_pos_x', 'rfoot_pos_y', 'rfoot_pos_z']
+            # rfoot_velocity_world = np.diff(df_run[rfoot_position_world].values, axis=0) / np.diff(df_run['timestamp'].values.reshape(-1, 1), axis=0)
+            # rfoot_velocity_world = np.vstack((rfoot_velocity_world, rfoot_velocity_world[-1, :]))  # Keep size consistent
+            # rfoot_velocity_norm = np.linalg.norm(rfoot_velocity_world, axis=1, keepdims=True) + 1e-8
             
-            # Combine velocities: [left, right]
-            foot_velocities = np.hstack((lfoot_velocity_norm, rfoot_velocity_norm))  # Shape: (num_samples, 2)
+            # # Combine velocities: [left, right]
+            # foot_velocities = np.hstack((lfoot_velocity_norm, rfoot_velocity_norm))  # Shape: (num_samples, 2)
 
 
             
@@ -163,7 +163,7 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
             # Append to full dataset
             all_data = np.vstack((all_data, cur_data))
             all_labels = np.vstack((all_labels, cur_label))
-            all_foot_velocities = np.vstack((all_foot_velocities, foot_velocities))  # Both legs velocities
+            # all_foot_velocities = np.vstack((all_foot_velocities, foot_velocities))  # Both legs velocities
             
             # Record boundary index (end of this run in the full dataset)
             all_boundaries.append(all_data.shape[0])

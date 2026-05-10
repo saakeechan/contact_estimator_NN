@@ -63,28 +63,26 @@ def compute_jaccard(bin_pred_arr, bin_gt_arr):
 def compute_accuracy(dataloader, model):
     """
     Compute accuracy for both legs binary classification.
-    Also computes velocity MSE for multi-task evaluation.
     Returns:
         accuracy: overall contact accuracy
         per_leg_accuracy: (2,) per-leg contact accuracy [left, right]
         bin_pred_arr: (N, 2) binary predictions [left, right]
         bin_gt_arr: (N, 2) binary ground truth [left, right]
-        velocity_mse: overall velocity MSE
     """
     num_correct = 0
     num_data = 0
     correct_per_leg = np.zeros(2)  # 2 legs for biped [left, right]
     bin_pred_arr = np.zeros((0,2))  # 2 legs for biped
     bin_gt_arr = np.zeros((0,2))  # 2 legs for biped
-    velocity_mse_sum = 0.0
+    # velocity_mse_sum = 0.0
     
     with torch.no_grad():
         for sample in tqdm(dataloader):
             input_data = sample['data']
             gt_label = sample['label']  # Shape: (batch, 2) - binary labels [left, right]
-            gt_velocity = sample['velocity']  # Shape: (batch, 2) - velocity [left, right]
+            # gt_velocity = sample['velocity']  # Shape: (batch, 2) - velocity [left, right]
 
-            contact_output, velocity_output = model(input_data)  # Two outputs: (batch, 2) each
+            contact_output = model(input_data)  # Only contact output: (batch, 2)
             contact_prediction = (torch.sigmoid(contact_output) > 0.5).float()  # Binary predictions
 
             bin_pred_arr = np.vstack((bin_pred_arr, contact_prediction.cpu().numpy()))
@@ -96,14 +94,14 @@ def compute_accuracy(dataloader, model):
             # Overall contact accuracy (averaged across both legs)
             num_correct += (contact_prediction == gt_label).sum().item()
             
-            # Velocity MSE
-            velocity_mse_sum += ((velocity_output - gt_velocity) ** 2).sum().item()
+            # # Velocity MSE
+            # velocity_mse_sum += ((velocity_output - gt_velocity) ** 2).sum().item()
 
     # Total accuracy considers all predictions (both legs)
     total_predictions = num_data * 2  # 2 legs per sample
-    velocity_mse = velocity_mse_sum / total_predictions
+    # velocity_mse = velocity_mse_sum / total_predictions
     
-    return num_correct/total_predictions, correct_per_leg/num_data, bin_pred_arr, bin_gt_arr, velocity_mse
+    return num_correct/total_predictions, correct_per_leg/num_data, bin_pred_arr, bin_gt_arr  # , velocity_mse
 
 def decimal2binary(x):
     mask = 2**torch.arange(2-1,-1,-1).to(x.device, x.dtype)  # 2 legs for biped

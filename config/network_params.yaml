@@ -22,7 +22,7 @@ val_ratio: 0.15
 # Network params
 batch_size: 30
 init_lr: 0.0001
-num_epoch: 10  # Reduced for quick training with small dataset
+num_epoch: 20  # Reduced for quick training with small dataset
 
 # Elastic Net Regularization (L1 + L2)
 # Loss = BCE_loss + l1_lambda * ||w||_1 + l2_lambda * ||w||_2^2

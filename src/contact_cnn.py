@@ -83,61 +83,75 @@ class contact_cnn(nn.Module):
         # Final conv outputs 128 channels
         fc_input_size = (window_size // 4) * 128
         
-        # Separate MLP for left leg contact detection (classification)
-        self.fc_contact_left = nn.Sequential(
+        # # Separate MLP for left leg contact detection (classification)
+        # self.fc_contact_left = nn.Sequential(
+        #     nn.Linear(in_features=fc_input_size,
+        #               out_features=64),
+        #     nn.ReLU(),
+        #     nn.Dropout(p=0.5),
+        #     nn.Linear(in_features=64,
+        #               out_features=16),
+        #     nn.ReLU(),
+        #     nn.Dropout(p=0.5),
+        #     nn.Linear(in_features=16,
+        #               out_features=1),  # 1 output: binary contact for left leg
+        # )
+        # 
+        # # Separate MLP for right leg contact detection (classification)
+        # self.fc_contact_right = nn.Sequential(
+        #     nn.Linear(in_features=fc_input_size,
+        #               out_features=64),
+        #     nn.ReLU(),
+        #     nn.Dropout(p=0.5),
+        #     nn.Linear(in_features=64,
+        #               out_features=16),
+        #     nn.ReLU(),
+        #     nn.Dropout(p=0.5),
+        #     nn.Linear(in_features=16,
+        #               out_features=1),  # 1 output: binary contact for right leg
+        # )
+        
+        # Shared MLP for both legs contact detection (4 states: 00, 01, 10, 11)
+        self.fc_contact = nn.Sequential(
             nn.Linear(in_features=fc_input_size,
-                      out_features=2048),
+                      out_features=128),
             nn.ReLU(),
             nn.Dropout(p=0.5),
-            nn.Linear(in_features=2048,
-                      out_features=512),
+            nn.Linear(in_features=128,
+                      out_features=32),
             nn.ReLU(),
             nn.Dropout(p=0.5),
-            nn.Linear(in_features=512,
-                      out_features=1),  # 1 output: binary contact for left leg
+            nn.Linear(in_features=32,
+                      out_features=2),  # 2 outputs: binary contact for [left, right] legs
         )
         
-        # Separate MLP for right leg contact detection (classification)
-        self.fc_contact_right = nn.Sequential(
-            nn.Linear(in_features=fc_input_size,
-                      out_features=2048),
-            nn.ReLU(),
-            nn.Dropout(p=0.5),
-            nn.Linear(in_features=2048,
-                      out_features=512),
-            nn.ReLU(),
-            nn.Dropout(p=0.5),
-            nn.Linear(in_features=512,
-                      out_features=1),  # 1 output: binary contact for right leg
-        )
+        # # Separate MLP for left leg velocity regression
+        # self.fc_velocity_left = nn.Sequential(
+        #     nn.Linear(in_features=fc_input_size,
+        #               out_features=2048),
+        #     nn.ReLU(),
+        #     nn.Dropout(p=0.5),
+        #     nn.Linear(in_features=2048,
+        #               out_features=512),
+        #     nn.ReLU(),
+        #     nn.Dropout(p=0.5),
+        #     nn.Linear(in_features=512,
+        #               out_features=1),  # 1 output: velocity norm for left leg
+        # )
         
-        # Separate MLP for left leg velocity regression
-        self.fc_velocity_left = nn.Sequential(
-            nn.Linear(in_features=fc_input_size,
-                      out_features=2048),
-            nn.ReLU(),
-            nn.Dropout(p=0.5),
-            nn.Linear(in_features=2048,
-                      out_features=512),
-            nn.ReLU(),
-            nn.Dropout(p=0.5),
-            nn.Linear(in_features=512,
-                      out_features=1),  # 1 output: velocity norm for left leg
-        )
-        
-        # Separate MLP for right leg velocity regression
-        self.fc_velocity_right = nn.Sequential(
-            nn.Linear(in_features=fc_input_size,
-                      out_features=2048),
-            nn.ReLU(),
-            nn.Dropout(p=0.5),
-            nn.Linear(in_features=2048,
-                      out_features=512),
-            nn.ReLU(),
-            nn.Dropout(p=0.5),
-            nn.Linear(in_features=512,
-                      out_features=1),  # 1 output: velocity norm for right leg
-        )
+        # # Separate MLP for right leg velocity regression
+        # self.fc_velocity_right = nn.Sequential(
+        #     nn.Linear(in_features=fc_input_size,
+        #               out_features=2048),
+        #     nn.ReLU(),
+        #     nn.Dropout(p=0.5),
+        #     nn.Linear(in_features=2048,
+        #               out_features=512),
+        #     nn.ReLU(),
+        #     nn.Dropout(p=0.5),
+        #     nn.Linear(in_features=512,
+        #               out_features=1),  # 1 output: velocity norm for right leg
+        # )
 
     def forward(self, x):
         # x shape: (batch_size, window_size, 57) - RAW features from csv2numpy.py (BOTH LEGS)
@@ -148,17 +162,10 @@ class contact_cnn(nn.Module):
         block2_out = self.block2(block1_out)
         block2_out_reshape = block2_out.view(block2_out.shape[0], -1)
         
-        # Four separate MLPs: contact and velocity for each leg
-        contact_left = self.fc_contact_left(block2_out_reshape)  # Shape: (batch, 1)
-        contact_right = self.fc_contact_right(block2_out_reshape)  # Shape: (batch, 1)
-        velocity_left = self.fc_velocity_left(block2_out_reshape)  # Shape: (batch, 1)
-        velocity_right = self.fc_velocity_right(block2_out_reshape)  # Shape: (batch, 1)
+        # Shared MLP: contact for both legs
+        contact_out = self.fc_contact(block2_out_reshape)  # Shape: (batch, 2) - [left, right]
         
-        # Concatenate outputs: [left, right] for each task
-        contact_out = torch.cat([contact_left, contact_right], dim=1)  # Shape: (batch, 2)
-        velocity_out = torch.cat([velocity_left, velocity_right], dim=1)  # Shape: (batch, 2)
-        
-        return contact_out, velocity_out
+        return contact_out
 
 
 class contact_cnn_1block(nn.Module):
