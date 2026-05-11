@@ -31,30 +31,33 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
     - val_ratio: not used (kept for backward compatibility)
     
     Output:
-    - all_data.npy: all data concatenated (57 features)
-      Layout: acc(3) + omega(3) + q(12) + qd(12) + p(6) + v(6) + tau_est(12) + tau_mse(2) + cmd_vel(1)
+    - all_data.npy: all data concatenated (num_features auto-detected from shape) - LEFT LEG ONLY
+      Layout: imu_acc(3) + q(6) + qd(6) + p_x(1) + v_x(1) + tau_est(6) + tau_mse(1)
       NOTE: All features are RAW - no normalization by cmd_vel or any other feature
-    - all_labels.npy: both legs contact labels (shape: N x 2, [left, right], binary 0/1)
+    - all_labels.npy: LEFT leg contact labels only (shape: N x 1, binary 0/1)
     - all_data_boundaries.npy: indices marking end of each run (CRITICAL for preventing data leakage)
-    - all_foot_velocities.npy: foot velocity magnitudes for both legs (shape: N x 2, [left, right])
+    - all_data_metadata.npy: metadata dict with num_features (SOURCE OF TRUTH for network architecture)
+    - all_foot_velocities.npy: foot velocity magnitudes for LEFT leg only (shape: N x 1)
     """
     
-    num_features = 57  # acc(3) + omega(3) + q(12) + qd(12) + p(6) + v(6) + tau_est(12) + tau_mse(2) + cmd_vel(1)
-    all_data = np.zeros((0, num_features))
-    all_labels = np.zeros((0, 2))  # Both legs: [left, right]
-    all_foot_velocities = np.zeros((0, 2))  # World frame foot velocities: [left, right] - magnitudes
+    # num_features will be determined automatically from the actual data shape
+    all_data = None  # Will be initialized after first sample
+    all_labels = np.zeros((0, 1))  # LEFT leg only
+    all_foot_velocities = np.zeros((0, 1))  # World frame foot velocities: LEFT leg only - magnitudes
+    num_features = None  # Will be set from cur_data.shape[1] after first run
     
     # Track boundaries between different runs to prevent window bleeding
     # CRITICAL: These boundaries are used in train.py to split by RUNS (not windows)
     # This prevents data leakage from overlapping sliding windows
     all_boundaries = []
     
-    # Define column names for data extraction
+    # Define column names for data extraction - LEFT LEG ONLY
     joint_names = [
         'left_hip_pitch_joint', 'left_hip_roll_joint', 'left_hip_yaw_joint',
         'left_knee_joint', 'left_ankle_pitch_joint', 'left_ankle_roll_joint',
-        'right_hip_pitch_joint', 'right_hip_roll_joint', 'right_hip_yaw_joint',
-        'right_knee_joint', 'right_ankle_pitch_joint', 'right_ankle_roll_joint'
+        # RIGHT LEG COMMENTED OUT - only classifying left leg contact
+        # 'right_hip_pitch_joint', 'right_hip_roll_joint', 'right_hip_yaw_joint',
+        # 'right_knee_joint', 'right_ankle_pitch_joint', 'right_ankle_roll_joint'
     ]
     
     # Process all CSV files in the folder
@@ -75,7 +78,7 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
                 dt = abs(time_col[i] - time_col[i - 1])
                 if dt > 0.025:
                     run_boundaries.append(i)
-                    print(f"  Detected run boundary at index {i} (|dt|={dt:.4f}, time {time_col[i-1]:.4f} -> {time_col[i]:.4f})")
+                    # print(f"  Detected run boundary at index {i} (|dt|={dt:.4f}, time {time_col[i-1]:.4f} -> {time_col[i]:.4f})")
         
         run_boundaries.append(len(df))  # End of last run
         print(f"  Found {len(run_boundaries)-1} runs in file")
@@ -92,27 +95,27 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
                 print(f"  Skipping run {run_idx} (only {len(df_run)} sample)")
                 continue
             
-            # Extract IMU data in body frame
+            # # Extract IMU data in body frame
             imu_acc = df_run[['acc_body_x', 'acc_body_y', 'acc_body_z']].values
-            imu_omega = df_run[['gyro_body_x', 'gyro_body_y', 'gyro_body_z']].values
+            # imu_omega = df_run[['gyro_body_x', 'gyro_body_y', 'gyro_body_z']].values
 
-            # Extract joint positions (q) - 12 values (both legs)
+            # Extract joint positions (q) - 6 values (LEFT leg only)
             q_cols = ['joint_pos_' + j for j in joint_names]
             q = df_run[q_cols].values
             
-            # Extract joint velocities (qd) - 12 values (both legs)
+            # Extract joint velocities (qd) - 6 values (LEFT leg only)
             qd_cols = ['joint_vel_' + j for j in joint_names]
             qd = df_run[qd_cols].values
             
-            # Extract foot positions from FK
-            p = df_run[['fk_left_foot_pos_x', 'fk_left_foot_pos_y', 'fk_left_foot_pos_z',
-                        'fk_right_foot_pos_x', 'fk_right_foot_pos_y', 'fk_right_foot_pos_z']].values
+            # Extract foot positions from FK - LEFT leg only
+            p = df_run[['fk_left_foot_pos_x', 'fk_left_foot_pos_y', 'fk_left_foot_pos_z']].values
+            # p_right = df_run[['fk_right_foot_pos_x', 'fk_right_foot_pos_y', 'fk_right_foot_pos_z']].values  # COMMENTED OUT
             
-            # Extract foot velocities from FK
-            v = df_run[['fk_left_foot_vel_x', 'fk_left_foot_vel_y', 'fk_left_foot_vel_z',
-                        'fk_right_foot_vel_x', 'fk_right_foot_vel_y', 'fk_right_foot_vel_z']].values
+            # Extract foot velocities from FK - LEFT leg only
+            v = df_run[['fk_left_foot_vel_x', 'fk_left_foot_vel_y', 'fk_left_foot_vel_z']].values
+            # v_right = df_run[['fk_right_foot_vel_x', 'fk_right_foot_vel_y', 'fk_right_foot_vel_z']].values  # COMMENTED OUT
             
-            # Extract joint torques (tau_est) - 12 values (both legs)
+            # Extract joint torques (tau_est) - 6 values (LEFT leg only)
             tau_cols = ['joint_torque_' + j for j in joint_names]
             tau_est = df_run[tau_cols].values
 
@@ -120,24 +123,31 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
             # tau_cmd = df_run[tau_cmd_cols].values
 
             # Extract command velocity - 1 value
-            cmd_vel = df_run[['cmd_vel_x']].values
+            # cmd_vel = df_run[['cmd_vel_x']].values
 
-                        # Calculate tau_mse from tau_est separately for each leg
-            tau_mse_left = np.sum(tau_est[:, :6] ** 2, axis=1, keepdims=True)  # Left leg (first 6 joints)
-            tau_mse_right = np.sum(tau_est[:, 6:] ** 2, axis=1, keepdims=True)  # Right leg (last 6 joints)
-            tau_mse = np.hstack((tau_mse_left, tau_mse_right))  # Shape: (num_samples, 2)
+            # Calculate tau_mse from tau_est for LEFT leg only
+            tau_mse_left = np.sum(tau_est[:, :6] ** 2, axis=1, keepdims=True)  # Left leg (all 6 joints)
+            # tau_mse_right = np.sum(tau_est[:, 6:] ** 2, axis=1, keepdims=True)  # Right leg - COMMENTED OUT
+            tau_mse = tau_mse_left  # Shape: (num_samples, 1) - LEFT leg only
 
-            # Concatenate features: acc(3) + omega(3) + q(12) + qd(12) + p(6) + v(6) + tau_est(12) + tau_mse(2) + cmd_vel(1) = 57
-            cur_data = np.concatenate((imu_acc, imu_omega, q, qd, p, v, tau_est, tau_mse, cmd_vel), axis=1)
+            # Concatenate features - num_features is auto-detected from shape
+            cur_data = np.concatenate((np.abs(q[:,[3,4]]), np.abs(p[:, [0,2]]), np.abs(v[:, [0,2]]), np.abs(tau_est[:, [1,2,3,4,5]]), tau_mse), axis=1)
+            
+            # Initialize all_data and capture num_features from actual data shape
+            if num_features is None:
+                num_features = cur_data.shape[1]
+                all_data = np.zeros((0, num_features))
+                print(f"\nAuto-detected {num_features} features from data shape")
+                print(f"  Feature layout: q(6) + qd(6) + p_x(1) + p_z(1) + v_x(1) + v_z(1) + tau_est(6) + tau_mse(1)")
 
-            # ------------------------------
+            # -----------------------------
 
             # Output extraction
             
-            # Extract contact labels - both legs (binary: 0 or 1 for each)
-            contacts_left = df_run[['lfoot-contact']].values.astype(int)
-            contacts_right = df_run[['rfoot-contact']].values.astype(int)
-            contacts = np.hstack((contacts_left, contacts_right))  # Shape: (num_samples, 2)
+            # Extract contact labels - LEFT leg only (binary: 0 or 1)
+            contacts_left = df_run[['lfoot-contact']].values.astype(int)  # Shape: (num_samples, 1)
+            # contacts_right = df_run[['rfoot-contact']].values.astype(int)  # COMMENTED OUT - only classifying left leg
+            contacts = contacts_left  # Shape: (num_samples, 1) - LEFT leg only
             
             # # Calculate foot velocity in world frame by numerical differentiation for BOTH legs
             # # Left foot velocity
@@ -156,9 +166,8 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
             # foot_velocities = np.hstack((lfoot_velocity_norm, rfoot_velocity_norm))  # Shape: (num_samples, 2)
 
 
-            
-            # Both legs contact labels (already 0 or 1, no conversion needed)
-            cur_label = contacts  # Shape: (num_samples, 2) - [left, right]
+            # LEFT leg contact labels (already 0 or 1, no conversion needed)
+            cur_label = contacts  # Shape: (num_samples, 1) - LEFT leg only
             
             # Append to full dataset
             all_data = np.vstack((all_data, cur_data))
@@ -209,10 +218,19 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
     np.save(save_pth + "all_foot_velocities.npy", all_foot_velocities)
     np.save(save_pth + "all_data_boundaries.npy", np.array(all_boundaries))
     
+    # Save metadata including num_features (source of truth for network architecture)
+    metadata = {
+        'num_features': num_features,
+        'num_samples': all_data.shape[0],
+        'num_runs': len(all_boundaries)
+    }
+    np.save(save_pth + "all_data_metadata.npy", metadata)
+    
     print(f"Saved {all_data.shape[0]} samples to all_data.npy")
-    print(f"Saved {all_labels.shape[0]} contact labels (2 legs: left, right) to all_labels.npy")
-    print(f"Saved {all_foot_velocities.shape[0]} foot velocity norms (2 legs: left, right) to all_foot_velocities.npy")
+    print(f"Saved {all_labels.shape[0]} contact labels (LEFT leg only) to all_labels.npy")
+    print(f"Saved {all_foot_velocities.shape[0]} foot velocity norms (LEFT leg only) to all_foot_velocities.npy")
     print(f"Saved {len(all_boundaries)} run boundaries to all_data_boundaries.npy")
+    print(f"Saved metadata (num_features={num_features}) to all_data_metadata.npy")
     print("Done!")
 
 
@@ -236,9 +254,9 @@ def binary2decimal(a, axis=-1):
 def main():
     parser = argparse.ArgumentParser(description='Convert CSV to numpy.')
     parser.add_argument('--config_name', type=str, 
-                        default=os.path.dirname(os.path.abspath(__file__)) + '/../config/mat2numpy_config.yaml')
-    parser.add_argument('--mode', type=str, default='train', 
-                        help='Mode: train (split data) or inference (single sequence)')
+                        default=os.path.dirname(os.path.abspath(__file__)) + '/../config/network_params.yaml')
+    parser.add_argument('--mode', type=str, default=None, 
+                        help='Mode: train (split data) or inference (single sequence) - overrides config')
     parser.add_argument('--csv_folder', type=str, default=None,
                         help='Path to CSV folder (overrides config file)')
     parser.add_argument('--save_path', type=str, default=None,
@@ -255,32 +273,34 @@ def main():
         config['csv_folder'] = args.csv_folder
     if args.save_path:
         config['save_path'] = args.save_path
+        config['data_folder'] = args.save_path  # Also set data_folder for consistency
     if args.mode:
-        config['mode'] = args.mode
+        config['csv_mode'] = args.mode
     
     # Set defaults if not in config
     config.setdefault('csv_folder', '../Data/CSVFiles/')
-    config.setdefault('save_path', '../Data/NumpyFiles/')
-    config.setdefault('mode', 'train')
+    config.setdefault('data_folder', '../Data/NumpyFiles/')
+    config.setdefault('save_path', config['data_folder'])  # Use data_folder if save_path not set
+    config.setdefault('csv_mode', 'train')
     config.setdefault('train_ratio', 0.7)
     config.setdefault('val_ratio', 0.15)
     
     print("Using configuration:")
-    print(f"  Mode: {config['mode']}")
+    print(f"  Mode: {config['csv_mode']}")
     print(f"  CSV folder: {config['csv_folder']}")
     print(f"  Save path: {config['save_path']}")
     
-    if config['mode'] == 'train':
+    if config['csv_mode'] == 'train':
         print(f"  Train ratio: {config['train_ratio']}")
         print(f"  Val ratio: {config['val_ratio']}")
         csv2numpy_split(config['csv_folder'], config['save_path'], 
                         config['train_ratio'], config['val_ratio'])
-    elif config['mode'] == 'inference':
+    elif config['csv_mode'] == 'inference':
         error = "Inference mode is not implemented in this script. Please implement inference logic if needed."
         print(f"Error: {error}")
         raise NotImplementedError(error)
     else:
-        print(f"Error: Unknown mode '{config['mode']}'. Use 'train' or 'inference'.")
+        print(f"Error: Unknown mode '{config['csv_mode']}'. Use 'train' or 'inference'.")
 
 
 if __name__ == '__main__':

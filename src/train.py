@@ -25,28 +25,48 @@ def compute_accuracy(dataloader, model):
 
     num_correct = 0
     num_data = 0
-    correct_per_leg = np.zeros(2)  # 2 legs: [left, right]
+    correct_per_leg = np.zeros(1)  # 1 leg: LEFT only
     # velocity_mse_sum = 0.0  # Track velocity prediction error for both legs
+    
+    # Track prediction distribution to detect bias
+    num_pred_contact = 0  # How many times model predicts 1 (contact)
+    num_pred_no_contact = 0  # How many times model predicts 0 (no-contact)
+    num_gt_contact = 0  # How many ground truth 1's
+    num_gt_no_contact = 0  # How many ground truth 0's
     
     for sample in tqdm(dataloader):
         input_data = sample['data']
-        gt_label = sample['label']  # Shape: (batch, 2) - binary labels for both legs
-        # gt_velocity = sample['velocity']  # Shape: (batch, 2) - velocity norms for both legs
+        gt_label = sample['label']  # Shape: (batch, 1) - binary labels for LEFT leg only
+        # gt_velocity = sample['velocity']  # Shape: (batch, 1) - velocity norm for LEFT leg only
 
         contact_output = model(input_data)  # Only contact output
-        contact_prediction = (torch.sigmoid(contact_output) > 0.5).float()  # Binary predictions
+        contact_prediction = (contact_output > 0).float()  # Binary predictions (more efficient than sigmoid)
 
         # Per-leg accuracy
         correct_per_leg += (contact_prediction == gt_label).sum(axis=0).cpu().numpy()
         num_data += input_data.size(0)
-        # Overall accuracy (averaged across both legs)
+        # Overall accuracy (LEFT leg)
         num_correct += (contact_prediction == gt_label).sum().item()
+        
+        # Track prediction distribution
+        num_pred_contact += (contact_prediction == 1).sum().item()
+        num_pred_no_contact += (contact_prediction == 0).sum().item()
+        num_gt_contact += (gt_label == 1).sum().item()
+        num_gt_no_contact += (gt_label == 0).sum().item()
 
         # # Velocity MSE (for monitoring)
         # velocity_mse_sum += ((velocity_output - gt_velocity) ** 2).mean().item()
 
-    # Total accuracy considers all predictions (both legs)
-    total_predictions = num_data * 2  # 2 legs per sample
+    # Total accuracy considers all predictions (LEFT leg only)
+    total_predictions = num_data * 1  # 1 leg per sample
+    
+    # Print prediction distribution to detect bias
+    print(f"\n  Prediction Distribution:")
+    print(f"    Model predicts contact (1):    {num_pred_contact}/{total_predictions} ({100*num_pred_contact/total_predictions:.1f}%)")
+    print(f"    Model predicts no-contact (0): {num_pred_no_contact}/{total_predictions} ({100*num_pred_no_contact/total_predictions:.1f}%)")
+    print(f"    Ground truth contact (1):      {num_gt_contact}/{total_predictions} ({100*num_gt_contact/total_predictions:.1f}%)")
+    print(f"    Ground truth no-contact (0):   {num_gt_no_contact}/{total_predictions} ({100*num_gt_no_contact/total_predictions:.1f}%)")
+    
     return num_correct/total_predictions, correct_per_leg/num_data  # , velocity_mse_sum/len(dataloader)
 
 def compute_accuracy_and_loss(dataloader, model, contact_criterion):  # , velocity_criterion, velocity_weight=1.0):
@@ -57,21 +77,28 @@ def compute_accuracy_and_loss(dataloader, model, contact_criterion):  # , veloci
     # velocity_loss_sum = 0
     total_loss_sum = 0
     # velocity_mse_sum = 0.0
-    correct_per_leg = np.zeros(2)  # 2 legs: [left, right]
+    correct_per_leg = np.zeros(1)  # 1 leg: LEFT only
+    
+    # Track prediction distribution
+    num_pred_contact = 0
+    num_pred_no_contact = 0
+    num_gt_contact = 0
+    num_gt_no_contact = 0
+    
     with torch.no_grad():
         for sample in tqdm(dataloader):
             input_data = sample['data']
-            gt_label = sample['label']  # Shape: (batch, 2) - binary labels for both legs
-            # gt_velocity = sample['velocity']  # Shape: (batch, 2) - velocity norms for both legs
+            gt_label = sample['label']  # Shape: (batch, 1) - binary labels for LEFT leg only
+            # gt_velocity = sample['velocity']  # Shape: (batch, 1) - velocity norm for LEFT leg only
 
             contact_output = model(input_data)  # Only contact output
-            contact_prediction = (torch.sigmoid(contact_output) > 0.5).float()  # Binary predictions
+            contact_prediction = (contact_output > 0).float()  # Binary predictions (more efficient)
 
             contact_loss = contact_criterion(contact_output, gt_label)
 
             # # Mask velocity loss by ground truth contact labels
-            # # gt_label shape: (batch, 2), velocity shape: (batch, 2)
-            # contact_mask = gt_label  # (batch, 2) - both legs
+            # # gt_label shape: (batch, 1), velocity shape: (batch, 1)
+            # contact_mask = gt_label  # (batch, 1) - LEFT leg only
             # velocity_loss_elementwise = velocity_criterion(velocity_output, gt_velocity)
             # # Multiply by contact mask (only penalize velocities in contact)
             # # Use max(1.0, sum) to avoid explosion when few contacts in batch
@@ -82,16 +109,30 @@ def compute_accuracy_and_loss(dataloader, model, contact_criterion):  # , veloci
             # Per-leg accuracy
             correct_per_leg += (contact_prediction == gt_label).sum(axis=0).cpu().numpy()
             num_data += input_data.size(0)
-            # Overall accuracy (averaged across both legs)
+            # Overall accuracy (LEFT leg)
             num_correct += (contact_prediction == gt_label).sum().item()
+            
+            # Track distribution
+            num_pred_contact += (contact_prediction == 1).sum().item()
+            num_pred_no_contact += (contact_prediction == 0).sum().item()
+            num_gt_contact += (gt_label == 1).sum().item()
+            num_gt_no_contact += (gt_label == 0).sum().item()
 
             contact_loss_sum += contact_loss.item()
             # velocity_loss_sum += velocity_loss.item()
             total_loss_sum += total_loss.item()
             # velocity_mse_sum += ((velocity_output - gt_velocity) ** 2).mean().item()
 
-    # Total accuracy considers all predictions (both legs)
-    total_predictions = num_data * 2  # 2 legs per sample
+    # Total accuracy considers all predictions (LEFT leg only)
+    total_predictions = num_data * 1  # 1 leg per sample
+    
+    # Print prediction distribution
+    print(f"\n  Prediction Distribution:")
+    print(f"    Model predicts contact (1):    {num_pred_contact}/{total_predictions} ({100*num_pred_contact/total_predictions:.1f}%)")
+    print(f"    Model predicts no-contact (0): {num_pred_no_contact}/{total_predictions} ({100*num_pred_no_contact/total_predictions:.1f}%)")
+    print(f"    Ground truth contact (1):      {num_gt_contact}/{total_predictions} ({100*num_gt_contact/total_predictions:.1f}%)")
+    print(f"    Ground truth no-contact (0):   {num_gt_no_contact}/{total_predictions} ({100*num_gt_no_contact/total_predictions:.1f}%)")
+    
     return (num_correct/total_predictions, correct_per_leg/num_data, 
             contact_loss_sum/len(dataloader))  # , velocity_loss_sum/len(dataloader), total_loss_sum/len(dataloader), velocity_mse_sum/len(dataloader))
 
@@ -107,7 +148,7 @@ def compute_accuracy_and_loss(dataloader, model, contact_criterion):  # , veloci
 def save_onnx_model(model, checkpoint_path, window_size):
     """
     Save ONNX version of the model for C++ deployment.
-    The model has one output: contact predictions (both legs: [left, right])
+    The model has one output: contact prediction (LEFT leg only)
     """
     try:
         import warnings
@@ -118,8 +159,10 @@ def save_onnx_model(model, checkpoint_path, window_size):
         device = next(model.parameters()).device
         model.eval()
         
-        # Create example input (RAW features - 57 from csv2numpy.py for both legs)
-        example_input = torch.randn(1, window_size, 57).to(device)
+        # Create example input (RAW features from csv2numpy.py for LEFT leg only)
+        # num_features is read from model's base_model attribute
+        num_features = model.base_model.num_features
+        example_input = torch.randn(1, window_size, num_features).to(device)
         
         # Suppress warnings and use standard export
         with warnings.catch_warnings():
@@ -133,7 +176,7 @@ def save_onnx_model(model, checkpoint_path, window_size):
                 export_params=True,
                 opset_version=18,
                 input_names=['input'],
-                output_names=['contact_output'],  # Only contact output
+                output_names=['contact_output'],  # Only contact output - LEFT leg
                 dynamic_axes={
                     'input': {0: 'batch_size'},
                     'contact_output': {0: 'batch_size'}
@@ -141,7 +184,7 @@ def save_onnx_model(model, checkpoint_path, window_size):
                 verbose=False
             )
         
-        print(f"  ✓ ONNX model saved (contact output, 2 legs): {onnx_path}")
+        print(f"  ✓ ONNX model saved (contact output, LEFT leg only): {onnx_path}")
         
     except Exception as e:
         print(f"  ⚠ Warning: Failed to save ONNX model: {e}")
@@ -166,7 +209,17 @@ def train(model, train_dataloader, val_dataloader, config):
 
 
     # Contact classification only (velocity heads removed)
-    contact_criterion = nn.BCEWithLogitsLoss()  # For contact detection
+    # Check if using weighted loss for class imbalance
+    use_weighted_loss = config.get('use_weighted_loss', False)
+    if use_weighted_loss and 'pos_weight' in config:
+        pos_weight = torch.tensor([config['pos_weight']]).to(next(model.parameters()).device)
+        contact_criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        print(f"\n✓ Using WEIGHTED BCEWithLogitsLoss with pos_weight={config['pos_weight']:.2f}")
+        print(f"  This penalizes false negatives (missing contact) {config['pos_weight']:.2f}x more than false positives\n")
+    else:
+        contact_criterion = nn.BCEWithLogitsLoss()  # Standard unweighted loss
+        print(f"\n✓ Using standard (unweighted) BCEWithLogitsLoss\n")
+    
     # huber_delta = float(config.get('Huber_delta', 0.5))
     # velocity_criterion = nn.HuberLoss(delta=huber_delta, reduction='none')  # Element-wise Huber loss for masking
     optimizer = optim.Adam(model.parameters(), lr=config['init_lr'])
@@ -189,8 +242,8 @@ def train(model, train_dataloader, val_dataloader, config):
         model.train()
         for i, samples in tqdm(enumerate(train_dataloader, start=0)):
             input_data = samples['data'] 
-            contact_label = samples['label']  # Shape: (batch, 2) - [left, right]
-            # velocity_label = samples['velocity']  # Shape: (batch, 2) - [left, right]
+            contact_label = samples['label']  # Shape: (batch, 1) - LEFT leg only
+            # velocity_label = samples['velocity']  # Shape: (batch, 1) - LEFT leg only
             
             # DEBUG: Print ground truth labels once to verify data correctness
             if not printed_labels and i == 0:
@@ -201,28 +254,28 @@ def train(model, train_dataloader, val_dataloader, config):
                 num_to_print = min(100, len(labels_to_print))
                 
                 left_labels = labels_to_print[:num_to_print, 0]
-                right_labels = labels_to_print[:num_to_print, 1]
+                # right_labels = labels_to_print[:num_to_print, 1]  # COMMENTED OUT - only LEFT leg
                 
                 print(f"\nLeft leg labels (first {num_to_print}):")
                 print(left_labels)
                 print(f"\nLeft leg stats: Mean={left_labels.mean():.3f}, "
                       f"Contact={np.sum(left_labels==1)}, No-contact={np.sum(left_labels==0)}")
                 
-                print(f"\nRight leg labels (first {num_to_print}):")
-                print(right_labels)
-                print(f"\nRight leg stats: Mean={right_labels.mean():.3f}, "
-                      f"Contact={np.sum(right_labels==1)}, No-contact={np.sum(right_labels==0)}")
+                # print(f"\nRight leg labels (first {num_to_print}):")  # COMMENTED OUT
+                # print(right_labels)  # COMMENTED OUT
+                # print(f"\nRight leg stats: Mean={right_labels.mean():.3f}, "  # COMMENTED OUT
+                #       f"Contact={np.sum(right_labels==1)}, No-contact={np.sum(right_labels==0)}")  # COMMENTED OUT
                 
                 print(f"\nOverall stats for this batch:")
                 print(f"  Batch size: {len(labels_to_print)}")
                 print(f"  Left leg contact ratio: {labels_to_print[:, 0].mean():.3f}")
-                print(f"  Right leg contact ratio: {labels_to_print[:, 1].mean():.3f}")
+                # print(f"  Right leg contact ratio: {labels_to_print[:, 1].mean():.3f}")  # COMMENTED OUT
                 print(f"{'='*80}\n")
                 
                 printed_labels = True
 
             optimizer.zero_grad()
-            contact_output = model(input_data)  # Only contact output: (batch, 2)
+            contact_output = model(input_data)  # Only contact output: (batch, 1)
 
             # Compute contact loss (this is the only loss now)
             loss = contact_criterion(contact_output, contact_label)
@@ -266,20 +319,20 @@ def train(model, train_dataloader, val_dataloader, config):
         (val_acc, val_acc_per_leg, val_loss_avg) = compute_accuracy_and_loss(
             val_dataloader, model, contact_criterion)
 
-        train_acc_per_leg_avg = train_acc_per_leg.mean()  # Average of both legs
-        val_acc_per_leg_avg = val_acc_per_leg.mean()  # Average of both legs
+        train_acc_per_leg_avg = train_acc_per_leg.mean()  # Average (only one leg now)
+        val_acc_per_leg_avg = val_acc_per_leg.mean()  # Average (only one leg now)
 
         # log down info in tensorboard
         writer.add_scalar('training loss', train_loss_avg, epoch)
         writer.add_scalar('training accuracy', train_acc, epoch)
         writer.add_scalar('training acc left leg', train_acc_per_leg[0], epoch)
-        writer.add_scalar('training acc right leg', train_acc_per_leg[1], epoch)
+        # writer.add_scalar('training acc right leg', train_acc_per_leg[1], epoch)  # COMMENTED OUT
         writer.add_scalar('training acc leg avg', train_acc_per_leg_avg, epoch)
         
         writer.add_scalar('validation loss', val_loss_avg, epoch)
         writer.add_scalar('validation accuracy', val_acc, epoch)
         writer.add_scalar('validation acc left leg', val_acc_per_leg[0], epoch)
-        writer.add_scalar('validation acc right leg', val_acc_per_leg[1], epoch)
+        # writer.add_scalar('validation acc right leg', val_acc_per_leg[1], epoch)  # COMMENTED OUT
         writer.add_scalar('validation acc leg avg', val_acc_per_leg_avg, epoch)
 
         # if we achieve best val acc, save the model.
@@ -338,8 +391,8 @@ def train(model, train_dataloader, val_dataloader, config):
             (epoch, config['num_epoch'], train_acc, val_acc)) 
         print("train left leg acc: %.4f, val left leg acc: %.4f" %\
             (train_acc_per_leg[0], val_acc_per_leg[0]))
-        print("train right leg acc: %.4f, val right leg acc: %.4f" %\
-            (train_acc_per_leg[1], val_acc_per_leg[1]))
+        # print("train right leg acc: %.4f, val right leg acc: %.4f" %\  # COMMENTED OUT
+        #     (train_acc_per_leg[1], val_acc_per_leg[1]))  # COMMENTED OUT
     
     # save model     
     state = {'epoch': epoch,
@@ -374,7 +427,18 @@ def main():
     print("data_folder: ",config['data_folder'])
     print("model_save_path: ",config['model_save_path'])
     print("log_writer_path: ",config['log_writer_path'])
+    # Load num_features from data metadata (source of truth)
+    metadata_path = config['data_folder'] + "all_data_metadata.npy"
+    if os.path.exists(metadata_path):
+        metadata = np.load(metadata_path, allow_pickle=True).item()
+        num_features = metadata['num_features']
+        print(f"Loaded num_features={num_features} from data metadata")
+    else:
+        num_features = config.get('num_features', 25)
+        print(f"⚠️  Warning: metadata file not found, using config num_features={num_features}")
+    
     print("--------network params--------")
+    print("num_features: ", num_features)
     print("window_size: ",config['window_size'])
     print("shuffle: ",config['shuffle'])
     print("batch_size: ",config['batch_size'])
@@ -469,20 +533,91 @@ def main():
     print(f"  Val run IDs (first 5): {sorted(list(val_run_ids))[:5]}")
     print(f"  Test run IDs (first 5): {sorted(list(test_run_ids))[:5]}")
     
-    # CRITICAL WARNING: Check if all data is treated as one run
-    if num_runs == 1:
-        print(f"\n{'='*60}")
-        print(f"⚠️  CRITICAL WARNING: Only 1 run detected!")
-        print(f"{'='*60}")
-        print(f"All windows belong to the same run. This means:")
-        print(f"  - Overlapping windows are NOT separated by runs")
-        print(f"  - Data leakage is STILL PRESENT")
-        print(f"  - High test accuracy is ARTIFICIALLY INFLATED")
-        print(f"\nSOLUTION: Your CSV files likely don't have time resets.")
-        print(f"  1. Check csv2numpy.py run boundary detection")
-        print(f"  2. Ensure CSVs have clear run separations")
-        print(f"  3. Or manually split data into separate CSV files per run")
-        print(f"{'='*60}\n")
+    # # =====================================================================
+    # # COUNT CONTACT LABELS BEFORE TRAINING (Class Balance Analysis)
+    # # =====================================================================
+    # print(f"\n{'='*70}")
+    # print(f"CONTACT LABEL DISTRIBUTION (LEFT LEG ONLY)")
+    # print(f"{'='*70}")
+    
+    # # Count labels for each split by collecting all window labels
+    # def count_labels_in_indices(dataset, indices):
+    #     """Count contact (1) and no-contact (0) labels in given window indices."""
+    #     num_contact = 0
+    #     num_no_contact = 0
+    #     for idx in indices:
+    #         label = dataset[idx]['label']  # Shape: (1,) for left leg
+    #         if label.item() == 1:
+    #             num_contact += 1
+    #         else:
+    #             num_no_contact += 1
+    #     return num_contact, num_no_contact
+    
+    # print("\nCounting labels in all splits...")
+    # train_contact, train_no_contact = count_labels_in_indices(all_dataset, train_indices)
+    # val_contact, val_no_contact = count_labels_in_indices(all_dataset, val_indices)
+    # test_contact, test_no_contact = count_labels_in_indices(all_dataset, test_indices)
+    
+    # # Total counts
+    # total_contact = train_contact + val_contact + test_contact
+    # total_no_contact = train_no_contact + val_no_contact + test_no_contact
+    # total_samples = total_contact + total_no_contact
+    
+    # # Print overall distribution
+    # print(f"\n{'='*70}")
+    # print(f"OVERALL DATASET (all {total_samples} windows):")
+    # print(f"{'='*70}")
+    # print(f"  Contact (1):     {total_contact:6d} samples ({100*total_contact/total_samples:5.2f}%)")
+    # print(f"  No-contact (0):  {total_no_contact:6d} samples ({100*total_no_contact/total_samples:5.2f}%)")
+    # print(f"  Imbalance ratio: 1:{total_no_contact/max(total_contact,1):.2f} (contact:no-contact)")
+    
+    # # Print train split distribution
+    # train_total = train_contact + train_no_contact
+    # print(f"\n{'='*70}")
+    # print(f"TRAIN SPLIT ({train_total} windows):")
+    # print(f"{'='*70}")
+    # print(f"  Contact (1):     {train_contact:6d} samples ({100*train_contact/train_total:5.2f}%)")
+    # print(f"  No-contact (0):  {train_no_contact:6d} samples ({100*train_no_contact/train_total:5.2f}%)")
+    # print(f"  Imbalance ratio: 1:{train_no_contact/max(train_contact,1):.2f} (contact:no-contact)")
+    
+    # # Print val split distribution
+    # val_total = val_contact + val_no_contact
+    # print(f"\n{'='*70}")
+    # print(f"VALIDATION SPLIT ({val_total} windows):")
+    # print(f"{'='*70}")
+    # print(f"  Contact (1):     {val_contact:6d} samples ({100*val_contact/val_total:5.2f}%)")
+    # print(f"  No-contact (0):  {val_no_contact:6d} samples ({100*val_no_contact/val_total:5.2f}%)")
+    # print(f"  Imbalance ratio: 1:{val_no_contact/max(val_contact,1):.2f} (contact:no-contact)")
+    
+    # # Print test split distribution
+    # test_total = test_contact + test_no_contact
+    # print(f"\n{'='*70}")
+    # print(f"TEST SPLIT ({test_total} windows):")
+    # print(f"{'='*70}")
+    # print(f"  Contact (1):     {test_contact:6d} samples ({100*test_contact/test_total:5.2f}%)")
+    # print(f"  No-contact (0):  {test_no_contact:6d} samples ({100*test_no_contact/test_total:5.2f}%)")
+    # print(f"  Imbalance ratio: 1:{test_no_contact/max(test_contact,1):.2f} (contact:no-contact)")
+    
+    # # Warn if severe class imbalance and suggest pos_weight
+    # if train_contact > 0:
+    #     imbalance_ratio = train_no_contact / train_contact
+    #     suggested_pos_weight = train_no_contact / train_contact  # Weight for positive class (contact)
+        
+    #     print(f"\nCLASS IMBALANCE ANALYSIS:")
+    #     print(f"  No-contact / Contact ratio: {imbalance_ratio:.2f}")
+    #     print(f"  Suggested pos_weight for BCEWithLogitsLoss: {suggested_pos_weight:.2f}")
+    #     print(f"  (This makes the loss penalize missing contacts {suggested_pos_weight:.2f}x more)")
+        
+    #     if imbalance_ratio > 3 or imbalance_ratio < 0.33:
+    #         print(f"\n⚠️  WARNING: Class imbalance detected!")
+    #         print(f"   To fix bias, add to your config file:")
+    #         print(f"     use_weighted_loss: true")
+    #         print(f"     pos_weight: {suggested_pos_weight:.2f}")
+    #     elif abs(imbalance_ratio - 1.0) < 0.2:
+    #         print(f"\n✓ Classes are well balanced, no weighting needed.")
+    
+    # print(f"{'='*70}\n")
+    # # =====================================================================
     
     # Create Subset datasets for deterministic sampling
     from torch.utils.data import Subset
@@ -499,29 +634,30 @@ def main():
         train_windows_data.append(window)  # Keep on same device as dataset
     
     # Stack all training windows and flatten to get all training samples
-    # Shape: (num_train_windows * window_size, 57)
+    # Shape: (num_train_windows * window_size, num_features)
     train_data_engineered = torch.cat(train_windows_data, dim=0)
     
-    # Feature layout (57 features): acc(3) + omega(3) + q(12) + qd(12) + p(6) + v(6) + tau_est(12) + tau_mse(2) + cmd_vel(1)
+    # num_features already loaded from metadata above
+    # Feature layout (LEFT LEG ONLY): auto-detected from data in csv2numpy.py
     # All features are RAW from csv2numpy.py - no pre-normalization
     
     # Compute 1st and 99th percentiles for each feature to clip outliers
-    percentile_1 = torch.quantile(train_data_engineered, 0.01, dim=0, keepdim=True)  # (1, 57)
-    percentile_99 = torch.quantile(train_data_engineered, 0.99, dim=0, keepdim=True)  # (1, 57)
+    percentile_1 = torch.quantile(train_data_engineered, 0.01, dim=0, keepdim=True)  # (1, num_features)
+    percentile_99 = torch.quantile(train_data_engineered, 0.99, dim=0, keepdim=True)  # (1, num_features)
     
     # Clip training data to percentile bounds
     train_data_clipped = torch.clamp(train_data_engineered, min=percentile_1, max=percentile_99)
     
-    # Compute mean and std per feature from clipped data (57 features total)
-    # Layout: acc(0-2) + omega(3-5) + q(6-17) + qd(18-29) + p(30-35) + v(36-41) + tau_est(42-53) + tau_mse(54-55) + cmd_vel(56)
-    global_mean = train_data_clipped.mean(dim=0, keepdim=True).unsqueeze(0)  # Shape: (1, 1, 57)
-    global_std = train_data_clipped.std(dim=0, keepdim=True).unsqueeze(0)    # Shape: (1, 1, 57)
+    # Compute mean and std per feature from clipped data - LEFT LEG ONLY
+    # Layout: q(6) + qd(6) + p(3) + v(3) + tau_est(6) + tau_mse(1)
+    global_mean = train_data_clipped.mean(dim=0, keepdim=True).unsqueeze(0)  # Shape: (1, 1, num_features)
+    global_std = train_data_clipped.std(dim=0, keepdim=True).unsqueeze(0)    # Shape: (1, 1, num_features)
     
     # Handle features with zero std (constant values) to avoid division by zero
     global_std = torch.where(global_std == 0, torch.ones_like(global_std), global_std)
     
     print(f"\nGlobal normalization statistics computed from clipped training data:")
-    print(f"  Total features: 57 (acc + omega + q + qd + p + v + tau_est + tau_mse + cmd_vel)")
+    print(f"  Total features: {num_features} (q + qd + p + v + tau_est + tau_mse) - LEFT LEG ONLY")
     print(f"  All features are RAW (not pre-normalized in csv2numpy.py)")
     print(f"  Clipped to [1st, 99th] percentiles per feature")
     print(f"  Mean shape: {global_mean.shape}")
@@ -539,7 +675,8 @@ def main():
                                 shuffle=False)
 
     # init network with built-in normalization using global training statistics
-    base_model = contact_cnn(window_size=config['window_size'])
+    # num_features loaded from metadata at the start of main()
+    base_model = contact_cnn(window_size=config['window_size'], num_features=num_features)
     from contact_cnn import ContactCNNWithNormalization
     model = ContactCNNWithNormalization(base_model, global_mean=global_mean, global_std=global_std)
     model = model.to(device)

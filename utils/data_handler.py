@@ -16,13 +16,13 @@ class contact_dataset(Dataset):
         """
         At initialization we load .npy files for data, labels, and foot velocities.
         self.data: a 2D array of all data points. rows are time axis, columns are features. (num_data, num_features)
-        self.label: both legs contact states (0 or 1). Shape: (num_data, 2) - [left, right]
-        self.foot_velocity: both legs foot velocity magnitudes (norm). Shape: (num_data, 2) - [left, right]
+        self.label: LEFT leg contact state (0 or 1). Shape: (num_data, 1) - LEFT leg only
+        self.foot_velocity: LEFT leg foot velocity magnitude (norm). Shape: (num_data, 1) - LEFT leg only
         """
         data = np.load(data_path)
         label = np.load(label_path)
         
-        # # Load foot velocities - BOTH LEGS
+        # # Load foot velocities - LEFT LEG ONLY
         # velocity_path = data_path.replace('_data.npy', '_foot_velocities.npy')
         # if not os.path.exists(velocity_path):
         #     velocity_path = data_path.replace('.npy', '_foot_velocities.npy')
@@ -32,14 +32,14 @@ class contact_dataset(Dataset):
         #     print(f"Loaded foot velocities from {velocity_path}")
         # else:
         #     print(f"Warning: No foot velocity file found. Creating zero velocities.")
-        #     foot_velocity = np.zeros((len(data), 2), dtype=np.float32)  # Both legs
+        #     foot_velocity = np.zeros((len(data), 1), dtype=np.float32)  # LEFT leg only
         
         self.window_size = window_size
         self.data = torch.from_numpy(data).type('torch.FloatTensor').to(device)
         # self.foot_velocity = torch.from_numpy(foot_velocity).type('torch.FloatTensor').to(device)
         
-        # Labels are both legs contact (0 or 1 for each) - Shape: (num_data, 2) - [left, right]
-        label_binary = label.astype(np.float32)  # Shape: (num_data, 2)
+        # Labels are LEFT leg contact (0 or 1) - Shape: (num_data, 1) - LEFT leg only
+        label_binary = label.astype(np.float32)  # Shape: (num_data, 1)
         self.label = torch.from_numpy(label_binary).type('torch.FloatTensor').to(device)
         
         # Load run boundaries to prevent window bleeding across different runs
@@ -123,7 +123,7 @@ class contact_dataset(Dataset):
         
         Output: 
         - data: (batch_size, window_size, num_features)
-        - label: (batch_size, 2) - binary contact for both legs [left, right]
+        - label: (batch_size, 1) - binary contact for LEFT leg only
         """
         if torch.is_tensor(idx):
             idx = idx.tolist()
@@ -132,11 +132,11 @@ class contact_dataset(Dataset):
         real_idx = self.valid_indices[idx]
         
         # Return raw unnormalized data (normalization done inside the model)
-        # Feature layout (57 RAW features): acc(0-2) + omega(3-5) + q(6-17) + qd(18-29) + p(30-35) + v(36-41) + tau_est(42-53) + tau_mse(54-55) + cmd_vel(56)
+        # Feature layout (19 RAW features): acc(0-2) + omega(3-5) + p(6-8) + v(9-11) + tau_est(12-17) + tau_mse(18) - LEFT LEG ONLY
         this_data = self.data[real_idx:real_idx+self.window_size,:]
         
-        this_label = self.label[real_idx+self.window_size-1]  # Shape: (2,) - [left, right]
-        # this_velocity = self.foot_velocity[real_idx+self.window_size-1]  # Shape: (2,) - [left, right]
+        this_label = self.label[real_idx+self.window_size-1]  # Shape: (1,) - LEFT leg only
+        # this_velocity = self.foot_velocity[real_idx+self.window_size-1]  # Shape: (1,) - LEFT leg only
             
         sample = {'data': this_data, 'label': this_label}  # 'velocity': this_velocity removed
 

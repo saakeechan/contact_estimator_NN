@@ -1,3 +1,8 @@
+# CSV data processing params
+csv_folder: "/home/saakee/Research/deep-contact-estimator/Data/CSVFiles/"
+csv_mode: "train"  # "train": process all CSVs and create train/val/test splits
+                   # "inference": process single CSV without splitting
+
 # Path to the data folder. Data should be separated into train.npy, train_label.npy, val.npy, val_label.npy.
 data_folder: "/home/saakee/Research/deep-contact-estimator/Data/NumpyFiles/"
 
@@ -7,26 +12,30 @@ data_folder: "/home/saakee/Research/deep-contact-estimator/Data/NumpyFiles/"
 model_save_path: "/home/saakee/Research/deep-contact-estimator/results/bipedal_contact"
 log_writer_path: "/home/saakee/Research/deep-contact-estimator/logs/bipedal_contact"
 
-
 model_description: "Bipedal 2-leg contact, 57 features, 4 output classes, 2block CNN, batch:30, ws:10, lr:1e-4"
 
 print_every: 1000
 
 # Data params
-window_size: 10 # Fits in 140-sample runs, gives good temporal context (120→60→30 timesteps)
-shuffle: True
+
+window_size: 6
 random_seed: 42  # For reproducible train/val/test splits
-train_ratio: 0.7
+train_ratio: 0.5
 val_ratio: 0.15
 
 # Network params
-batch_size: 30
-init_lr: 0.0001
-num_epoch: 20  # Reduced for quick training with small dataset
+batch_size: 60  # Used for both training and testing
+init_lr: 0.001
+num_epoch: 4  # Reduced for quick training with small dataset
+
+# Test-specific params
+model_load_path: "/home/saakee/Research/deep-contact-estimator/results/bipedal_contact_best_val_leg_acc.pt"
+save_to_mat: False
+mat_save_path: "/home/saakee/Research/deep-contact-estimator/results/bipedal_test_results.mat"
 
 # Elastic Net Regularization (L1 + L2)
 # Loss = BCE_loss + l1_lambda * ||w||_1 + l2_lambda * ||w||_2^2
-l1_lambda: 0     # L1 (Lasso): encourages sparsity (many weights → 0)
+l1_lambda: 0    # L1 (Lasso): encourages sparsity (many weights → 0)
 l2_lambda: 0     # L2 (Ridge): encourages small weights, prevents large values
 # Typical values: 1e-5 to 1e-3 for each
 
@@ -39,6 +48,3 @@ velocity_weight: 0.0    # Weight for velocity regression loss
                         # Lower values = prioritize contact accuracy
                         # Set based on which task is more important
 Huber_delta: 0.3      # Delta parameter for Huber loss in velocity regression
-
-
-# python3 src/train.py --config_name config/network_params.yaml
