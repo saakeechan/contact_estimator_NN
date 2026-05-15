@@ -84,8 +84,9 @@ class contact_cnn(nn.Module):
         # Final conv outputs 64 channels
         fc_input_size = (window_size // 4) * 64
         
-        # # Separate MLP for left leg contact detection (classification)
-        # self.fc_contact_left = nn.Sequential(
+        # # COMMENTED OUT: Two separate MLPs approach
+        # # MLP for LEFT leg contact detection
+        # self.fc_contact = nn.Sequential(
         #     nn.Linear(in_features=fc_input_size,
         #               out_features=64),
         #     nn.ReLU(),
@@ -95,10 +96,10 @@ class contact_cnn(nn.Module):
         #     nn.ReLU(),
         #     nn.Dropout(p=0.5),
         #     nn.Linear(in_features=16,
-        #               out_features=1),  # 1 output: binary contact for left leg
+        #               out_features=1),  # 1 output: binary contact for LEFT leg
         # )
         # 
-        # # Separate MLP for right leg contact detection (classification)
+        # # MLP for RIGHT leg contact detection (separate head, same architecture)
         # self.fc_contact_right = nn.Sequential(
         #     nn.Linear(in_features=fc_input_size,
         #               out_features=64),
@@ -109,21 +110,21 @@ class contact_cnn(nn.Module):
         #     nn.ReLU(),
         #     nn.Dropout(p=0.5),
         #     nn.Linear(in_features=16,
-        #               out_features=1),  # 1 output: binary contact for right leg
+        #               out_features=1),  # 1 output: binary contact for RIGHT leg
         # )
         
-        # Shared MLP for LEFT leg contact detection only
+        # Single MLP for both legs contact detection with 2 outputs
         self.fc_contact = nn.Sequential(
             nn.Linear(in_features=fc_input_size,
+                      out_features=256),
+            nn.ReLU(),
+            nn.Dropout(p=0.5),
+            nn.Linear(in_features=256,
                       out_features=64),
             nn.ReLU(),
             nn.Dropout(p=0.5),
             nn.Linear(in_features=64,
-                      out_features=16),
-            nn.ReLU(),
-            nn.Dropout(p=0.5),
-            nn.Linear(in_features=16,
-                      out_features=1),  # 1 output: binary contact for LEFT leg only
+                      out_features=2),  # 2 outputs: binary contact for both legs [left, right]
         )
         
         # # Separate MLP for left leg velocity regression
@@ -155,16 +156,15 @@ class contact_cnn(nn.Module):
         # )
 
     def forward(self, x):
-        # x shape: (batch_size, window_size, num_features) - RAW features from csv2numpy.py (LEFT LEG ONLY)
-        # Feature layout: q(6) + qd(6) + p(3) + v(3) + tau_est(6) + tau_mse(1)
+        # x shape: (batch_size, window_size, num_features) - RAW features from csv2numpy.py
         
         x = x.permute(0,2,1)
         block1_out = self.block1(x)
         block2_out = self.block2(block1_out)
         block2_out_reshape = block2_out.view(block2_out.shape[0], -1)
         
-        # MLP: contact for LEFT leg only
-        contact_out = self.fc_contact(block2_out_reshape)  # Shape: (batch, 1) - LEFT leg only
+        # Single MLP with 2 outputs
+        contact_out = self.fc_contact(block2_out_reshape)  # Shape: (batch, 2) -> [:, 0] = left, [:, 1] = right
         
         return contact_out
 
@@ -181,10 +181,10 @@ class ContactCNNWithNormalization(nn.Module):
     - Statistics are saved with the model and exported to ONNX
     
     Input shape: (batch_size, window_size, num_features) - RAW features from csv2numpy.py (LEFT LEG ONLY)
-    Output shape: (batch_size, 1) for contact (LEFT leg only)
+    Output shape: (batch_size, 2) for contact ([:, 0]=left, [:, 1]=right)
     
     Feature layout:
-    - Input: RAW features from csv2numpy.py: q(6) + qd(6) + p(3) + v(3) + tau_est(6) + tau_mse(1)
+    - Input: RAW features from csv2numpy.py
     - Z-score normalization is applied to all input features
     """
     def __init__(self, base_model, global_mean=None, global_std=None, eps=1e-8):
@@ -224,7 +224,7 @@ class ContactCNNWithNormalization(nn.Module):
                Features: q(6) + qd(6) + p(3) + v(3) + tau_est(6) + tau_mse(1)
         
         Returns:
-            contact_out: (batch_size, 1) - contact prediction logits for LEFT leg only
+            contact_out: (batch_size, 2) - contact prediction logits [:, 0]=left, [:, 1]=right
         """
         # Apply global z-score normalization to all input features
         # These statistics are embedded in the model and exported to ONNX

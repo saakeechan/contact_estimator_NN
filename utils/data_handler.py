@@ -123,7 +123,7 @@ class contact_dataset(Dataset):
         
         Output: 
         - data: (batch_size, window_size, num_features)
-        - label: (batch_size, 1) - binary contact for LEFT leg only
+        - label: (batch_size, 2) - binary contact for left leg [:, 0] and right leg [:, 1]
         """
         if torch.is_tensor(idx):
             idx = idx.tolist()
@@ -135,7 +135,7 @@ class contact_dataset(Dataset):
         # Feature layout (19 RAW features): acc(0-2) + omega(3-5) + p(6-8) + v(9-11) + tau_est(12-17) + tau_mse(18) - LEFT LEG ONLY
         this_data = self.data[real_idx:real_idx+self.window_size,:]
         
-        this_label = self.label[real_idx+self.window_size-1]  # Shape: (1,) - LEFT leg only
+        this_label = self.label[real_idx+self.window_size-1]  # Shape: (2,) - left and right leg
         # this_velocity = self.foot_velocity[real_idx+self.window_size-1]  # Shape: (1,) - LEFT leg only
             
         sample = {'data': this_data, 'label': this_label}  # 'velocity': this_velocity removed

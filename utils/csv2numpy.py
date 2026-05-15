@@ -42,7 +42,7 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
     
     # num_features will be determined automatically from the actual data shape
     all_data = None  # Will be initialized after first sample
-    all_labels = np.zeros((0, 1))  # LEFT leg only
+    all_labels = np.zeros((0, 2))  # LEFT and RIGHT leg
     all_foot_velocities = np.zeros((0, 1))  # World frame foot velocities: LEFT leg only - magnitudes
     num_features = None  # Will be set from cur_data.shape[1] after first run
     
@@ -55,9 +55,9 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
     joint_names = [
         'left_hip_pitch_joint', 'left_hip_roll_joint', 'left_hip_yaw_joint',
         'left_knee_joint', 'left_ankle_pitch_joint', 'left_ankle_roll_joint',
-        # RIGHT LEG COMMENTED OUT - only classifying left leg contact
-        # 'right_hip_pitch_joint', 'right_hip_roll_joint', 'right_hip_yaw_joint',
-        # 'right_knee_joint', 'right_ankle_pitch_joint', 'right_ankle_roll_joint'
+
+        'right_hip_pitch_joint', 'right_hip_roll_joint', 'right_hip_yaw_joint',
+        'right_knee_joint', 'right_ankle_pitch_joint', 'right_ankle_roll_joint'
     ]
     
     # Process all CSV files in the folder
@@ -108,12 +108,14 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
             qd = df_run[qd_cols].values
             
             # Extract foot positions from FK - LEFT leg only
-            p = df_run[['fk_left_foot_pos_x', 'fk_left_foot_pos_y', 'fk_left_foot_pos_z']].values
-            # p_right = df_run[['fk_right_foot_pos_x', 'fk_right_foot_pos_y', 'fk_right_foot_pos_z']].values  # COMMENTED OUT
+            p_left = df_run[['fk_left_foot_pos_x', 'fk_left_foot_pos_y', 'fk_left_foot_pos_z']].values
+            p_right = df_run[['fk_right_foot_pos_x', 'fk_right_foot_pos_y', 'fk_right_foot_pos_z']].values
+            p = np.hstack((p_left[:, [0, 2]], p_right[:, [0, 2]]))  # Keep x and z for both legs (y is vertical)
             
             # Extract foot velocities from FK - LEFT leg only
-            v = df_run[['fk_left_foot_vel_x', 'fk_left_foot_vel_y', 'fk_left_foot_vel_z']].values
-            # v_right = df_run[['fk_right_foot_vel_x', 'fk_right_foot_vel_y', 'fk_right_foot_vel_z']].values  # COMMENTED OUT
+            v_left = df_run[['fk_left_foot_vel_x', 'fk_left_foot_vel_y', 'fk_left_foot_vel_z']].values
+            v_right = df_run[['fk_right_foot_vel_x', 'fk_right_foot_vel_y', 'fk_right_foot_vel_z']].values
+            v = np.hstack((v_left[:, [0, 2]], v_right[:, [0, 2]]))  # Keep x and z for both legs (y is vertical)
             
             # Extract joint torques (tau_est) - 6 values (LEFT leg only)
             tau_cols = ['joint_torque_' + j for j in joint_names]
@@ -127,11 +129,11 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
 
             # Calculate tau_mse from tau_est for LEFT leg only
             tau_mse_left = np.sum(tau_est[:, :6] ** 2, axis=1, keepdims=True)  # Left leg (all 6 joints)
-            # tau_mse_right = np.sum(tau_est[:, 6:] ** 2, axis=1, keepdims=True)  # Right leg - COMMENTED OUT
-            tau_mse = tau_mse_left  # Shape: (num_samples, 1) - LEFT leg only
+            tau_mse_right = np.sum(tau_est[:, 6:] ** 2, axis=1, keepdims=True)
+            tau_mse = np.hstack((tau_mse_left, tau_mse_right))  # Shape: (num_samples, 2)
 
             # Concatenate features - num_features is auto-detected from shape
-            cur_data = np.concatenate((np.abs(q[:,[3,4]]), np.abs(p[:, [0,2]]), np.abs(v[:, [0,2]]), np.abs(tau_est[:, [1,2,3,4,5]]), tau_mse), axis=1)
+            cur_data = np.concatenate((np.abs(q[:,[3,4, 9,10]]), np.abs(p), np.abs(v), np.abs(tau_est[:, [1,2,3,4,5, 7,8,9,10,11]]), tau_mse), axis=1)
             
             # Initialize all_data and capture num_features from actual data shape
             if num_features is None:
@@ -144,10 +146,10 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
 
             # Output extraction
             
-            # Extract contact labels - LEFT leg only (binary: 0 or 1)
-            contacts_left = df_run[['lfoot-contact']].values.astype(int)  # Shape: (num_samples, 1)
-            # contacts_right = df_run[['rfoot-contact']].values.astype(int)  # COMMENTED OUT - only classifying left leg
-            contacts = contacts_left  # Shape: (num_samples, 1) - LEFT leg only
+            # Extract contact labels - both legs (binary: 0 or 1)
+            contacts_left = df_run[['lfoot-contact']].values.astype(int)   # Shape: (num_samples, 1)
+            contacts_right = df_run[['rfoot-contact']].values.astype(int)  # Shape: (num_samples, 1)
+            contacts = np.hstack((contacts_left, contacts_right))           # Shape: (num_samples, 2)
             
             # # Calculate foot velocity in world frame by numerical differentiation for BOTH legs
             # # Left foot velocity
@@ -227,7 +229,7 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
     np.save(save_pth + "all_data_metadata.npy", metadata)
     
     print(f"Saved {all_data.shape[0]} samples to all_data.npy")
-    print(f"Saved {all_labels.shape[0]} contact labels (LEFT leg only) to all_labels.npy")
+    print(f"Saved {all_labels.shape[0]} contact labels (left + right leg) to all_labels.npy")
     print(f"Saved {all_foot_velocities.shape[0]} foot velocity norms (LEFT leg only) to all_foot_velocities.npy")
     print(f"Saved {len(all_boundaries)} run boundaries to all_data_boundaries.npy")
     print(f"Saved metadata (num_features={num_features}) to all_data_metadata.npy")

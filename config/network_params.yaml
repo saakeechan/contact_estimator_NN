@@ -27,7 +27,7 @@ val_ratio: 0.15
 # Network params
 batch_size: 60  # Used for both training and testing
 init_lr: 0.0001
-num_epoch: 10  # Reduced for quick training with small dataset
+num_epoch: 4  # Reduced for quick training with small dataset
 
 # Test-specific params
 model_load_path: "/home/saakee/Research/deep-contact-estimator/results/bipedal_contact_best_val_leg_acc.pt"
