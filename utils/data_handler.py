@@ -36,7 +36,17 @@ class contact_dataset(Dataset):
         
         self.window_size = window_size
         self.data = torch.from_numpy(data).type('torch.FloatTensor').to(device)
-        # self.foot_velocity = torch.from_numpy(foot_velocity).type('torch.FloatTensor').to(device)
+        
+        # Load foot velocities - LEFT LEG ONLY
+        velocity_path = data_path.replace('all_data.npy', 'all_foot_velocities.npy')
+        if os.path.exists(velocity_path):
+            foot_velocity = np.load(velocity_path)
+            print(f"Loaded foot velocities from {velocity_path}")
+        else:
+            print(f"Warning: No foot velocity file found at {velocity_path}. Creating zero velocities.")
+            foot_velocity = np.zeros((len(data), 1), dtype=np.float32)  # LEFT leg only
+        
+        self.foot_velocity = torch.from_numpy(foot_velocity).type('torch.FloatTensor').to(device)
         
         # Labels are LEFT leg contact (0 or 1) - Shape: (num_data, 1) - LEFT leg only
         label_binary = label.astype(np.float32)  # Shape: (num_data, 1)
@@ -123,7 +133,8 @@ class contact_dataset(Dataset):
         
         Output: 
         - data: (batch_size, window_size, num_features)
-        - label: (batch_size, 2) - binary contact for left leg [:, 0] and right leg [:, 1]
+        - label: (batch_size, 1) - binary contact for left leg (last timestep)
+        - velocity: (batch_size, window_size, 1) - full velocity sequence (model extracts last timestep)
         """
         if torch.is_tensor(idx):
             idx = idx.tolist()
@@ -132,13 +143,16 @@ class contact_dataset(Dataset):
         real_idx = self.valid_indices[idx]
         
         # Return raw unnormalized data (normalization done inside the model)
-        # Feature layout (19 RAW features): acc(0-2) + omega(3-5) + p(6-8) + v(9-11) + tau_est(12-17) + tau_mse(18) - LEFT LEG ONLY
+        # Feature layout: LEFT leg features from csv2numpy.py
         this_data = self.data[real_idx:real_idx+self.window_size,:]
         
-        this_label = self.label[real_idx+self.window_size-1]  # Shape: (2,) - left and right leg
-        # this_velocity = self.foot_velocity[real_idx+self.window_size-1]  # Shape: (1,) - LEFT leg only
+        # Label: contact at last timestep
+        this_label = self.label[real_idx+self.window_size-1]  # Shape: (1,) - left leg only
+        
+        # Velocity: full sequence (training code extracts last timestep)
+        this_velocity = self.foot_velocity[real_idx:real_idx+self.window_size, :]  # Shape: (window_size, 1)
             
-        sample = {'data': this_data, 'label': this_label}  # 'velocity': this_velocity removed
+        sample = {'data': this_data, 'label': this_label, 'velocity': this_velocity}
 
         return sample
 

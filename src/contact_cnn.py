@@ -1,172 +1,120 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
 import numpy as np
 
+class CausalConv1d(nn.Module):
+    def __init__(self, in_ch, out_ch, kernel_size=3, dilation=1):
+        super().__init__()
+        self.pad = (kernel_size - 1) * dilation
+        self.conv = nn.Conv1d(
+            in_ch, out_ch,
+            kernel_size=kernel_size,
+            dilation=dilation,
+            padding=0
+        )
+
+    def forward(self, x):
+        x = F.pad(x, (self.pad, 0))  # pad only left
+        return self.conv(x)
+
 class contact_cnn(nn.Module):
-    def __init__(self, window_size=10, num_features=25):
+    def __init__(self, window_size=10, num_features=12):
         super(contact_cnn, self).__init__()
         self.num_features = num_features
-        self.block1 = nn.Sequential(
-            # First convolutional layer
-            # Takes num_features RAW input features from csv2numpy.py (LEFT LEG ONLY)
-            # Input layout: q(6) + qd(6) + p(3) + v(3) + tau_est(6) + tau_mse(1)
-            # Produces 64 learned feature maps (filters)
-            # kernel_size=3: each filter looks at 3 consecutive timesteps
-            # stride=1: moves one timestep at a time
-            # padding=1: adds 1 zero on each side to maintain length
-            nn.Conv1d(in_channels=num_features,  # Input: num_features from config (LEFT leg only)
-                    out_channels=64,      # Output: 64 learned patterns
-                    kernel_size=3,        # Look at 3 timesteps at once
-                    stride=1,             # Slide by 1 timestep
-                    padding=1),           # Keep same length (window_size→window_size)
-            
-            # Activation function
-            # Introduces non-linearity (allows learning complex patterns)
-            # ReLU(x) = max(0, x): zeros out negative values
+        self.window_size = window_size
+        
+        # Shared convolutional backbone
+        # Preserves temporal dimension throughout - no MaxPool downsampling
+        # Input: [B, num_features, T]
+        # Uses dilated convolutions to capture multi-scale temporal patterns
+        
+        self.conv_backbone = nn.Sequential(
+            # Block 1 (causal)
+            CausalConv1d(
+                in_ch=num_features,
+                out_ch=128,
+                kernel_size=3,
+                dilation=1
+            ),
             nn.ReLU(),
-            
-            # Second convolutional layer
-            # Refines the 64 features from first conv layer
-            # Learns combinations of low-level patterns
-            # Same parameters as first conv (except in_channels)
-            nn.Conv1d(in_channels=64,      # Input: 64 features from previous layer
-                    out_channels=64,      # Output: 64 refined features
-                    kernel_size=3,        # Look at 3 timesteps
-                    stride=1,             # Slide by 1 timestep
-                    padding=1),           # Keep same length (150→150)
-            
-            # Second activation
-            nn.ReLU(),
-            
-            # REGULARIZATION: Dropout layer
-            # During training: randomly sets 50% of neuron outputs to 0
-            # During inference: does nothing (automatically disabled)
-            # Purpose: prevents overfitting by forcing redundant learning
-            # p=0.5 means 50% dropout probability
-            # Does NOT change tensor dimensions
-            nn.Dropout(p=0.5),              # Randomly drop 50% of neurons
-            
-            # DOWNSAMPLING: Max pooling layer
-            # Reduces temporal dimension by taking max in each window
-            # kernel_size=2: looks at 2 consecutive values
-            # stride=2: moves by 2 (non-overlapping windows)
-            # Takes max of [t0,t1], then [t2,t3], then [t4,t5], etc.
-            # Reduces length: 150 → 75 timesteps
-            # Purpose: (1) reduce computation (2) focus on strongest signals
-            nn.MaxPool1d(kernel_size=2,     # Window size of 2
-                        stride=2)           # Move by 2 (no overlap)
-        )
-        # After block1: (batch, 150, 67) → (batch, 75, 64)
 
-        self.block2 = nn.Sequential(
-            nn.Conv1d(in_channels=64,
-                      out_channels=64,
-                      kernel_size=3,
-                      stride=1,
-                      padding=1),
+            # Block 2 (causal)
+            CausalConv1d(
+                in_ch=128,
+                out_ch=128,
+                kernel_size=3,
+                dilation=1
+            ),
             nn.ReLU(),
-            nn.Conv1d(in_channels=64,
-                      out_channels=64,
-                      kernel_size=3,
-                      stride=1,
-                      padding=1),
-            nn.ReLU(),
-            nn.Dropout(p=0.5),
-            nn.MaxPool1d(kernel_size=2,
-                         stride=2)
-        )
 
-    
-        # Calculate FC input size based on window_size
-        # 2 MaxPool layers (stride=2) reduce window by 4x
-        # Final conv outputs 64 channels
-        fc_input_size = (window_size // 4) * 64
-        
-        # # COMMENTED OUT: Two separate MLPs approach
-        # # MLP for LEFT leg contact detection
-        # self.fc_contact = nn.Sequential(
-        #     nn.Linear(in_features=fc_input_size,
-        #               out_features=64),
-        #     nn.ReLU(),
-        #     nn.Dropout(p=0.5),
-        #     nn.Linear(in_features=64,
-        #               out_features=16),
-        #     nn.ReLU(),
-        #     nn.Dropout(p=0.5),
-        #     nn.Linear(in_features=16,
-        #               out_features=1),  # 1 output: binary contact for LEFT leg
-        # )
-        # 
-        # # MLP for RIGHT leg contact detection (separate head, same architecture)
-        # self.fc_contact_right = nn.Sequential(
-        #     nn.Linear(in_features=fc_input_size,
-        #               out_features=64),
-        #     nn.ReLU(),
-        #     nn.Dropout(p=0.5),
-        #     nn.Linear(in_features=64,
-        #               out_features=16),
-        #     nn.ReLU(),
-        #     nn.Dropout(p=0.5),
-        #     nn.Linear(in_features=16,
-        #               out_features=1),  # 1 output: binary contact for RIGHT leg
-        # )
-        
-        # Single MLP for both legs contact detection with 2 outputs
-        self.fc_contact = nn.Sequential(
-            nn.Linear(in_features=fc_input_size,
-                      out_features=256),
+            # nn.Dropout(p=0.05),
+
+            # # Block 3 (causal, more dilated)
+            # CausalConv1d(
+            #     in_ch=128,
+            #     out_ch=128,
+            #     kernel_size=3,
+            #     dilation=2
+            # ),
+            # nn.ReLU(),
+
+            # Block 4 (causal)
+            CausalConv1d(
+                in_ch=128,
+                out_ch=64,
+                kernel_size=3,
+                dilation=1
+            ),
             nn.ReLU(),
-            nn.Dropout(p=0.5),
-            nn.Linear(in_features=256,
-                      out_features=64),
-            nn.ReLU(),
-            nn.Dropout(p=0.5),
-            nn.Linear(in_features=64,
-                      out_features=2),  # 2 outputs: binary contact for both legs [left, right]
+
+            # nn.Dropout(p=0.05),
         )
         
-        # # Separate MLP for left leg velocity regression
-        # self.fc_velocity_left = nn.Sequential(
-        #     nn.Linear(in_features=fc_input_size,
-        #               out_features=2048),
-        #     nn.ReLU(),
-        #     nn.Dropout(p=0.5),
-        #     nn.Linear(in_features=2048,
-        #               out_features=512),
-        #     nn.ReLU(),
-        #     nn.Dropout(p=0.5),
-        #     nn.Linear(in_features=512,
-        #               out_features=1),  # 1 output: velocity norm for left leg
-        # )
+        # Branch 1: Velocity prediction (MLP on last timestep)
+        self.velocity_head = nn.Sequential(
+            nn.Linear(64, 64),
+            nn.ReLU(),
+            nn.Linear(64, 16),
+            nn.ReLU(),
+            nn.Linear(16, 1),
+        )
         
-        # # Separate MLP for right leg velocity regression
-        # self.fc_velocity_right = nn.Sequential(
-        #     nn.Linear(in_features=fc_input_size,
-        #               out_features=2048),
+        # # Branch 2: Contact classification (MLP, single prediction)
+        # # Global average pooling over time dimension
+        # self.contact_head = nn.Sequential(
+        #     nn.AdaptiveAvgPool1d(1),  # [B, 128, T] → [B, 128, 1]
+        #     nn.Flatten(),              # [B, 128, 1] → [B, 128]
+        #     nn.Linear(128, 64),
         #     nn.ReLU(),
-        #     nn.Dropout(p=0.5),
-        #     nn.Linear(in_features=2048,
-        #               out_features=512),
-        #     nn.ReLU(),
-        #     nn.Dropout(p=0.5),
-        #     nn.Linear(in_features=512,
-        #               out_features=1),  # 1 output: velocity norm for right leg
+        #     nn.Dropout(p=0.2),
+        #     nn.Linear(64, 1)           # Binary contact prediction
         # )
 
     def forward(self, x):
         # x shape: (batch_size, window_size, num_features) - RAW features from csv2numpy.py
+        # Permute to (batch_size, num_features, window_size) for Conv1d
+        x = x.permute(0, 2, 1)  # [B, T, C] → [B, C, T]
         
-        x = x.permute(0,2,1)
-        block1_out = self.block1(x)
-        block2_out = self.block2(block1_out)
-        block2_out_reshape = block2_out.view(block2_out.shape[0], -1)
+        # Pass through shared convolutional backbone
+        features = self.conv_backbone(x)  # [B, 64, T]
         
-        # Single MLP with 2 outputs
-        contact_out = self.fc_contact(block2_out_reshape)  # Shape: (batch, 2) -> [:, 0] = left, [:, 1] = right
+        # Branch 1: Velocity prediction (last timestep only)
+        v_last = features[:, :, -1]  # Extract last timestep: [B, 64, T] → [B, 64]
+        velocity_out = self.velocity_head(v_last)  # [B, 1] - single velocity prediction
         
-        return contact_out
+        # # Flattened version (commented out):
+        # features_flat = features.flatten(start_dim=1)  # [B, 64, T] → [B, 64*T]
+        # velocity_out = self.velocity_head(features_flat)  # [B, 1] - single velocity prediction
+        
+        # # Branch 2: Contact classification (single value at last timestep)
+        # contact_out = self.contact_head(features)  # [B, 1]
+        
+        # return contact_out, velocity_out
+
+        return velocity_out  # Only velocity output for now, contact head is commented out
 
 
 class ContactCNNWithNormalization(nn.Module):
@@ -181,7 +129,9 @@ class ContactCNNWithNormalization(nn.Module):
     - Statistics are saved with the model and exported to ONNX
     
     Input shape: (batch_size, window_size, num_features) - RAW features from csv2numpy.py (LEFT LEG ONLY)
-    Output shape: (batch_size, 2) for contact ([:, 0]=left, [:, 1]=right)
+    Output shapes:
+        - contact: (batch_size, 1) - binary contact prediction (last timestep)
+        - velocity: (batch_size, 1) - velocity prediction at last timestep only
     
     Feature layout:
     - Input: RAW features from csv2numpy.py
@@ -221,10 +171,11 @@ class ContactCNNWithNormalization(nn.Module):
         
         Args:
             x: Raw input data (batch_size, window_size, num_features) - NOT z-score normalized (LEFT LEG ONLY)
-               Features: q(6) + qd(6) + p(3) + v(3) + tau_est(6) + tau_mse(1)
+               Features: q[3,4](2) + p[x,z](2) + v[x,z](2) + tau_est[1-5](5) + tau_mse(1) = 12 features
         
         Returns:
-            contact_out: (batch_size, 2) - contact prediction logits [:, 0]=left, [:, 1]=right
+            contact_out: (batch_size, 1) - binary contact prediction (last timestep)
+            velocity_out: (batch_size, 1) - velocity prediction at last timestep only
         """
         # Apply global z-score normalization to all input features
         # These statistics are embedded in the model and exported to ONNX

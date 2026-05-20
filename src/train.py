@@ -21,77 +21,94 @@ warnings.filterwarnings(
     message=".*LeafSpec.*"
 )
 
-def compute_accuracy(dataloader, model, contact_criterion=None):
+
+def compute_accuracy(dataloader, model, contact_criterion=None, velocity_criterion=None):
     """
-    Compute accuracy and optionally loss for a dataloader.
+    Compute accuracy and losses for left leg contact and velocity at last timestep.
     
     Args:
         dataloader: DataLoader to evaluate
         model: The neural network model
-        contact_criterion: Optional loss criterion. If None, only computes accuracy.
+        contact_criterion: Optional contact loss criterion
+        velocity_criterion: Optional velocity loss criterion
     
     Returns:
-        If contact_criterion is None: (accuracy, per_leg_accuracy)
-        If contact_criterion is provided: (accuracy, per_leg_accuracy, avg_loss)
+        dict with metrics: contact_acc, contact_loss, velocity_mae, velocity_loss
     """
-    num_correct = 0
+    # num_correct = 0
+    # num_data = 0
+    # contact_loss_sum = 0
+    velocity_loss_sum = 0
+    velocity_mae_sum = 0
     num_data = 0
-    contact_loss_sum = 0
-    correct_per_leg = np.zeros(2)  # 2 legs: LEFT and RIGHT
     
-    # Track prediction distribution to detect bias
-    num_pred_contact = 0
-    num_pred_no_contact = 0
-    num_gt_contact = 0
-    num_gt_no_contact = 0
+    # # Track prediction distribution to detect bias
+    # num_pred_contact = 0
+    # num_pred_no_contact = 0
+    # num_gt_contact = 0
+    # num_gt_no_contact = 0
     
     with torch.no_grad():
         for sample in tqdm(dataloader):
             input_data = sample['data']
-            gt_label = sample['label']  # Shape: (batch, 2) - binary labels for left and right leg
+            gt_contact = sample['label']  # Shape: (batch, 1) - binary labels for left leg (last timestep)
+            gt_velocity_seq = sample['velocity']  # Shape: (batch, window_size, 1) - full velocity sequence from dataset
+            gt_velocity = gt_velocity_seq[:, -1, :]  # Extract last timestep: (batch, 1)
 
-            contact_output = model(input_data)  # Shape: (batch, 2) -> [:, 0]=left, [:, 1]=right
-            contact_prediction = (contact_output > 0).float()  # Binary predictions
+            # contact_output, velocity_output = model(input_data)  # contact: (batch, 1), velocity: (batch, 1)
+            velocity_output = model(input_data)  # velocity: (batch, 1)
+            # contact_prediction = (contact_output > 0).float()  # Binary predictions
 
-            # Compute loss if criterion provided
-            if contact_criterion is not None:
-                contact_loss = contact_criterion(contact_output, gt_label)
-                contact_loss_sum += contact_loss.item()
-
-            # Per-leg accuracy
-            correct_per_leg += (contact_prediction == gt_label).sum(axis=0).cpu().numpy()
-            num_data += input_data.size(0)
-            # Overall accuracy (both legs)
-            num_correct += (contact_prediction == gt_label).sum().item()
+            # # Compute losses if criteria provided
+            # if contact_criterion is not None:
+            #     contact_loss = contact_criterion(contact_output, gt_contact)
+            #     contact_loss_sum += contact_loss.item()
             
-            # Track prediction distribution
-            num_pred_contact += (contact_prediction == 1).sum().item()
-            num_pred_no_contact += (contact_prediction == 0).sum().item()
-            num_gt_contact += (gt_label == 1).sum().item()
-            num_gt_no_contact += (gt_label == 0).sum().item()
+            # Velocity loss masked to contact samples only
+            contact_mask = (gt_contact == 1).float()  # (batch, 1)
+            if velocity_criterion is not None:
+                # Velocity loss on last timestep only, masked to contact samples only
+                velocity_loss = velocity_criterion(velocity_output, gt_velocity)  # Mean reduction
+                velocity_loss_masked = (velocity_loss * contact_mask.squeeze()).sum() / (contact_mask.sum() + 1e-8)
+                velocity_loss_sum += velocity_loss_masked.item()
+            
+            # MAE for velocity (only on contact samples, last timestep)
+            if contact_mask.sum() > 0:
+                velocity_errors = torch.abs(velocity_output - gt_velocity)  # (batch, 1)
+                velocity_mae = (velocity_errors * contact_mask).sum() / contact_mask.sum()
+                velocity_mae_sum += velocity_mae.item()
 
-    # Total accuracy considers all predictions (both legs)
-    total_predictions = num_data * 2  # 2 legs per sample
+            # # Contact accuracy
+            # num_correct += (contact_prediction == gt_contact).sum().item()
+            num_data += input_data.size(0)
+            
+            # # Track prediction distribution
+            # num_pred_contact += (contact_prediction == 1).sum().item()
+            # num_pred_no_contact += (contact_prediction == 0).sum().item()
+            # num_gt_contact += (gt_contact == 1).sum().item()
+            # num_gt_no_contact += (gt_contact == 0).sum().item()
 
-    print(f"\n  Prediction Distribution (both legs):")
-    print(f"    Model predicts contact (1):    {num_pred_contact}/{total_predictions} ({100*num_pred_contact/total_predictions:.1f}%)")
-    print(f"    Model predicts no-contact (0): {num_pred_no_contact}/{total_predictions} ({100*num_pred_no_contact/total_predictions:.1f}%)")
-    print(f"    Ground truth contact (1):      {num_gt_contact}/{total_predictions} ({100*num_gt_contact/total_predictions:.1f}%)")
-    print(f"    Ground truth no-contact (0):   {num_gt_no_contact}/{total_predictions} ({100*num_gt_no_contact/total_predictions:.1f}%)")
+    # print(f"\n  Prediction Distribution (left leg):")
+    # print(f"    Model predicts contact (1):    {num_pred_contact}/{num_data} ({100*num_pred_contact/num_data:.1f}%)")
+    # print(f"    Model predicts no-contact (0): {num_pred_no_contact}/{num_data} ({100*num_pred_no_contact/num_data:.1f}%)")
+    # print(f"    Ground truth contact (1):      {num_gt_contact}/{num_data} ({100*num_gt_contact/num_data:.1f}%)")
+    # print(f"    Ground truth no-contact (0):   {num_gt_no_contact}/{num_data} ({100*num_gt_no_contact/num_data:.1f}%)")
 
-    accuracy = num_correct / total_predictions
-    per_leg_accuracy = correct_per_leg / num_data
+    metrics = {
+        # 'contact_acc': num_correct / num_data,
+        # 'contact_loss': contact_loss_sum / len(dataloader) if contact_criterion else 0,
+        'velocity_mae': velocity_mae_sum / len(dataloader),
+        'velocity_loss': velocity_loss_sum / len(dataloader) if velocity_criterion else 0
+    }
     
-    if contact_criterion is not None:
-        return accuracy, per_leg_accuracy, contact_loss_sum / len(dataloader)
-    else:
-        return accuracy, per_leg_accuracy
+    return metrics
 
 
 def save_onnx_model(model, checkpoint_path, window_size):
     """
     Save ONNX version of the model for C++ deployment.
-    The model has one output: contact prediction (LEFT leg only)
+    The model has one output: 
+        - velocity: (batch, 1) - velocity prediction at last timestep only
     """
     try:
         import warnings
@@ -119,15 +136,15 @@ def save_onnx_model(model, checkpoint_path, window_size):
                 export_params=True,
                 opset_version=18,
                 input_names=['input'],
-                output_names=['contact_output'],  # Only contact output - LEFT leg
+                output_names=['velocity_output'],  # velocity: (batch,1)
                 dynamic_axes={
                     'input': {0: 'batch_size'},
-                    'contact_output': {0: 'batch_size'}
+                    'velocity_output': {0: 'batch_size'}
                 },
                 verbose=False
             )
         
-        print(f"  ✓ ONNX model saved (contact output, LEFT leg only): {onnx_path}")
+        print(f"  ✓ ONNX model saved (velocity at last timestep): {onnx_path}")
         
     except Exception as e:
         print(f"  ⚠ Warning: Failed to save ONNX model: {e}")
@@ -147,46 +164,46 @@ def train(model, train_dataloader, val_dataloader, config):
     writer.add_text("l1_lambda: ",str(config.get('l1_lambda', 0.0)))
     writer.add_text("l2_lambda: ",str(config.get('l2_lambda', 0.0)))
     writer.add_text("temporal_lambda: ",str(config.get('temporal_lambda', 0.0)))
-    # writer.add_text("velocity_weight: ",str(config.get('velocity_weight', 1.0)))
-    # writer.add_text("Huber_delta: ",str(config.get('Huber_delta', 0.5)))
+    writer.add_text("velocity_weight: ",str(config.get('velocity_weight', 1.0)))
+    writer.add_text("Huber_delta: ",str(config.get('Huber_delta', 0.5)))
 
 
-    # Contact classification only (velocity heads removed)
-    # Check if using weighted loss for class imbalance
-    use_weighted_loss = config.get('use_weighted_loss', False)
-    if use_weighted_loss and 'pos_weight' in config:
-        pos_weight = torch.tensor([config['pos_weight']]).to(next(model.parameters()).device)
-        contact_criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-        print(f"\n✓ Using WEIGHTED BCEWithLogitsLoss with pos_weight={config['pos_weight']:.2f}")
-        print(f"  This penalizes false negatives (missing contact) {config['pos_weight']:.2f}x more than false positives\n")
-    else:
-        contact_criterion = nn.BCEWithLogitsLoss()  # Standard unweighted loss
-        print(f"\n✓ Using standard (unweighted) BCEWithLogitsLoss\n")
+    # Loss functions for velocity regression
+    # # Contact: BCEWithLogitsLoss (with optional class weighting)
+    # use_weighted_loss = config.get('use_weighted_loss', False)
+    # if use_weighted_loss and 'pos_weight' in config:
+    #     pos_weight = torch.tensor([config['pos_weight']]).to(next(model.parameters()).device)
+    #     contact_criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    #     print(f"\n✓ Using WEIGHTED BCEWithLogitsLoss with pos_weight={config['pos_weight']:.2f}")
+    #     print(f"  This penalizes false negatives (missing contact) {config['pos_weight']:.2f}x more than false positives\n")
+    # else:
+    #     contact_criterion = nn.BCEWithLogitsLoss()  # Standard unweighted loss
+    #     print(f"\n✓ Using standard (unweighted) BCEWithLogitsLoss\n")
     
-    # huber_delta = float(config.get('Huber_delta', 0.5))
-    # velocity_criterion = nn.HuberLoss(delta=huber_delta, reduction='none')  # Element-wise Huber loss for masking
+    # Velocity: Huber loss (robust to outliers, only computed on contact samples)
+    huber_delta = float(config.get('Huber_delta', 0.5))
+    velocity_criterion = nn.HuberLoss(delta=huber_delta, reduction='none')  # Element-wise for masking
     optimizer = optim.Adam(model.parameters(), lr=config['init_lr'])
     
     # Get loss weighting parameters
-    # temporal_lambda = float(config.get('temporal_lambda', 0.0))
-    # velocity_weight = float(config.get('velocity_weight', 1.0))  # Weight for velocity loss
+    velocity_weight = float(config.get('velocity_weight', 1.0))  # Weight for velocity loss
 
-    best_acc = 0
-    best_leg_acc = 0
+    # best_acc = 0
     best_loss = 1000000000
-    
-    # DEBUG: Track if we've printed labels yet
-    printed_labels = False
+    best_velocity_mae = 1000000000
     
     for epoch in range(config['num_epoch']):
         running_loss = 0.0  # For periodic printing
         loss_sum = 0.0  # For epoch average
+        # contact_loss_sum = 0.0
+        velocity_loss_sum = 0.0
         
         model.train()
         for i, samples in tqdm(enumerate(train_dataloader, start=0)):
             input_data = samples['data'] 
-            contact_label = samples['label']  # Shape: (batch, 2) - [:, 0]=left, [:, 1]=right
-            # velocity_label = samples['velocity']  # Shape: (batch, 1) - LEFT leg only
+            contact_label = samples['label']  # Shape: (batch, 1) - left leg only (last timestep) - used for masking velocity loss
+            velocity_label_seq = samples['velocity']  # Shape: (batch, window_size, 1) - full velocity sequence from dataset
+            velocity_label = velocity_label_seq[:, -1, :]  # Extract last timestep: (batch, 1)
             
             # # DEBUG: Print ground truth labels once to verify data correctness
             # if not printed_labels and i == 0:
@@ -218,18 +235,30 @@ def train(model, train_dataloader, val_dataloader, config):
             #     printed_labels = True
 
             optimizer.zero_grad()
-            contact_output = model(input_data)  # Shape: (batch, 2) -> [:, 0]=left, [:, 1]=right
+            # contact_output, velocity_output = model(input_data)  # contact: (batch, 1), velocity: (batch, 1)
+            velocity_output = model(input_data)  # velocity: (batch, 1)
 
-            # Compute contact loss (BCEWithLogitsLoss averages over both legs)
-            loss = contact_criterion(contact_output, contact_label)
+            # # Compute contact loss
+            # contact_loss = contact_criterion(contact_output, contact_label)
+            
+            # Create contact mask (only compute velocity loss during contact)
+            contact_mask = (contact_label == 1).float()  # (batch, 1)
+            
+            # Compute velocity loss (last timestep only, masked to contact only)
+            velocity_loss_elementwise = velocity_criterion(velocity_output, velocity_label)  # Mean reduction gives scalar
+            # Apply mask: only compute loss when ground truth contact == 1
+            velocity_loss = (velocity_loss_elementwise * contact_mask.squeeze()).sum() / (contact_mask.sum() + 1e-8)
+            
+            # Combined loss (only velocity now, masked to contact samples)
+            loss = velocity_weight * velocity_loss
             
             # Add Elastic Net regularization (L1 + L2) if specified
             l1_lambda = float(config.get('l1_lambda', 0.0))
             l2_lambda = float(config.get('l2_lambda', 0.0))
             
             if l1_lambda > 0 or l2_lambda > 0:
-                l1_norm = torch.tensor(0.0, device=contact_output.device)
-                l2_norm = torch.tensor(0.0, device=contact_output.device)
+                l1_norm = torch.tensor(0.0, device=velocity_output.device)
+                l2_norm = torch.tensor(0.0, device=velocity_output.device)
                 
                 for p in model.parameters():
                     if l1_lambda > 0:
@@ -247,82 +276,84 @@ def train(model, train_dataloader, val_dataloader, config):
 
             running_loss += loss.item()
             loss_sum += loss.item()
+            # contact_loss_sum += contact_loss.item()
+            velocity_loss_sum += velocity_loss.item()
 
             if i % config['print_every'] == 0:
-                print("epoch %d / %d, iteration %d / %d, loss: %.8f" %\
+                print("epoch %d / %d, iteration %d / %d, loss: %.8f (velocity masked: %.6f, contact samples: %d/%d)" %\
                     (epoch, config['num_epoch'], i, len(train_dataloader), 
-                     running_loss/config['print_every']))
+                     running_loss/config['print_every'],
+                     velocity_loss.item(), int(contact_mask.sum().item()), contact_mask.size(0)))
                 running_loss = 0.0
 
         # calculate training and validation metrics
         model.eval()
-        train_acc, train_acc_per_leg = compute_accuracy(train_dataloader, model)
-        train_loss_avg = loss_sum/len(train_dataloader)
-
-        val_acc, val_acc_per_leg, val_loss_avg = compute_accuracy(
-            val_dataloader, model, contact_criterion)
-
-        train_acc_per_leg_avg = train_acc_per_leg.mean()  # Average over both legs
-        val_acc_per_leg_avg = val_acc_per_leg.mean()  # Average over both legs
+        train_metrics = compute_accuracy(train_dataloader, model, velocity_criterion=velocity_criterion)
+        val_metrics = compute_accuracy(val_dataloader, model, velocity_criterion=velocity_criterion)
+        
+        train_loss_avg = loss_sum / len(train_dataloader)
+        # contact_loss_avg = contact_loss_sum / len(train_dataloader)
+        velocity_loss_avg = velocity_loss_sum / len(train_dataloader)
 
         # log down info in tensorboard
-        writer.add_scalar('training loss', train_loss_avg, epoch)
-        writer.add_scalar('training accuracy', train_acc, epoch)
-        writer.add_scalar('training acc left leg', train_acc_per_leg[0], epoch)
-        writer.add_scalar('training acc right leg', train_acc_per_leg[1], epoch)
-        writer.add_scalar('training acc leg avg', train_acc_per_leg_avg, epoch)
+        writer.add_scalar('training/total_loss', train_loss_avg, epoch)
+        # writer.add_scalar('training/contact_loss', contact_loss_avg, epoch)
+        writer.add_scalar('training/velocity_loss', velocity_loss_avg, epoch)
+        # writer.add_scalar('training/contact_accuracy', train_metrics['contact_acc'], epoch)
+        writer.add_scalar('training/velocity_mae', train_metrics['velocity_mae'], epoch)
         
-        writer.add_scalar('validation loss', val_loss_avg, epoch)
-        writer.add_scalar('validation accuracy', val_acc, epoch)
-        writer.add_scalar('validation acc left leg', val_acc_per_leg[0], epoch)
-        writer.add_scalar('validation acc right leg', val_acc_per_leg[1], epoch)
-        writer.add_scalar('validation acc leg avg', val_acc_per_leg_avg, epoch)
+        writer.add_scalar('validation/total_loss', val_metrics['velocity_loss'], epoch)
+        # writer.add_scalar('validation/contact_loss', val_metrics['contact_loss'], epoch)
+        writer.add_scalar('validation/velocity_loss', val_metrics['velocity_loss'], epoch)
+        # writer.add_scalar('validation/contact_accuracy', val_metrics['contact_acc'], epoch)
+        writer.add_scalar('validation/velocity_mae', val_metrics['velocity_mae'], epoch)
 
-        # if we achieve best val acc, save the model.
-        if val_acc > best_acc:
-            best_acc = val_acc
+        # # if we achieve best val acc, save the model.
+        # if val_metrics['contact_acc'] > best_acc:
+        #     best_acc = val_metrics['contact_acc']
+        #     
+        #     state = {'epoch': epoch,
+        #             'model_state_dict': model.state_dict(),
+        #             'optimizer_state_dict': optimizer.state_dict(),
+        #             'loss': train_loss_avg,
+        #             'velocity_mae': train_metrics['velocity_mae'],
+        #             'val_loss': val_metrics['velocity_loss'],
+        #             'val_velocity_mae': val_metrics['velocity_mae']}
+        # 
+        #     checkpoint_path = config['model_save_path']+'_best_val_acc.pt'
+        #     torch.save(state, checkpoint_path)
+        #     # Also save ONNX version for faster C++ deployment
+        #     save_onnx_model(model, checkpoint_path, config['window_size'])
+        
+        # if we achieve best velocity MAE, save the model.
+        if val_metrics['velocity_mae'] < best_velocity_mae:
+            best_velocity_mae = val_metrics['velocity_mae']
             
             state = {'epoch': epoch,
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'loss': train_loss_avg,
-                    'acc': train_acc,
-                    'val_loss': val_loss_avg,
-                    'val_acc': val_acc}
+                    'velocity_mae': train_metrics['velocity_mae'],
+                    'val_loss': val_metrics['velocity_loss'],
+                    'val_velocity_mae': val_metrics['velocity_mae']}
 
-            checkpoint_path = config['model_save_path']+'_best_val_acc.pt'
-            torch.save(state, checkpoint_path)
-            # Also save ONNX version for faster C++ deployment
-            save_onnx_model(model, checkpoint_path, config['window_size'])
-        
-        # if we achieve best val leg acc, save the model.
-        if val_acc_per_leg_avg > best_leg_acc:
-            best_leg_acc = val_acc_per_leg_avg
-            
-            state = {'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'loss': train_loss_avg,
-                    'acc': train_acc,
-                    'val_loss': val_loss_avg,
-                    'val_acc': val_acc}
-
-            checkpoint_path = config['model_save_path']+'_best_val_leg_acc.pt'
+            checkpoint_path = config['model_save_path']+'_best_val_velocity.pt'
             torch.save(state, checkpoint_path)
             # Also save ONNX version for faster C++ deployment
             save_onnx_model(model, checkpoint_path, config['window_size'])
 
         # if we achieve best val loss, save the model
-        if val_loss_avg < best_loss:
-            best_loss = val_loss_avg
+        val_total_loss = val_metrics['velocity_loss']
+        if val_total_loss < best_loss:
+            best_loss = val_total_loss
             
             state = {'epoch': epoch,
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'loss': train_loss_avg,
-                    'acc': train_acc,
-                    'val_loss': val_loss_avg,
-                    'val_acc': val_acc}
+                    'velocity_mae': train_metrics['velocity_mae'],
+                    'val_loss': val_total_loss,
+                    'val_velocity_mae': val_metrics['velocity_mae']}
 
             checkpoint_path = config['model_save_path']+'_best_val_loss.pt'
             torch.save(state, checkpoint_path)
@@ -330,21 +361,18 @@ def train(model, train_dataloader, val_dataloader, config):
             save_onnx_model(model, checkpoint_path, config['window_size'])
             
 
-        print("Finished epoch %d / %d, training acc: %.4f, validation acc: %.4f" %\
-            (epoch, config['num_epoch'], train_acc, val_acc)) 
-        print("train left leg acc: %.4f, val left leg acc: %.4f" %\
-            (train_acc_per_leg[0], val_acc_per_leg[0]))
-        print("train right leg acc: %.4f, val right leg acc: %.4f" %\
-            (train_acc_per_leg[1], val_acc_per_leg[1]))
+        print("Finished epoch %d / %d" % (epoch, config['num_epoch']))
+        print("  Train - Velocity MAE: %.4f" % train_metrics['velocity_mae']) 
+        print("  Val   - Velocity MAE: %.4f" % val_metrics['velocity_mae'])
     
-    # save model     
+    # save final model     
     state = {'epoch': epoch,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'loss': train_loss_avg,
-            'acc': train_acc,
-            'val_loss': val_loss_avg,
-            'val_acc': val_acc}
+            'velocity_mae': train_metrics['velocity_mae'],
+            'val_loss': val_total_loss,
+            'val_velocity_mae': val_metrics['velocity_mae']}
 
     checkpoint_path = config['model_save_path']+'_final_epo.pt'
     torch.save(state, checkpoint_path)

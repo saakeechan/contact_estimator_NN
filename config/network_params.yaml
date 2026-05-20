@@ -12,13 +12,13 @@ data_folder: "/home/saakee/Research/deep-contact-estimator/Data/NumpyFiles/"
 model_save_path: "/home/saakee/Research/deep-contact-estimator/results/bipedal_contact"
 log_writer_path: "/home/saakee/Research/deep-contact-estimator/logs/bipedal_contact"
 
-model_description: "Bipedal 2-leg contact, 57 features, 4 output classes, 2block CNN, batch:30, ws:10, lr:1e-4"
+model_description: "Bipedal 2-leg contact, 57 features, 4 output classes, 2block CNN, batch:60, ws:6, lr:1e-4"
 
 print_every: 1000
 
 # Data params
 
-window_size: 4 # Number of consecutive samples to stack as input (temporal context)
+window_size: 8 # Number of consecutive samples to stack as input (temporal context)
 shuffle: True
 random_seed: 42  # For reproducible train/val/test splits
 train_ratio: 0.7
@@ -27,10 +27,10 @@ val_ratio: 0.15
 # Network params
 batch_size: 60  # Used for both training and testing
 init_lr: 0.0001
-num_epoch: 4  # Reduced for quick training with small dataset
+num_epoch: 10  # Reduced for quick training with small dataset
 
 # Test-specific params
-model_load_path: "/home/saakee/Research/deep-contact-estimator/results/bipedal_contact_best_val_leg_acc.pt"
+model_load_path: "/home/saakee/Research/deep-contact-estimator/results/bipedal_contact_best_val_velocity.pt"
 save_to_mat: False
 mat_save_path: "/home/saakee/Research/deep-contact-estimator/results/bipedal_test_results.mat"
 
@@ -43,7 +43,7 @@ l2_lambda: 0     # L2 (Ridge): encourages small weights, prevents large values
 # Multi-task Learning: Foot Velocity Regression Weight
 # Balances contact classification loss vs. velocity regression loss
 # Total Loss = contact_BCE_loss + velocity_weight * velocity_Huber_loss
-velocity_weight: 0.0    # Weight for velocity regression loss
+velocity_weight: 1.0    # Weight for velocity regression loss
                         # Typical: 0.5-2.0. Start with 1.0
                         # Higher values = prioritize velocity accuracy
                         # Lower values = prioritize contact accuracy
