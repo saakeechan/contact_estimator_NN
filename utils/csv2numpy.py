@@ -128,7 +128,7 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
             tau_mse = np.sum(tau_est ** 2, axis=1, keepdims=True)  # All 6 left leg joints, shape: (num_samples, 1)
 
             # Concatenate features - num_features is auto-detected from shape
-            cur_data = np.concatenate([q, qd, p, v, tau_est, tau_mse], axis=1)  # Shape: (num_samples, num_features)
+            cur_data = np.abs(np.concatenate([q, qd, p, v, tau_est, tau_mse], axis=1))  # Shape: (num_samples, num_features)
             
             # Initialize all_data and capture num_features from actual data shape
             if num_features is None:
@@ -147,8 +147,8 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
             
             # Calculate foot velocity in world frame by numerical differentiation for BOTH legs
             # Left foot velocity
-            # lfoot_position_world = ['lfoot_pos_x', 'lfoot_pos_y', 'lfoot_pos_z']
-            lfoot_position_world = ['lfoot_pos_x']
+            lfoot_position_world = ['lfoot_pos_x', 'lfoot_pos_y', 'lfoot_pos_z']
+            # lfoot_position_world = ['lfoot_pos_x']
             lfoot_velocity_world = np.diff(df_run[lfoot_position_world].values, axis=0) / np.diff(df_run['timestamp'].values.reshape(-1, 1), axis=0)
             lfoot_velocity_world = np.vstack((lfoot_velocity_world, lfoot_velocity_world[-1, :]))  # Keep size consistent
             lfoot_velocity_norm = np.linalg.norm(lfoot_velocity_world, axis=1, keepdims=True) + 1e-8

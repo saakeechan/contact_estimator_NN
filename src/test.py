@@ -44,18 +44,12 @@ def compute_jaccard(bin_pred_arr, bin_gt_arr):
 
 def compute_accuracy(dataloader, model):
     """
-    Compute metrics for left leg contact and velocity at last timestep.
+    Compute metrics for left leg velocity at last timestep.
     Returns:
-        contact_acc: contact accuracy
         velocity_mae: mean absolute error for velocity (on contact samples, last timestep only)
         velocity_mse: mean squared error for velocity (on contact samples, last timestep only)
-        bin_pred_arr: (N, 1) binary predictions
-        bin_gt_arr: (N, 1) binary ground truth
     """
-    num_correct = 0
     num_data = 0
-    bin_pred_arr = np.zeros((0, 1))  # Left leg only
-    bin_gt_arr = np.zeros((0, 1))  # Left leg only
     velocity_mae_sum = 0.0
     velocity_mse_sum = 0.0
     num_contact_samples = 0
@@ -67,14 +61,8 @@ def compute_accuracy(dataloader, model):
             gt_velocity_seq = sample['velocity']  # Shape: (batch, window_size, 1) - full velocity sequence from dataset
             gt_velocity = gt_velocity_seq[:, -1, :]  # Extract last timestep: (batch, 1)
 
-            contact_output, velocity_output = model(input_data)  # contact: (batch, 1), velocity: (batch, 1)
-            contact_prediction = (contact_output > 0).float()  # Binary predictions
+            velocity_seq, velocity_output = model(input_data)  # velocity_seq: (batch, 1, window_size), velocity_output: (batch, 1)
 
-            bin_pred_arr = np.vstack((bin_pred_arr, contact_prediction.cpu().numpy()))
-            bin_gt_arr = np.vstack((bin_gt_arr, gt_contact.cpu().numpy()))
-
-            # Contact accuracy
-            num_correct += (contact_prediction == gt_contact).sum().item()
             num_data += input_data.size(0)
             
             # Velocity metrics (only on contact samples, last timestep only)
@@ -90,11 +78,10 @@ def compute_accuracy(dataloader, model):
                 # Count contact samples
                 num_contact_samples += contact_mask.sum().item()
 
-    contact_acc = num_correct / num_data
     velocity_mae = velocity_mae_sum / num_contact_samples if num_contact_samples > 0 else 0
     velocity_mse = velocity_mse_sum / num_contact_samples if num_contact_samples > 0 else 0
     
-    return contact_acc, velocity_mae, velocity_mse, bin_pred_arr, bin_gt_arr
+    return velocity_mae, velocity_mse
 
 def decimal2binary(x):
     mask = 2**torch.arange(2-1,-1,-1).to(x.device, x.dtype)  # 2 legs for biped
@@ -198,39 +185,20 @@ def main():
         print(f"⚠️  WARNING: global_std is all ones (using fallback - normalization NOT loaded!)")
     print(f"{'='*60}\n")
 
-    contact_acc, velocity_mae, velocity_mse, bin_pred_arr, bin_gt_arr = compute_accuracy(test_dataloader, model)
-    precision = compute_precision(bin_pred_arr, bin_gt_arr)
-    jaccard = compute_jaccard(bin_pred_arr, bin_gt_arr)
-    confusion_mat, fn_rate, fp_rate = compute_confusion_mat(bin_pred_arr, bin_gt_arr)
+    velocity_mae, velocity_mse = compute_accuracy(test_dataloader, model)
 
     print("\n" + "="*60)
     print("LEFT LEG TEST RESULTS")
     print("="*60)
-    print("\nContact Classification Metrics:")
-    print("  Contact Accuracy: %.4f" % contact_acc)
-    print("  Precision: %.4f" % precision)
-    print("  Jaccard Score: %.4f" % jaccard)
-    print("  False Negative Rate: %.4f" % fn_rate)
-    print("  False Positive Rate: %.4f" % fp_rate)
     
     print("\nVelocity Regression Metrics (on contact samples, last timestep only):")
     print("  Velocity MAE: %.6f" % velocity_mae)
     print("  Velocity MSE: %.6f" % velocity_mse)
     print("  Velocity RMSE: %.6f" % np.sqrt(velocity_mse))
-    
-    print("\nConfusion Matrix (Left Leg):")
-    print(confusion_mat['left_leg'])
-    print("\nConfusion Matrix Ratio:")
-    print(confusion_mat['ratio'])
     print("="*60)
     
     # Raw values for easy copy-paste
     print("\nRaw Values:")
-    print(contact_acc)
-    print(precision)
-    print(jaccard)
-    print(fn_rate)
-    print(fp_rate)
     print(velocity_mae)
     print(velocity_mse)
     print(np.sqrt(velocity_mse))

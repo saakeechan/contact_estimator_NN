@@ -12,22 +12,22 @@ data_folder: "/home/saakee/Research/deep-contact-estimator/Data/NumpyFiles/"
 model_save_path: "/home/saakee/Research/deep-contact-estimator/results/bipedal_contact"
 log_writer_path: "/home/saakee/Research/deep-contact-estimator/logs/bipedal_contact"
 
-model_description: "Bipedal 2-leg contact, 57 features, 4 output classes, 2block CNN, batch:60, ws:6, lr:1e-4"
+model_description: "Bipedal 2-leg contact, 57 features, 4 output classes, 2block CNN, batch:60, ws:16, lr:1e-4"
 
 print_every: 1000
 
 # Data params
 
-window_size: 8 # Number of consecutive samples to stack as input (temporal context)
+window_size: 24 # Number of consecutive samples to stack as input (temporal context)
 shuffle: True
 random_seed: 42  # For reproducible train/val/test splits
-train_ratio: 0.7
+train_ratio: 0.8
 val_ratio: 0.15
 
 # Network params
 batch_size: 60  # Used for both training and testing
 init_lr: 0.0001
-num_epoch: 10  # Reduced for quick training with small dataset
+num_epoch: 3  # Reduced for quick training with small dataset
 
 # Test-specific params
 model_load_path: "/home/saakee/Research/deep-contact-estimator/results/bipedal_contact_best_val_velocity.pt"
@@ -48,4 +48,22 @@ velocity_weight: 1.0    # Weight for velocity regression loss
                         # Higher values = prioritize velocity accuracy
                         # Lower values = prioritize contact accuracy
                         # Set based on which task is more important
-Huber_delta: 0.3      # Delta parameter for Huber loss in velocity regression
+
+# Derivative Matching Loss: Enforces smooth temporal dynamics
+# Matches the slope/change of velocity predictions to ground truth
+# Total Loss = velocity_loss + derivative_weight * derivative_loss
+derivative_weight: 0.00  # Weight for derivative matching loss
+                        # Typical: 0.1-1.0. Start with 0.5
+                        # Higher values = prioritize smooth transitions
+                        # Forces rises/drops to occur at correct timesteps
+
+# Temporal Weighting: Emphasize recent timesteps over past
+# Loss at timestep t is weighted by: w_t = ((t+1) / T) ^ temporal_weight_power
+# where t=0 is oldest, t=T-1 is most recent (last timestep)
+temporal_weight_power: 0.0  # Exponent for temporal weighting
+                            # 0.0 = uniform (no temporal bias)
+                            # 1.0 = linear (w_t proportional to recency)
+                            # 2.0 = quadratic (strong emphasis on recent)
+                            # Higher values = more focus on last timestep
+
+Huber_delta: 0.001      # Delta parameter for Huber loss in velocity regression

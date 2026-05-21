@@ -21,18 +21,7 @@ class contact_dataset(Dataset):
         """
         data = np.load(data_path)
         label = np.load(label_path)
-        
-        # # Load foot velocities - LEFT LEG ONLY
-        # velocity_path = data_path.replace('_data.npy', '_foot_velocities.npy')
-        # if not os.path.exists(velocity_path):
-        #     velocity_path = data_path.replace('.npy', '_foot_velocities.npy')
-        
-        # if os.path.exists(velocity_path):
-        #     foot_velocity = np.load(velocity_path)
-        #     print(f"Loaded foot velocities from {velocity_path}")
-        # else:
-        #     print(f"Warning: No foot velocity file found. Creating zero velocities.")
-        #     foot_velocity = np.zeros((len(data), 1), dtype=np.float32)  # LEFT leg only
+
         
         self.window_size = window_size
         self.data = torch.from_numpy(data).type('torch.FloatTensor').to(device)
@@ -133,8 +122,9 @@ class contact_dataset(Dataset):
         
         Output: 
         - data: (batch_size, window_size, num_features)
-        - label: (batch_size, 1) - binary contact for left leg (last timestep)
-        - velocity: (batch_size, window_size, 1) - full velocity sequence (model extracts last timestep)
+        - label: (batch_size, 1) - binary contact for left leg (last timestep only)
+        - label_seq: (batch_size, window_size, 1) - full contact sequence for dense supervision
+        - velocity: (batch_size, window_size, 1) - full velocity sequence
         """
         if torch.is_tensor(idx):
             idx = idx.tolist()
@@ -146,13 +136,16 @@ class contact_dataset(Dataset):
         # Feature layout: LEFT leg features from csv2numpy.py
         this_data = self.data[real_idx:real_idx+self.window_size,:]
         
-        # Label: contact at last timestep
+        # Label: contact at last timestep only
         this_label = self.label[real_idx+self.window_size-1]  # Shape: (1,) - left leg only
         
-        # Velocity: full sequence (training code extracts last timestep)
+        # Label sequence: full contact sequence for all timesteps (for dense supervision)
+        this_label_seq = self.label[real_idx:real_idx+self.window_size, :]  # Shape: (window_size, 1)
+        
+        # Velocity: full sequence
         this_velocity = self.foot_velocity[real_idx:real_idx+self.window_size, :]  # Shape: (window_size, 1)
             
-        sample = {'data': this_data, 'label': this_label, 'velocity': this_velocity}
+        sample = {'data': this_data, 'label': this_label, 'label_seq': this_label_seq, 'velocity': this_velocity}
 
         return sample
 

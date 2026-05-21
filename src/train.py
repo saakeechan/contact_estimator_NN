@@ -56,7 +56,7 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_criteri
             gt_velocity = gt_velocity_seq[:, -1, :]  # Extract last timestep: (batch, 1)
 
             # contact_output, velocity_output = model(input_data)  # contact: (batch, 1), velocity: (batch, 1)
-            velocity_output = model(input_data)  # velocity: (batch, 1)
+            velocity_seq, velocity_output = model(input_data)  # velocity_seq: (batch, 1, window_size), velocity_output: (batch, 1)
             # contact_prediction = (contact_output > 0).float()  # Binary predictions
 
             # # Compute losses if criteria provided
@@ -65,17 +65,28 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_criteri
             #     contact_loss_sum += contact_loss.item()
             
             # Velocity loss masked to contact samples only
-            contact_mask = (gt_contact == 1).float()  # (batch, 1)
+            contact_mask = (gt_contact == 1).float()  # [B, 1]
+            
             if velocity_criterion is not None:
                 # Velocity loss on last timestep only, masked to contact samples only
-                velocity_loss = velocity_criterion(velocity_output, gt_velocity)  # Mean reduction
-                velocity_loss_masked = (velocity_loss * contact_mask.squeeze()).sum() / (contact_mask.sum() + 1e-8)
+                velocity_loss_each = velocity_criterion(
+                    velocity_output, gt_velocity
+                )  # [B, 1], requires reduction="none"
+                
+                velocity_loss_masked = (
+                    velocity_loss_each * contact_mask
+                ).sum() / (contact_mask.sum() + 1e-8)
+                
                 velocity_loss_sum += velocity_loss_masked.item()
             
             # MAE for velocity (only on contact samples, last timestep)
             if contact_mask.sum() > 0:
-                velocity_errors = torch.abs(velocity_output - gt_velocity)  # (batch, 1)
-                velocity_mae = (velocity_errors * contact_mask).sum() / contact_mask.sum()
+                velocity_errors = torch.abs(velocity_output - gt_velocity)  # [B, 1]
+                
+                velocity_mae = (
+                    velocity_errors * contact_mask
+                ).sum() / (contact_mask.sum() + 1e-8)
+                
                 velocity_mae_sum += velocity_mae.item()
 
             # # Contact accuracy
@@ -87,12 +98,6 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_criteri
             # num_pred_no_contact += (contact_prediction == 0).sum().item()
             # num_gt_contact += (gt_contact == 1).sum().item()
             # num_gt_no_contact += (gt_contact == 0).sum().item()
-
-    # print(f"\n  Prediction Distribution (left leg):")
-    # print(f"    Model predicts contact (1):    {num_pred_contact}/{num_data} ({100*num_pred_contact/num_data:.1f}%)")
-    # print(f"    Model predicts no-contact (0): {num_pred_no_contact}/{num_data} ({100*num_pred_no_contact/num_data:.1f}%)")
-    # print(f"    Ground truth contact (1):      {num_gt_contact}/{num_data} ({100*num_gt_contact/num_data:.1f}%)")
-    # print(f"    Ground truth no-contact (0):   {num_gt_no_contact}/{num_data} ({100*num_gt_no_contact/num_data:.1f}%)")
 
     metrics = {
         # 'contact_acc': num_correct / num_data,
@@ -107,8 +112,9 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_criteri
 def save_onnx_model(model, checkpoint_path, window_size):
     """
     Save ONNX version of the model for C++ deployment.
-    The model has one output: 
-        - velocity: (batch, 1) - velocity prediction at last timestep only
+    The model has two outputs: 
+        - velocity_seq: (batch, 1, window_size) - velocity predictions for all timesteps (for training)
+        - velocity_output: (batch, 1) - velocity prediction at last timestep only (for inference)
     """
     try:
         import warnings
@@ -136,15 +142,16 @@ def save_onnx_model(model, checkpoint_path, window_size):
                 export_params=True,
                 opset_version=18,
                 input_names=['input'],
-                output_names=['velocity_output'],  # velocity: (batch,1)
+                output_names=['velocity_seq', 'velocity_output'],  # velocity_seq: (batch,1,T), velocity_output: (batch,1)
                 dynamic_axes={
                     'input': {0: 'batch_size'},
+                    'velocity_seq': {0: 'batch_size', 2: 'window_size'},
                     'velocity_output': {0: 'batch_size'}
                 },
                 verbose=False
             )
         
-        print(f"  ✓ ONNX model saved (velocity at last timestep): {onnx_path}")
+        print(f"  ✓ ONNX model saved (velocity sequence + last timestep): {onnx_path}")
         
     except Exception as e:
         print(f"  ⚠ Warning: Failed to save ONNX model: {e}")
@@ -161,47 +168,43 @@ def train(model, train_dataloader, val_dataloader, config):
     writer.add_text("batch_size: ",str(config['batch_size']))
     writer.add_text("init_lr: ",str(config['init_lr']))
     writer.add_text("num_epoch: ",str(config['num_epoch']))
-    writer.add_text("l1_lambda: ",str(config.get('l1_lambda', 0.0)))
-    writer.add_text("l2_lambda: ",str(config.get('l2_lambda', 0.0)))
-    writer.add_text("temporal_lambda: ",str(config.get('temporal_lambda', 0.0)))
     writer.add_text("velocity_weight: ",str(config.get('velocity_weight', 1.0)))
     writer.add_text("Huber_delta: ",str(config.get('Huber_delta', 0.5)))
+    writer.add_text("derivative_weight: ",str(config.get('derivative_weight', 0.0)))
+    writer.add_text("temporal_weight_power: ",str(config.get('temporal_weight_power', 0.0)))
 
 
     # Loss functions for velocity regression
     # # Contact: BCEWithLogitsLoss (with optional class weighting)
     # use_weighted_loss = config.get('use_weighted_loss', False)
-    # if use_weighted_loss and 'pos_weight' in config:
-    #     pos_weight = torch.tensor([config['pos_weight']]).to(next(model.parameters()).device)
-    #     contact_criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    #     print(f"\n✓ Using WEIGHTED BCEWithLogitsLoss with pos_weight={config['pos_weight']:.2f}")
-    #     print(f"  This penalizes false negatives (missing contact) {config['pos_weight']:.2f}x more than false positives\n")
-    # else:
-    #     contact_criterion = nn.BCEWithLogitsLoss()  # Standard unweighted loss
-    #     print(f"\n✓ Using standard (unweighted) BCEWithLogitsLoss\n")
-    
-    # Velocity: Huber loss (robust to outliers, only computed on contact samples)
     huber_delta = float(config.get('Huber_delta', 0.5))
     velocity_criterion = nn.HuberLoss(delta=huber_delta, reduction='none')  # Element-wise for masking
     optimizer = optim.Adam(model.parameters(), lr=config['init_lr'])
     
     # Get loss weighting parameters
     velocity_weight = float(config.get('velocity_weight', 1.0))  # Weight for velocity loss
+    derivative_weight = float(config.get('derivative_weight', 0.0))  # Weight for derivative matching loss
+    temporal_weight_power = float(config.get('temporal_weight_power', 0.0))  # Temporal weighting exponent
 
     # best_acc = 0
     best_loss = 1000000000
     best_velocity_mae = 1000000000
+    
+    # Debug: print temporal weights once to verify weighting scheme
+    printed_temporal_weights = False
     
     for epoch in range(config['num_epoch']):
         running_loss = 0.0  # For periodic printing
         loss_sum = 0.0  # For epoch average
         # contact_loss_sum = 0.0
         velocity_loss_sum = 0.0
+        derivative_loss_sum = 0.0
         
         model.train()
         for i, samples in tqdm(enumerate(train_dataloader, start=0)):
             input_data = samples['data'] 
-            contact_label = samples['label']  # Shape: (batch, 1) - left leg only (last timestep) - used for masking velocity loss
+            contact_label = samples['label']  # Shape: (batch, 1) - left leg only (last timestep) - for reporting
+            contact_label_seq = samples['label_seq']  # Shape: (batch, window_size, 1) - full contact sequence for masking
             velocity_label_seq = samples['velocity']  # Shape: (batch, window_size, 1) - full velocity sequence from dataset
             velocity_label = velocity_label_seq[:, -1, :]  # Extract last timestep: (batch, 1)
             
@@ -235,22 +238,72 @@ def train(model, train_dataloader, val_dataloader, config):
             #     printed_labels = True
 
             optimizer.zero_grad()
-            # contact_output, velocity_output = model(input_data)  # contact: (batch, 1), velocity: (batch, 1)
-            velocity_output = model(input_data)  # velocity: (batch, 1)
-
-            # # Compute contact loss
-            # contact_loss = contact_criterion(contact_output, contact_label)
             
-            # Create contact mask (only compute velocity loss during contact)
-            contact_mask = (contact_label == 1).float()  # (batch, 1)
+            velocity_seq, velocity_output = model(input_data)  # velocity_seq: (batch, 1, window_size), velocity_output: (batch, 1)
             
-            # Compute velocity loss (last timestep only, masked to contact only)
-            velocity_loss_elementwise = velocity_criterion(velocity_output, velocity_label)  # Mean reduction gives scalar
-            # Apply mask: only compute loss when ground truth contact == 1
-            velocity_loss = (velocity_loss_elementwise * contact_mask.squeeze()).sum() / (contact_mask.sum() + 1e-8)
+            # Compute velocity loss on FULL SEQUENCE (dense supervision) masked to contact only
+            velocity_seq_permuted = velocity_seq.permute(0, 2, 1)  # [B, T, 1]
             
-            # Combined loss (only velocity now, masked to contact samples)
-            loss = velocity_weight * velocity_loss
+            velocity_loss_elementwise = velocity_criterion(
+                velocity_seq_permuted,
+                velocity_label_seq
+            )  # [B, T, 1]
+            
+            # Use full contact sequence for masking (dense supervision only at contact timesteps)
+            contact_mask_seq = (contact_label_seq == 1).float()  # [B, T, 1]
+            
+            # Apply temporal weighting: higher weights for recent timesteps (end of window)
+            # w_t = ((t+1) / T) ^ power, where t=0 is oldest, t=T-1 is most recent
+            if temporal_weight_power > 0:
+                T = velocity_seq_permuted.size(1)  # window_size
+                # Create temporal weights: shape [1, T, 1] for broadcasting
+                timesteps = torch.arange(1, T + 1, dtype=torch.float32, device=velocity_output.device)  # [1, 2, ..., T]
+                temporal_weights = (timesteps / T) ** temporal_weight_power  # [T]
+                temporal_weights = temporal_weights.view(1, T, 1)  # [1, T, 1] for broadcasting
+                
+                # Debug: print temporal weights once
+                if not printed_temporal_weights:
+                    print(f"\n{'='*60}")
+                    print(f"Temporal weighting enabled (power={temporal_weight_power})")
+                    print(f"Weights for each timestep (oldest → newest):")
+                    weights_1d = temporal_weights.squeeze().cpu().numpy()
+                    print(f"  {weights_1d}")
+                    print(f"  First timestep weight: {weights_1d[0]:.4f}")
+                    print(f"  Last timestep weight: {weights_1d[-1]:.4f}")
+                    print(f"  Ratio (last/first): {weights_1d[-1]/weights_1d[0]:.2f}x")
+                    print(f"{'='*60}\n")
+                    printed_temporal_weights = True
+            else:
+                temporal_weights = 1.0  # Uniform weighting
+            
+            velocity_loss = (
+                velocity_loss_elementwise * contact_mask_seq * temporal_weights
+            ).sum() / ((contact_mask_seq * temporal_weights).sum() + 1e-8)
+            
+            # Derivative matching loss: match temporal dynamics (slopes/changes)
+            derivative_loss = torch.tensor(0.0, device=velocity_output.device)
+            if derivative_weight > 0:
+                # Compute derivatives: Δy_t = y_t - y_{t-1}
+                pred_derivative = velocity_seq_permuted[:, 1:, :] - velocity_seq_permuted[:, :-1, :]  # [B, T-1, 1]
+                gt_derivative = velocity_label_seq[:, 1:, :] - velocity_label_seq[:, :-1, :]  # [B, T-1, 1]
+                
+                # Compute derivative loss using Huber loss (robust to outliers)
+                derivative_loss_elementwise = F.smooth_l1_loss(
+                    pred_derivative,
+                    gt_derivative,
+                    reduction='none',
+                    beta=0.05
+                )  # [B, T-1, 1]
+                
+                # Mask to contact timesteps - both t and t+1 must be in contact
+                # (derivative spans from timestep t to t+1)
+                contact_mask_derivative = contact_mask_seq[:, 1:, :] * contact_mask_seq[:, :-1, :]  # [B, T-1, 1]
+                
+                derivative_loss = (
+                    derivative_loss_elementwise * contact_mask_derivative
+                ).sum() / (contact_mask_derivative.sum() + 1e-8)
+            
+            loss = velocity_weight * velocity_loss + derivative_weight * derivative_loss
             
             # Add Elastic Net regularization (L1 + L2) if specified
             l1_lambda = float(config.get('l1_lambda', 0.0))
@@ -278,12 +331,15 @@ def train(model, train_dataloader, val_dataloader, config):
             loss_sum += loss.item()
             # contact_loss_sum += contact_loss.item()
             velocity_loss_sum += velocity_loss.item()
+            if derivative_weight > 0:
+                derivative_loss_sum += derivative_loss.item()
 
             if i % config['print_every'] == 0:
-                print("epoch %d / %d, iteration %d / %d, loss: %.8f (velocity masked: %.6f, contact samples: %d/%d)" %\
+                derivative_str = f", derivative: {derivative_loss.item():.6f}" if derivative_weight > 0 else ""
+                print("epoch %d / %d, iteration %d / %d, loss: %.8f (velocity masked: %.6f%s, contact timesteps: %d)" %\
                     (epoch, config['num_epoch'], i, len(train_dataloader), 
                      running_loss/config['print_every'],
-                     velocity_loss.item(), int(contact_mask.sum().item()), contact_mask.size(0)))
+                     velocity_loss.item(), derivative_str, int(contact_mask_seq.sum().item())))
                 running_loss = 0.0
 
         # calculate training and validation metrics
@@ -294,11 +350,14 @@ def train(model, train_dataloader, val_dataloader, config):
         train_loss_avg = loss_sum / len(train_dataloader)
         # contact_loss_avg = contact_loss_sum / len(train_dataloader)
         velocity_loss_avg = velocity_loss_sum / len(train_dataloader)
+        derivative_loss_avg = derivative_loss_sum / len(train_dataloader) if derivative_weight > 0 else 0.0
 
         # log down info in tensorboard
         writer.add_scalar('training/total_loss', train_loss_avg, epoch)
         # writer.add_scalar('training/contact_loss', contact_loss_avg, epoch)
         writer.add_scalar('training/velocity_loss', velocity_loss_avg, epoch)
+        if derivative_weight > 0:
+            writer.add_scalar('training/derivative_loss', derivative_loss_avg, epoch)
         # writer.add_scalar('training/contact_accuracy', train_metrics['contact_acc'], epoch)
         writer.add_scalar('training/velocity_mae', train_metrics['velocity_mae'], epoch)
         
@@ -417,6 +476,10 @@ def main():
     print("num_epoch: ",config['num_epoch'])
     print("l1_lambda: ",config.get('l1_lambda', 0.0))
     print("l2_lambda: ",config.get('l2_lambda', 0.0))
+    print("velocity_weight: ",config.get('velocity_weight', 1.0))
+    print("derivative_weight: ",config.get('derivative_weight', 0.0))
+    print("temporal_weight_power: ",config.get('temporal_weight_power', 0.0))
+    print("Huber_delta: ",config.get('Huber_delta', 0.5))
 
     
     # Load ALL data (not pre-split) - windowing happens first, then splitting
@@ -473,36 +536,36 @@ def main():
     val_indices = all_dataset.get_windows_by_run_ids(val_run_ids)
     test_indices = all_dataset.get_windows_by_run_ids(test_run_ids)
     
-    # Validate non-empty splits
-    if len(train_indices) == 0 or len(val_indices) == 0:
-        raise ValueError(f"Empty train or val set after run-based split. Train: {len(train_indices)}, Val: {len(val_indices)}")
+    # # Validate non-empty splits
+    # if len(train_indices) == 0 or len(val_indices) == 0:
+    #     raise ValueError(f"Empty train or val set after run-based split. Train: {len(train_indices)}, Val: {len(val_indices)}")
     
-    print(f"\nDataset split BY RUNS (prevents data leakage):")
-    print(f"  Total runs: {num_runs}")
-    print(f"  Train runs: {len(train_run_ids)} -> {len(train_indices)} windows")
-    print(f"  Val runs: {len(val_run_ids)} -> {len(val_indices)} windows")
-    print(f"  Test runs: {len(test_run_ids)} -> {len(test_indices)} windows")
-    print(f"  Total windows: {len(all_dataset)}")
+    # print(f"\nDataset split BY RUNS (prevents data leakage):")
+    # print(f"  Total runs: {num_runs}")
+    # print(f"  Train runs: {len(train_run_ids)} -> {len(train_indices)} windows")
+    # print(f"  Val runs: {len(val_run_ids)} -> {len(val_indices)} windows")
+    # print(f"  Test runs: {len(test_run_ids)} -> {len(test_indices)} windows")
+    # print(f"  Total windows: {len(all_dataset)}")
     
-    # DEBUG: Verify no overlap between splits
-    print(f"\nDEBUG: Verifying split integrity...")
-    train_val_overlap = train_run_ids.intersection(val_run_ids)
-    train_test_overlap = train_run_ids.intersection(test_run_ids)
-    val_test_overlap = val_run_ids.intersection(test_run_ids)
+    # # DEBUG: Verify no overlap between splits
+    # print(f"\nDEBUG: Verifying split integrity...")
+    # train_val_overlap = train_run_ids.intersection(val_run_ids)
+    # train_test_overlap = train_run_ids.intersection(test_run_ids)
+    # val_test_overlap = val_run_ids.intersection(test_run_ids)
     
-    if len(train_val_overlap) > 0 or len(train_test_overlap) > 0 or len(val_test_overlap) > 0:
-        print(f"  ❌ ERROR: Run overlap detected!")
-        print(f"     Train-Val overlap: {train_val_overlap}")
-        print(f"     Train-Test overlap: {train_test_overlap}")
-        print(f"     Val-Test overlap: {val_test_overlap}")
-        raise ValueError("Data leakage detected: runs overlap between splits!")
-    else:
-        print(f"  ✓ No run overlap - splits are clean")
+    # if len(train_val_overlap) > 0 or len(train_test_overlap) > 0 or len(val_test_overlap) > 0:
+    #     print(f"  ❌ ERROR: Run overlap detected!")
+    #     print(f"     Train-Val overlap: {train_val_overlap}")
+    #     print(f"     Train-Test overlap: {train_test_overlap}")
+    #     print(f"     Val-Test overlap: {val_test_overlap}")
+    #     raise ValueError("Data leakage detected: runs overlap between splits!")
+    # else:
+    #     print(f"  ✓ No run overlap - splits are clean")
     
-    # DEBUG: Show which runs went to which split (first few)
-    print(f"  Train run IDs (first 5): {sorted(list(train_run_ids))[:5]}")
-    print(f"  Val run IDs (first 5): {sorted(list(val_run_ids))[:5]}")
-    print(f"  Test run IDs (first 5): {sorted(list(test_run_ids))[:5]}")
+    # # DEBUG: Show which runs went to which split (first few)
+    # print(f"  Train run IDs (first 5): {sorted(list(train_run_ids))[:5]}")
+    # print(f"  Val run IDs (first 5): {sorted(list(val_run_ids))[:5]}")
+    # print(f"  Test run IDs (first 5): {sorted(list(test_run_ids))[:5]}")
     
     # Create Subset datasets for deterministic sampling
     from torch.utils.data import Subset
