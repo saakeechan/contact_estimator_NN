@@ -172,6 +172,14 @@ def train(model, train_dataloader, val_dataloader, config):
     writer.add_text("Huber_delta: ",str(config.get('Huber_delta', 0.5)))
     writer.add_text("derivative_weight: ",str(config.get('derivative_weight', 0.0)))
     writer.add_text("temporal_weight_power: ",str(config.get('temporal_weight_power', 0.0)))
+    writer.add_text("model_architecture: ",str(config.get('model_architecture', 'vanilla_cnn')))
+    if config.get('model_architecture', 'vanilla_cnn').lower() == 'attention_tcn':
+        writer.add_text("attention_d_model: ",str(config.get('attention_d_model', 64)))
+        writer.add_text("attention_num_heads: ",str(config.get('attention_num_heads', 4)))
+    writer.add_text("tcn_num_channels: ",str(config.get('tcn_num_channels', 64)))
+    writer.add_text("tcn_kernel_size: ",str(config.get('tcn_kernel_size', 3)))
+    writer.add_text("tcn_num_blocks: ",str(config.get('tcn_num_blocks', 5)))
+    writer.add_text("tcn_dropout: ",str(config.get('tcn_dropout', 0.2)))
 
 
     # Loss functions for velocity regression
@@ -469,6 +477,7 @@ def main():
     
     print("--------network params--------")
     print("num_features: ", num_features)
+    print("model_architecture: ",config.get('model_architecture', 'vanilla_cnn'))
     print("window_size: ",config['window_size'])
     print("shuffle: ",config['shuffle'])
     print("batch_size: ",config['batch_size'])
@@ -480,6 +489,13 @@ def main():
     print("derivative_weight: ",config.get('derivative_weight', 0.0))
     print("temporal_weight_power: ",config.get('temporal_weight_power', 0.0))
     print("Huber_delta: ",config.get('Huber_delta', 0.5))
+    print("tcn_num_channels: ",config.get('tcn_num_channels', 64))
+    print("tcn_kernel_size: ",config.get('tcn_kernel_size', 3))
+    print("tcn_num_blocks: ",config.get('tcn_num_blocks', 5))
+    print("tcn_dropout: ",config.get('tcn_dropout', 0.2))
+    if config.get('model_architecture', 'vanilla_cnn').lower() == 'attention_tcn':
+        print("attention_d_model: ",config.get('attention_d_model', 64))
+        print("attention_num_heads: ",config.get('attention_num_heads', 4))
 
     
     # Load ALL data (not pre-split) - windowing happens first, then splitting
@@ -624,7 +640,41 @@ def main():
 
     # init network with built-in normalization using global training statistics
     # num_features loaded from metadata at the start of main()
-    base_model = contact_cnn(window_size=config['window_size'], num_features=num_features)
+    # Select model architecture based on config
+    model_arch = config.get('model_architecture', 'vanilla_cnn').lower()
+    
+    if model_arch == 'attention_tcn':
+        print(f"\n{'='*60}")
+        print(f"Using AttentionTCN architecture (Transformer + TCN hybrid)")
+        print(f"{'='*60}")
+        from contact_cnn import AttentionTCN
+        base_model = AttentionTCN(
+            window_size=config['window_size'],
+            num_features=num_features,
+            d_model=config.get('attention_d_model', 64),
+            num_heads=config.get('attention_num_heads', 4),
+            tcn_num_channels=config.get('tcn_num_channels', 64),
+            tcn_kernel_size=config.get('tcn_kernel_size', 3),
+            tcn_num_blocks=config.get('tcn_num_blocks', 5),
+            tcn_dropout=config.get('tcn_dropout', 0.2)
+        )
+        print(f"  Attention d_model: {config.get('attention_d_model', 64)}")
+        print(f"  Attention num_heads: {config.get('attention_num_heads', 4)}")
+        print(f"  TCN num_channels: {config.get('tcn_num_channels', 64)}")
+        print(f"  TCN num_blocks: {config.get('tcn_num_blocks', 5)}")
+        print(f"  Gamma initialization: 0.0 (learns to blend attention during training)")
+        print(f"{'='*60}\n")
+    elif model_arch == 'vanilla_cnn':
+        print(f"\n{'='*60}")
+        print(f"Using Vanilla CNN architecture (simple dilated convolutions)")
+        print(f"{'='*60}\n")
+        base_model = contact_cnn(
+            window_size=config['window_size'],
+            num_features=num_features
+        )
+    else:
+        raise ValueError(f"Unknown model_architecture: {model_arch}. Options: 'attention_tcn', 'vanilla_cnn'")
+    
     from contact_cnn import ContactCNNWithNormalization
     model = ContactCNNWithNormalization(base_model, global_mean=global_mean, global_std=global_std)
     model = model.to(device)

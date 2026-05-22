@@ -8,14 +8,15 @@ import numpy as np
 """
 Two network architectures are available:
 
-1. TCN (Temporal Convolutional Network):
-   - Uses weight normalization (not batch norm)
+1. AttentionTCN (Hybrid Transformer + TCN):
+   - Multi-head causal self-attention for long-range dependencies
+   - TCN backbone with residual blocks for local temporal features
+   - Weight normalization (not batch norm)
    - Exponentially increasing dilation rates: 2^0, 2^1, 2^2, ...
-   - Residual connections with optional 1x1 convolution
-   - Dropout for regularization
-   - Configurable: num_channels, kernel_size, num_blocks, dropout
+   - Learnable attention blending (gamma parameter)
+   - Configurable: d_model, num_heads, tcn_num_channels, tcn_kernel_size, tcn_num_blocks, tcn_dropout
 
-2. contact_cnn (Original):
+2. contact_cnn (Vanilla CNN):
    - Simple dilated CNN architecture
    - Fixed dilation pattern: 1, 2, 4, 8
    - Uses LeakyReLU activation
@@ -76,33 +77,63 @@ class TCNResidualBlock(nn.Module):
         return out
 
 
-class TCN(nn.Module):
+class AttentionTCN(nn.Module):
     """
-    Temporal Convolutional Network with residual blocks as shown in Figure 2.
-    Uses exponentially increasing dilation rates: 2^0, 2^1, 2^2, ..., 2^(num_blocks-1)
+    Transformer + TCN hybrid architecture with causal attention.
+    Adds multi-head self-attention before TCN backbone to capture long-range dependencies.
+    
+    Architecture:
+    1. Input projection: map raw features to d_model dimension
+    2. Layer normalization + causal multi-head self-attention: capture global temporal context
+    3. Residual fusion with learnable gamma (initialized to 0.0)
+    4. Layer normalization before TCN
+    5. TCN backbone: local temporal feature extraction
+    6. Velocity prediction head
+    
+    Key design choices:
+    - Causal attention mask: prevents looking into the future (critical for real-time inference)
+    - Layer normalization: stabilizes training (standard in transformers)
+    - gamma starts at 0.0: model initially behaves like vanilla TCN, gradually learns to use attention
     """
-    def __init__(self, window_size=10, num_features=12, num_channels=64, kernel_size=3, num_blocks=5, dropout=0.2):
-        super(TCN, self).__init__()
+    def __init__(self, window_size=10, num_features=12, d_model=64, num_heads=4, 
+                 tcn_num_channels=64, tcn_kernel_size=3, tcn_num_blocks=5, tcn_dropout=0.2):
+        super(AttentionTCN, self).__init__()
         self.num_features = num_features
         self.window_size = window_size
         
-        layers = []
-        num_levels = num_blocks
+        # 1. Project raw features into transformer dimension
+        self.input_proj = nn.Linear(num_features, d_model)
         
-        for i in range(num_levels):
+        # 2. Layer normalization (pre-norm style for stable training)
+        self.norm1 = nn.LayerNorm(d_model)  # Before attention
+        self.norm2 = nn.LayerNorm(d_model)  # Before TCN
+        
+        # 3. Multi-head self-attention (with causal masking)
+        self.mha = nn.MultiheadAttention(
+            embed_dim=d_model,
+            num_heads=num_heads,
+            batch_first=True  # Input: [B, T, D]
+        )
+        
+        # 4. Learnable residual weight (starts at 0.0 for stable training)
+        self.gamma = nn.Parameter(torch.tensor(0.0))
+        
+        # 5. TCN backbone (same as original TCN but takes d_model as input)
+        tcn_layers = []
+        for i in range(tcn_num_blocks):
             dilation_rate = 2 ** i
-            in_channels = num_features if i == 0 else num_channels
-            out_channels = num_channels
+            in_channels = d_model if i == 0 else tcn_num_channels
+            out_channels = tcn_num_channels
             
-            layers.append(TCNResidualBlock(
-                in_channels, out_channels, kernel_size, dilation_rate, dropout
+            tcn_layers.append(TCNResidualBlock(
+                in_channels, out_channels, tcn_kernel_size, dilation_rate, tcn_dropout
             ))
         
-        self.tcn_backbone = nn.Sequential(*layers)
+        self.tcn_backbone = nn.Sequential(*tcn_layers)
         
-        # Velocity prediction head (sequence-to-sequence)
+        # 6. Velocity prediction head
         self.velocity_head = nn.Sequential(
-            nn.Conv1d(num_channels, 1, kernel_size=1),
+            nn.Conv1d(tcn_num_channels, 1, kernel_size=1),
             nn.Softplus()
         )
     
@@ -112,16 +143,45 @@ class TCN(nn.Module):
             x: (batch_size, window_size, num_features) - RAW features
         
         Returns:
-            velocity_seq: (batch_size, 1, window_size) - velocity predictions for all timesteps
-            velocity_out: (batch_size, 1) - velocity prediction at last timestep only
+            velocity_seq: (batch_size, 1, window_size) - velocity in m/s for all timesteps
+            velocity_out: (batch_size, 1) - velocity in m/s at last timestep only
         """
-        # Permute to (batch_size, num_features, window_size) for Conv1d
-        x = x.permute(0, 2, 1)  # [B, T, C] → [B, C, T]
+        # x: [B, T, F]
         
-        # Pass through TCN backbone
-        features = self.tcn_backbone(x)  # [B, num_channels, T]
+        # 1. Project to d_model dimension
+        z = self.input_proj(x)  # [B, T, D]
         
-        # Velocity prediction
+        B, T, D = z.shape
+        
+        # 2. Create causal mask (prevents attending to future timesteps)
+        # Upper triangular matrix with diagonal=1 blocks future positions
+        causal_mask = torch.triu(
+            torch.ones(T, T, device=z.device, dtype=torch.bool),
+            diagonal=1
+        )  # [T, T]
+        
+        # 3. Pre-normalization + Multi-head self-attention with causal masking
+        z_normed = self.norm1(z)  # [B, T, D]
+        attn_out, _ = self.mha(
+            z_normed, z_normed, z_normed,
+            attn_mask=causal_mask
+        )  # [B, T, D]
+        
+        # 4. Residual fusion with learnable gamma
+        # gamma=0.0 initially → starts as identity (z = z + 0*attn_out = z)
+        # gamma learns during training to blend in attention as needed
+        z = z + self.gamma * attn_out  # [B, T, D]
+        
+        # 5. Pre-normalization before TCN
+        z = self.norm2(z)  # [B, T, D]
+        
+        # 6. Convert to Conv1d format for TCN
+        z = z.permute(0, 2, 1)  # [B, T, D] → [B, D, T]
+        
+        # 7. TCN backbone
+        features = self.tcn_backbone(z)  # [B, tcn_num_channels, T]
+        
+        # 8. Velocity prediction with Softplus activation
         velocity_seq = self.velocity_head(features)  # [B, 1, T]
         velocity_out = velocity_seq[:, :, -1]  # [B, 1] - last timestep
         

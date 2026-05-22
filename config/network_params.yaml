@@ -21,7 +21,7 @@ print_every: 1000
 window_size: 24 # Number of consecutive samples to stack as input (temporal context)
 shuffle: True
 random_seed: 42  # For reproducible train/val/test splits
-train_ratio: 0.8
+train_ratio: 0.1
 val_ratio: 0.15
 
 # Network params
@@ -66,4 +66,20 @@ temporal_weight_power: 0.0  # Exponent for temporal weighting
                             # 2.0 = quadratic (strong emphasis on recent)
                             # Higher values = more focus on last timestep
 
-Huber_delta: 0.001      # Delta parameter for Huber loss in velocity regression
+Huber_delta: 0.01      # Delta parameter for Huber loss in velocity regression
+
+# Model Architecture Selection
+# Choose which neural network architecture to use
+model_architecture: "attention_tcn"  # Options: "attention_tcn", "vanilla_cnn"
+                                   # - attention_tcn: Transformer + TCN hybrid with multi-head attention
+                                   # - vanilla_cnn: Simple dilated CNN (fastest, fewest parameters)
+
+# AttentionTCN-specific hyperparameters (only used if model_architecture = "attention_tcn")
+attention_d_model: 64       # Transformer embedding dimension (typically 64-256)
+attention_num_heads: 4      # Number of attention heads (must divide d_model evenly)
+
+# TCN hyperparameters (used by "attention_tcn" architecture for the TCN backbone)
+tcn_num_channels: 64        # Number of channels in TCN layers
+tcn_kernel_size: 3          # Kernel size for temporal convolutions
+tcn_num_blocks: 3           # Number of TCN residual blocks (dilation: 1,2,4,8,16,...)
+tcn_dropout: 0.2            # Dropout rate in TCN blocks (0.0-0.5)
