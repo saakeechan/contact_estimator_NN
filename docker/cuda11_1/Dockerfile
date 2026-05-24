@@ -4,9 +4,10 @@ LABEL version="0.6"
 
 USER root
 
-# scipy, tensorboard, pandas, onnx, tqdm, pyyaml, onnxscript
+# scipy, tensorboard, pandas, onnx, tqdm, pyyaml, onnxscript, matplotlib
 RUN pip install --break-system-packages scipy
 RUN pip install --break-system-packages tensorboard
+
 RUN pip install --break-system-packages -U scikit-learn
 RUN pip install --break-system-packages pandas
 RUN pip install --break-system-packages onnx
@@ -25,14 +26,16 @@ RUN apt-get update && apt-get install -y git-all
 RUN apt-get update && apt-get install -y python3-dev
 
 
-# lcm 
-RUN apt-get install -y libglib2.0-dev
-RUN mkdir -p /home/root/tmp/
-RUN cd /home/root/tmp/ \
-    && git clone https://github.com/lcm-proj/lcm.git \
-    && cd lcm \
-    && git checkout v1.5.1
-RUN cd /home/root/tmp/lcm/ \
-    && mkdir build \
-    && cd build \
-    && cmake -DLCM_ENABLE_PYTHON=ON .. && make -j && make install
+# # lcm 
+# RUN apt-get install -y libglib2.0-dev
+# RUN mkdir -p /home/root/tmp/
+# RUN cd /home/root/tmp/ \
+#     && git clone https://github.com/lcm-proj/lcm.git \
+#     && cd lcm \
+#     && git checkout v1.5.1
+# RUN cd /home/root/tmp/lcm/ \
+#     && mkdir build \
+#     && cd build \
+#     && cmake -DLCM_ENABLE_PYTHON=ON .. && make -j && make install
+
+RUN pip install --break-system-packages matplotlib

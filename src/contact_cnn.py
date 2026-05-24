@@ -134,7 +134,7 @@ class AttentionTCN(nn.Module):
         # 6. Velocity prediction head
         self.velocity_head = nn.Sequential(
             nn.Conv1d(tcn_num_channels, 1, kernel_size=1),
-            nn.Softplus()
+            # nn.GELU()
         )
     
     def forward(self, x):
@@ -193,12 +193,13 @@ class CausalConv1d(nn.Module):
     def __init__(self, in_ch, out_ch, kernel_size=3, dilation=1):
         super().__init__()
         self.pad = (kernel_size - 1) * dilation
-        self.conv = nn.utils.weight_norm(nn.Conv1d(
+        conv = nn.Conv1d(
             in_ch, out_ch,
             kernel_size=kernel_size,
             dilation=dilation,
             padding=0
-        ))
+        )
+        self.conv = nn.utils.parametrizations.weight_norm(conv)
 
     def forward(self, x):
         x = F.pad(x, (self.pad, 0))  # pad only left
@@ -223,16 +224,16 @@ class contact_cnn(nn.Module):
                 kernel_size=3,
                 dilation=1
             ),
-            nn.LeakyReLU(0.01),
+            nn.ReLU(),
 
             # Block 2 (causal)
             CausalConv1d(
                 in_ch=128,
                 out_ch=128,
                 kernel_size=3,
-                dilation=2
+                dilation=1
             ),
-            nn.LeakyReLU(0.01),
+            nn.ReLU(),
 
             # nn.Dropout(p=0.05),
 
@@ -241,18 +242,18 @@ class contact_cnn(nn.Module):
                 in_ch=128,
                 out_ch=64,
                 kernel_size=3,
-                dilation=4
+                dilation=2
             ),
-            nn.LeakyReLU(0.01),
+            nn.ReLU(),
 
             # Block 4 (causal)
             CausalConv1d(
                 in_ch=64,
                 out_ch=64,
                 kernel_size=3,
-                dilation=8
+                dilation=2
             ),
-            nn.LeakyReLU(0.01),
+            nn.ReLU(),
 
             # nn.Dropout(p=0.05),
         )
@@ -263,7 +264,6 @@ class contact_cnn(nn.Module):
         # Output: [B, 1, T] - velocity for each timestep (x-axis only)
         self.velocity_head = nn.Sequential(
             nn.Conv1d(64, 1, kernel_size=1),
-            nn.Softplus()
 )
 
     def forward(self, x):
@@ -359,4 +359,3 @@ class ContactCNNWithNormalization(nn.Module):
         
         # Pass normalized data through the base model
         return self.base_model(x_normalized)
-

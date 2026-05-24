@@ -6,11 +6,14 @@ sys.path.append('.')
 import yaml
 from tqdm import tqdm
 import warnings
+from datetime import datetime
+import time
 
 import torch.optim as optim
 
 from contact_cnn import *
 from utils.data_handler import *
+from utils.plot_loss import generate_training_summary
 
 from torch.utils.tensorboard import SummaryWriter
 
@@ -93,11 +96,6 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_criteri
             # num_correct += (contact_prediction == gt_contact).sum().item()
             num_data += input_data.size(0)
             
-            # # Track prediction distribution
-            # num_pred_contact += (contact_prediction == 1).sum().item()
-            # num_pred_no_contact += (contact_prediction == 0).sum().item()
-            # num_gt_contact += (gt_contact == 1).sum().item()
-            # num_gt_no_contact += (gt_contact == 0).sum().item()
 
     metrics = {
         # 'contact_acc': num_correct / num_data,
@@ -158,29 +156,29 @@ def save_onnx_model(model, checkpoint_path, window_size):
 
 
 def train(model, train_dataloader, val_dataloader, config):
+    # Create timestamped run directory
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    run_dir = os.path.join("logs", f"run_{timestamp}")
+    os.makedirs(run_dir, exist_ok=True)
+    
+    # Save config copy to run directory
+    config_copy_path = os.path.join(run_dir, "network_params.yaml")
+    with open(config_copy_path, 'w') as f:
+        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+    print(f"\n{'='*60}")
+    print(f"Training Run Directory: {run_dir}")
+    print(f"Config saved to: {config_copy_path}")
+    print(f"{'='*60}\n")
+    
+    # Set paths to use run directory
+    config['model_save_path'] = os.path.join(run_dir, "model")
+    config['log_writer_path'] = os.path.join(run_dir, "tensorboard")
+    
+    # Track training start time
+    train_start_time = time.time()
 
-    writer = SummaryWriter(config['log_writer_path'],comment=config['model_description'])
-    writer.add_text("data_folder: ",config['data_folder'])
-    writer.add_text("model_save_path: ",config['model_save_path'])
-    writer.add_text("log_writer_path: ",config['log_writer_path'])
-    writer.add_text("window_size: ",str(config['window_size']))
-    writer.add_text("shuffle: ",str(config['shuffle']))
-    writer.add_text("batch_size: ",str(config['batch_size']))
-    writer.add_text("init_lr: ",str(config['init_lr']))
-    writer.add_text("num_epoch: ",str(config['num_epoch']))
-    writer.add_text("velocity_weight: ",str(config.get('velocity_weight', 1.0)))
-    writer.add_text("Huber_delta: ",str(config.get('Huber_delta', 0.5)))
-    writer.add_text("derivative_weight: ",str(config.get('derivative_weight', 0.0)))
-    writer.add_text("temporal_weight_power: ",str(config.get('temporal_weight_power', 0.0)))
-    writer.add_text("model_architecture: ",str(config.get('model_architecture', 'vanilla_cnn')))
-    if config.get('model_architecture', 'vanilla_cnn').lower() == 'attention_tcn':
-        writer.add_text("attention_d_model: ",str(config.get('attention_d_model', 64)))
-        writer.add_text("attention_num_heads: ",str(config.get('attention_num_heads', 4)))
-    writer.add_text("tcn_num_channels: ",str(config.get('tcn_num_channels', 64)))
-    writer.add_text("tcn_kernel_size: ",str(config.get('tcn_kernel_size', 3)))
-    writer.add_text("tcn_num_blocks: ",str(config.get('tcn_num_blocks', 5)))
-    writer.add_text("tcn_dropout: ",str(config.get('tcn_dropout', 0.2)))
-
+    # Initialize TensorBoard writer for scalar metrics (loss, MAE plots)
+    writer = SummaryWriter(config['log_writer_path'])
 
     # Loss functions for velocity regression
     # # Contact: BCEWithLogitsLoss (with optional class weighting)
@@ -193,13 +191,40 @@ def train(model, train_dataloader, val_dataloader, config):
     velocity_weight = float(config.get('velocity_weight', 1.0))  # Weight for velocity loss
     derivative_weight = float(config.get('derivative_weight', 0.0))  # Weight for derivative matching loss
     temporal_weight_power = float(config.get('temporal_weight_power', 0.0))  # Temporal weighting exponent
+    use_dense_supervision = config.get('use_dense_supervision', False)
+    
+    # Print supervision mode
+    print(f"\n{'='*60}")
+    if use_dense_supervision:
+        print(f"DENSE SUPERVISION MODE: Loss on full sequence")
+
+    else:
+        print(f"LAST TIMESTEP ONLY MODE: Loss on final output only")
+
 
     # best_acc = 0
     best_loss = 1000000000
     best_velocity_mae = 1000000000
     
-    # Debug: print temporal weights once to verify weighting scheme
-    printed_temporal_weights = False
+    # Pre-compute temporal weights ONCE (before training loop) to avoid recomputation every batch
+    device = next(model.parameters()).device
+    if use_dense_supervision and temporal_weight_power > 0:
+        T = config['window_size']
+        timesteps = torch.arange(1, T + 1, dtype=torch.float32, device=device)
+        temporal_weights = ((timesteps / T) ** temporal_weight_power).view(1, T, 1)  # [1, T, 1]
+        
+        # Print temporal weights info
+        print(f"\n{'='*60}")
+        print(f"Temporal weighting enabled (power={temporal_weight_power})")
+        print(f"Weights for each timestep (oldest → newest):")
+        weights_1d = temporal_weights.squeeze().cpu().numpy()
+        print(f"  {weights_1d}")
+        print(f"  First timestep weight: {weights_1d[0]:.4f}")
+        print(f"  Last timestep weight: {weights_1d[-1]:.4f}")
+        print(f"  Ratio (last/first): {weights_1d[-1]/weights_1d[0]:.2f}x")
+        print(f"{'='*60}\n")
+    else:
+        temporal_weights = 1.0  # Uniform weighting
     
     for epoch in range(config['num_epoch']):
         running_loss = 0.0  # For periodic printing
@@ -215,101 +240,68 @@ def train(model, train_dataloader, val_dataloader, config):
             contact_label_seq = samples['label_seq']  # Shape: (batch, window_size, 1) - full contact sequence for masking
             velocity_label_seq = samples['velocity']  # Shape: (batch, window_size, 1) - full velocity sequence from dataset
             velocity_label = velocity_label_seq[:, -1, :]  # Extract last timestep: (batch, 1)
-            
-            # # DEBUG: Print ground truth labels once to verify data correctness
-            # if not printed_labels and i == 0:
-            #     print(f"\n{'='*80}")
-            #     print(f"DEBUG: Ground Truth Contact Labels (first 100 samples)")
-            #     print(f"{'='*80}")
-            #     labels_to_print = contact_label.cpu().numpy()
-            #     num_to_print = min(100, len(labels_to_print))
-                
-            #     left_labels = labels_to_print[:num_to_print, 0]
-            #     right_labels = labels_to_print[:num_to_print, 1]
-                
-            #     print(f"\nLeft leg labels (first {num_to_print}):")
-            #     print(left_labels)
-            #     print(f"\nLeft leg stats: Mean={left_labels.mean():.3f}, "
-            #           f"Contact={np.sum(left_labels==1)}, No-contact={np.sum(left_labels==0)}")
-                
-            #     print(f"\nRight leg labels (first {num_to_print}):")
-            #     print(right_labels)
-            #     print(f"\nRight leg stats: Mean={right_labels.mean():.3f}, "
-            #           f"Contact={np.sum(right_labels==1)}, No-contact={np.sum(right_labels==0)}")
-                
-            #     print(f"\nOverall stats for this batch:")
-            #     print(f"  Batch size: {len(labels_to_print)}")
-            #     print(f"  Left leg contact ratio: {labels_to_print[:, 0].mean():.3f}")
-            #     print(f"  Right leg contact ratio: {labels_to_print[:, 1].mean():.3f}")
-            #     print(f"{'='*80}\n")
-                
-            #     printed_labels = True
+        
 
             optimizer.zero_grad()
             
             velocity_seq, velocity_output = model(input_data)  # velocity_seq: (batch, 1, window_size), velocity_output: (batch, 1)
             
-            # Compute velocity loss on FULL SEQUENCE (dense supervision) masked to contact only
-            velocity_seq_permuted = velocity_seq.permute(0, 2, 1)  # [B, T, 1]
-            
-            velocity_loss_elementwise = velocity_criterion(
-                velocity_seq_permuted,
-                velocity_label_seq
-            )  # [B, T, 1]
-            
-            # Use full contact sequence for masking (dense supervision only at contact timesteps)
-            contact_mask_seq = (contact_label_seq == 1).float()  # [B, T, 1]
-            
-            # Apply temporal weighting: higher weights for recent timesteps (end of window)
-            # w_t = ((t+1) / T) ^ power, where t=0 is oldest, t=T-1 is most recent
-            if temporal_weight_power > 0:
-                T = velocity_seq_permuted.size(1)  # window_size
-                # Create temporal weights: shape [1, T, 1] for broadcasting
-                timesteps = torch.arange(1, T + 1, dtype=torch.float32, device=velocity_output.device)  # [1, 2, ..., T]
-                temporal_weights = (timesteps / T) ** temporal_weight_power  # [T]
-                temporal_weights = temporal_weights.view(1, T, 1)  # [1, T, 1] for broadcasting
+            if use_dense_supervision:
+                # DENSE SUPERVISION: Compute velocity loss on FULL SEQUENCE masked to contact only
+                velocity_seq_permuted = velocity_seq.permute(0, 2, 1)  # [B, T, 1]
                 
-                # Debug: print temporal weights once
-                if not printed_temporal_weights:
-                    print(f"\n{'='*60}")
-                    print(f"Temporal weighting enabled (power={temporal_weight_power})")
-                    print(f"Weights for each timestep (oldest → newest):")
-                    weights_1d = temporal_weights.squeeze().cpu().numpy()
-                    print(f"  {weights_1d}")
-                    print(f"  First timestep weight: {weights_1d[0]:.4f}")
-                    print(f"  Last timestep weight: {weights_1d[-1]:.4f}")
-                    print(f"  Ratio (last/first): {weights_1d[-1]/weights_1d[0]:.2f}x")
-                    print(f"{'='*60}\n")
-                    printed_temporal_weights = True
+                velocity_loss_elementwise = velocity_criterion(
+                    velocity_seq_permuted,
+                    velocity_label_seq
+                )  # [B, T, 1]
+                
+                # Use full contact sequence for masking (dense supervision only at contact timesteps)
+                contact_mask_seq = (contact_label_seq == 1).float()  # [B, T, 1]
+                
+                # Apply temporal weighting (pre-computed before training loop)
+                velocity_loss = (
+                    velocity_loss_elementwise * contact_mask_seq * temporal_weights
+                ).sum() / ((contact_mask_seq * temporal_weights).sum() + 1e-8)
+                
+                # Derivative matching loss: match temporal dynamics (slopes/changes)
+                # Only available in dense mode (requires full sequence)
+                derivative_loss = torch.tensor(0.0, device=velocity_output.device)
+                if derivative_weight > 0:
+                    # Compute derivatives: Δy_t = y_t - y_{t-1}
+                    pred_derivative = velocity_seq_permuted[:, 1:, :] - velocity_seq_permuted[:, :-1, :]  # [B, T-1, 1]
+                    gt_derivative = velocity_label_seq[:, 1:, :] - velocity_label_seq[:, :-1, :]  # [B, T-1, 1]
+                    
+                    # Compute derivative loss using Huber loss (robust to outliers)
+                    derivative_loss_elementwise = F.smooth_l1_loss(
+                        pred_derivative,
+                        gt_derivative,
+                        reduction='none',
+                        beta=0.05
+                    )  # [B, T-1, 1]
+                    
+                    # Mask to contact timesteps - both t and t+1 must be in contact
+                    # (derivative spans from timestep t to t+1)
+                    contact_mask_derivative = contact_mask_seq[:, 1:, :] * contact_mask_seq[:, :-1, :]  # [B, T-1, 1]
+                    
+                    derivative_loss = (
+                        derivative_loss_elementwise * contact_mask_derivative
+                    ).sum() / (contact_mask_derivative.sum() + 1e-8)
             else:
-                temporal_weights = 1.0  # Uniform weighting
-            
-            velocity_loss = (
-                velocity_loss_elementwise * contact_mask_seq * temporal_weights
-            ).sum() / ((contact_mask_seq * temporal_weights).sum() + 1e-8)
-            
-            # Derivative matching loss: match temporal dynamics (slopes/changes)
-            derivative_loss = torch.tensor(0.0, device=velocity_output.device)
-            if derivative_weight > 0:
-                # Compute derivatives: Δy_t = y_t - y_{t-1}
-                pred_derivative = velocity_seq_permuted[:, 1:, :] - velocity_seq_permuted[:, :-1, :]  # [B, T-1, 1]
-                gt_derivative = velocity_label_seq[:, 1:, :] - velocity_label_seq[:, :-1, :]  # [B, T-1, 1]
+                # LAST TIMESTEP ONLY: Compute velocity loss only on final output (simpler, faster)
+                velocity_loss_elementwise = velocity_criterion(
+                    velocity_output,
+                    velocity_label
+                )  # [B, 1]
                 
-                # Compute derivative loss using Huber loss (robust to outliers)
-                derivative_loss_elementwise = F.smooth_l1_loss(
-                    pred_derivative,
-                    gt_derivative,
-                    reduction='none',
-                    beta=0.05
-                )  # [B, T-1, 1]
+                # Mask to contact samples only (last timestep)
+                contact_mask = (contact_label == 1).float()  # [B, 1]
                 
-                # Mask to contact timesteps - both t and t+1 must be in contact
-                # (derivative spans from timestep t to t+1)
-                contact_mask_derivative = contact_mask_seq[:, 1:, :] * contact_mask_seq[:, :-1, :]  # [B, T-1, 1]
+                velocity_loss = (
+                    velocity_loss_elementwise * contact_mask
+                ).sum() / (contact_mask.sum() + 1e-8)
                 
-                derivative_loss = (
-                    derivative_loss_elementwise * contact_mask_derivative
-                ).sum() / (contact_mask_derivative.sum() + 1e-8)
+                # No derivative loss in last-timestep-only mode
+                derivative_loss = torch.tensor(0.0, device=velocity_output.device)
             
             loss = velocity_weight * velocity_loss + derivative_weight * derivative_loss
             
@@ -339,15 +331,19 @@ def train(model, train_dataloader, val_dataloader, config):
             loss_sum += loss.item()
             # contact_loss_sum += contact_loss.item()
             velocity_loss_sum += velocity_loss.item()
-            if derivative_weight > 0:
+            if derivative_weight > 0 and use_dense_supervision:
                 derivative_loss_sum += derivative_loss.item()
 
             if i % config['print_every'] == 0:
-                derivative_str = f", derivative: {derivative_loss.item():.6f}" if derivative_weight > 0 else ""
-                print("epoch %d / %d, iteration %d / %d, loss: %.8f (velocity masked: %.6f%s, contact timesteps: %d)" %\
+                derivative_str = f", derivative: {derivative_loss.item():.6f}" if (derivative_weight > 0 and use_dense_supervision) else ""
+                if use_dense_supervision:
+                    contact_count = int(contact_mask_seq.sum().item())
+                else:
+                    contact_count = int(contact_mask.sum().item())
+                print("epoch %d / %d, iteration %d / %d, loss: %.8f (velocity masked: %.6f%s, contact samples: %d)" %\
                     (epoch, config['num_epoch'], i, len(train_dataloader), 
                      running_loss/config['print_every'],
-                     velocity_loss.item(), derivative_str, int(contact_mask_seq.sum().item())))
+                     velocity_loss.item(), derivative_str, contact_count))
                 running_loss = 0.0
 
         # calculate training and validation metrics
@@ -358,13 +354,13 @@ def train(model, train_dataloader, val_dataloader, config):
         train_loss_avg = loss_sum / len(train_dataloader)
         # contact_loss_avg = contact_loss_sum / len(train_dataloader)
         velocity_loss_avg = velocity_loss_sum / len(train_dataloader)
-        derivative_loss_avg = derivative_loss_sum / len(train_dataloader) if derivative_weight > 0 else 0.0
+        derivative_loss_avg = derivative_loss_sum / len(train_dataloader) if (derivative_weight > 0 and use_dense_supervision) else 0.0
 
         # log down info in tensorboard
         writer.add_scalar('training/total_loss', train_loss_avg, epoch)
         # writer.add_scalar('training/contact_loss', contact_loss_avg, epoch)
         writer.add_scalar('training/velocity_loss', velocity_loss_avg, epoch)
-        if derivative_weight > 0:
+        if derivative_weight > 0 and use_dense_supervision:
             writer.add_scalar('training/derivative_loss', derivative_loss_avg, epoch)
         # writer.add_scalar('training/contact_accuracy', train_metrics['contact_acc'], epoch)
         writer.add_scalar('training/velocity_mae', train_metrics['velocity_mae'], epoch)
@@ -428,7 +424,7 @@ def train(model, train_dataloader, val_dataloader, config):
             save_onnx_model(model, checkpoint_path, config['window_size'])
             
 
-        print("Finished epoch %d / %d" % (epoch, config['num_epoch']))
+        print("Finished epoch %d / %d" % (epoch + 1, config['num_epoch']))
         print("  Train - Velocity MAE: %.4f" % train_metrics['velocity_mae']) 
         print("  Val   - Velocity MAE: %.4f" % val_metrics['velocity_mae'])
     
@@ -441,12 +437,47 @@ def train(model, train_dataloader, val_dataloader, config):
             'val_loss': val_total_loss,
             'val_velocity_mae': val_metrics['velocity_mae']}
 
-    checkpoint_path = config['model_save_path']+'_final_epo.pt'
+    checkpoint_path = config['model_save_path']+'_final_epoch.pt'
     torch.save(state, checkpoint_path)
     # Also save ONNX version for faster C++ deployment
     save_onnx_model(model, checkpoint_path, config['window_size'])
 
     writer.close()
+    
+    # Calculate total training time
+    train_end_time = time.time()
+    total_train_time = train_end_time - train_start_time
+    hours = int(total_train_time // 3600)
+    minutes = int((total_train_time % 3600) // 60)
+    seconds = int(total_train_time % 60)
+    
+    print(f"\n{'='*60}")
+    print(f"Training completed!")
+    print(f"Total training time: {hours:02d}:{minutes:02d}:{seconds:02d}")
+    print(f"{'='*60}\n")
+    
+    # Generate comprehensive training summary with plots
+    generate_training_summary(
+        run_dir=run_dir,
+        config=config,
+        train_metrics={
+            "train_loss": float(train_loss_avg),
+            "train_velocity_mae": float(train_metrics['velocity_mae']),
+            "val_loss": float(val_total_loss),
+            "val_velocity_mae": float(val_metrics['velocity_mae']),
+        },
+        val_metrics=val_metrics,
+        best_metrics={
+            "best_val_loss": float(best_loss),
+            "best_val_velocity_mae": float(best_velocity_mae),
+        },
+        train_time_seconds=total_train_time,
+        checkpoint_paths={
+            "best_val_loss": checkpoint_path.replace('_final_epo.pt', '_best_val_loss.pt'),
+            "best_val_velocity": checkpoint_path.replace('_final_epo.pt', '_best_val_velocity.pt'),
+            "final_epoch": checkpoint_path,
+        }
+    )
 
 def main():
    
@@ -460,11 +491,7 @@ def main():
 
     config = yaml.load(open(args.config_name), Loader=yaml.FullLoader)
 
-    print("Using the following params: ")
-    print("-------------path-------------")
-    print("data_folder: ",config['data_folder'])
-    print("model_save_path: ",config['model_save_path'])
-    print("log_writer_path: ",config['log_writer_path'])
+
     # Load num_features from data metadata (source of truth)
     metadata_path = config['data_folder'] + "all_data_metadata.npy"
     if os.path.exists(metadata_path):
@@ -474,28 +501,7 @@ def main():
     else:
         num_features = config.get('num_features', 25)
         print(f"⚠️  Warning: metadata file not found, using config num_features={num_features}")
-    
-    print("--------network params--------")
-    print("num_features: ", num_features)
-    print("model_architecture: ",config.get('model_architecture', 'vanilla_cnn'))
-    print("window_size: ",config['window_size'])
-    print("shuffle: ",config['shuffle'])
-    print("batch_size: ",config['batch_size'])
-    print("init_lr: ",config['init_lr'])
-    print("num_epoch: ",config['num_epoch'])
-    print("l1_lambda: ",config.get('l1_lambda', 0.0))
-    print("l2_lambda: ",config.get('l2_lambda', 0.0))
-    print("velocity_weight: ",config.get('velocity_weight', 1.0))
-    print("derivative_weight: ",config.get('derivative_weight', 0.0))
-    print("temporal_weight_power: ",config.get('temporal_weight_power', 0.0))
-    print("Huber_delta: ",config.get('Huber_delta', 0.5))
-    print("tcn_num_channels: ",config.get('tcn_num_channels', 64))
-    print("tcn_kernel_size: ",config.get('tcn_kernel_size', 3))
-    print("tcn_num_blocks: ",config.get('tcn_num_blocks', 5))
-    print("tcn_dropout: ",config.get('tcn_dropout', 0.2))
-    if config.get('model_architecture', 'vanilla_cnn').lower() == 'attention_tcn':
-        print("attention_d_model: ",config.get('attention_d_model', 64))
-        print("attention_num_heads: ",config.get('attention_num_heads', 4))
+
 
     
     # Load ALL data (not pre-split) - windowing happens first, then splitting
@@ -507,17 +513,6 @@ def main():
     # Get all unique run IDs
     all_run_ids = np.unique(all_dataset.window_to_run_id)
     num_runs = len(all_run_ids)
-    
-    # DEBUG: Print run distribution to verify proper splitting
-    print(f"\n{'='*60}")
-    print(f"DEBUG: Run-based splitting verification")
-    print(f"{'='*60}")
-    for run_id in all_run_ids[:min(5, len(all_run_ids))]:  # Show first 5 runs
-        num_windows_in_run = sum(1 for r in all_dataset.window_to_run_id if r == run_id)
-        print(f"  Run {run_id}: {num_windows_in_run} windows")
-    if len(all_run_ids) > 5:
-        print(f"  ... and {len(all_run_ids) - 5} more runs")
-    print(f"{'='*60}\n")
     
     # Validate sufficient runs for splitting
     if num_runs < 3:
@@ -552,37 +547,6 @@ def main():
     val_indices = all_dataset.get_windows_by_run_ids(val_run_ids)
     test_indices = all_dataset.get_windows_by_run_ids(test_run_ids)
     
-    # # Validate non-empty splits
-    # if len(train_indices) == 0 or len(val_indices) == 0:
-    #     raise ValueError(f"Empty train or val set after run-based split. Train: {len(train_indices)}, Val: {len(val_indices)}")
-    
-    # print(f"\nDataset split BY RUNS (prevents data leakage):")
-    # print(f"  Total runs: {num_runs}")
-    # print(f"  Train runs: {len(train_run_ids)} -> {len(train_indices)} windows")
-    # print(f"  Val runs: {len(val_run_ids)} -> {len(val_indices)} windows")
-    # print(f"  Test runs: {len(test_run_ids)} -> {len(test_indices)} windows")
-    # print(f"  Total windows: {len(all_dataset)}")
-    
-    # # DEBUG: Verify no overlap between splits
-    # print(f"\nDEBUG: Verifying split integrity...")
-    # train_val_overlap = train_run_ids.intersection(val_run_ids)
-    # train_test_overlap = train_run_ids.intersection(test_run_ids)
-    # val_test_overlap = val_run_ids.intersection(test_run_ids)
-    
-    # if len(train_val_overlap) > 0 or len(train_test_overlap) > 0 or len(val_test_overlap) > 0:
-    #     print(f"  ❌ ERROR: Run overlap detected!")
-    #     print(f"     Train-Val overlap: {train_val_overlap}")
-    #     print(f"     Train-Test overlap: {train_test_overlap}")
-    #     print(f"     Val-Test overlap: {val_test_overlap}")
-    #     raise ValueError("Data leakage detected: runs overlap between splits!")
-    # else:
-    #     print(f"  ✓ No run overlap - splits are clean")
-    
-    # # DEBUG: Show which runs went to which split (first few)
-    # print(f"  Train run IDs (first 5): {sorted(list(train_run_ids))[:5]}")
-    # print(f"  Val run IDs (first 5): {sorted(list(val_run_ids))[:5]}")
-    # print(f"  Test run IDs (first 5): {sorted(list(test_run_ids))[:5]}")
-    
     # Create Subset datasets for deterministic sampling
     from torch.utils.data import Subset
     train_dataset = Subset(all_dataset, train_indices)
@@ -599,18 +563,14 @@ def main():
     
     # Stack all training windows and flatten to get all training samples
     # Shape: (num_train_windows * window_size, num_features)
-    train_data_engineered = torch.cat(train_windows_data, dim=0)
-    
-    # num_features already loaded from metadata above
-    # Feature layout (LEFT LEG ONLY): auto-detected from data in csv2numpy.py
-    # All features are RAW from csv2numpy.py - no pre-normalization
+    train_data_flat = torch.cat(train_windows_data, dim=0)
     
     # Compute 1st and 99th percentiles for each feature to clip outliers
-    percentile_1 = torch.quantile(train_data_engineered, 0.01, dim=0, keepdim=True)  # (1, num_features)
-    percentile_99 = torch.quantile(train_data_engineered, 0.99, dim=0, keepdim=True)  # (1, num_features)
+    percentile_1 = torch.quantile(train_data_flat, 0.01, dim=0, keepdim=True)  # (1, num_features)
+    percentile_99 = torch.quantile(train_data_flat, 0.99, dim=0, keepdim=True)  # (1, num_features)
     
     # Clip training data to percentile bounds
-    train_data_clipped = torch.clamp(train_data_engineered, min=percentile_1, max=percentile_99)
+    train_data_clipped = torch.clamp(train_data_flat, min=percentile_1, max=percentile_99)
     
     # Compute mean and std per feature from clipped data - LEFT LEG ONLY
     # Layout: q(6) + qd(6) + p(3) + v(3) + tau_est(6) + tau_mse(1)
@@ -619,16 +579,7 @@ def main():
     
     # Handle features with zero std (constant values) to avoid division by zero
     global_std = torch.where(global_std == 0, torch.ones_like(global_std), global_std)
-    
-    print(f"\nGlobal normalization statistics computed from clipped training data:")
-    print(f"  Total features: {num_features} (q + qd + p + v + tau_est + tau_mse) - LEFT LEG ONLY")
-    print(f"  All features are RAW (not pre-normalized in csv2numpy.py)")
-    print(f"  Clipped to [1st, 99th] percentiles per feature")
-    print(f"  Mean shape: {global_mean.shape}")
-    print(f"  Std shape: {global_std.shape}")
-    print(f"  Mean range: [{global_mean.min().item():.4f}, {global_mean.max().item():.4f}]")
-    print(f"  Std range: [{global_std.min().item():.4f}, {global_std.max().item():.4f}]")
-    print(f"  Device: {global_mean.device}")
+
     
     # Create dataloaders
     # Train: shuffle each epoch for better training (but with reproducible seed from config)
@@ -644,9 +595,7 @@ def main():
     model_arch = config.get('model_architecture', 'vanilla_cnn').lower()
     
     if model_arch == 'attention_tcn':
-        print(f"\n{'='*60}")
-        print(f"Using AttentionTCN architecture (Transformer + TCN hybrid)")
-        print(f"{'='*60}")
+
         from contact_cnn import AttentionTCN
         base_model = AttentionTCN(
             window_size=config['window_size'],
@@ -658,16 +607,8 @@ def main():
             tcn_num_blocks=config.get('tcn_num_blocks', 5),
             tcn_dropout=config.get('tcn_dropout', 0.2)
         )
-        print(f"  Attention d_model: {config.get('attention_d_model', 64)}")
-        print(f"  Attention num_heads: {config.get('attention_num_heads', 4)}")
-        print(f"  TCN num_channels: {config.get('tcn_num_channels', 64)}")
-        print(f"  TCN num_blocks: {config.get('tcn_num_blocks', 5)}")
-        print(f"  Gamma initialization: 0.0 (learns to blend attention during training)")
-        print(f"{'='*60}\n")
+
     elif model_arch == 'vanilla_cnn':
-        print(f"\n{'='*60}")
-        print(f"Using Vanilla CNN architecture (simple dilated convolutions)")
-        print(f"{'='*60}\n")
         base_model = contact_cnn(
             window_size=config['window_size'],
             num_features=num_features
@@ -682,6 +623,5 @@ def main():
     train(model, train_dataloader, val_dataloader, config)
 
    
-
 if __name__ == '__main__':
     main()

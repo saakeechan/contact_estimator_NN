@@ -6,14 +6,6 @@ csv_mode: "train"  # "train": process all CSVs and create train/val/test splits
 # Path to the data folder. Data should be separated into train.npy, train_label.npy, val.npy, val_label.npy.
 data_folder: "/home/saakee/Research/deep-contact-estimator/Data/NumpyFiles/"
 
-# Path to save the trained model. 
-# Please leave the filename extension out.
-# It will automatically generate ${name}_best_loss.pt, ${name}_best_acc.pt, ${name}_final_epoch.pt.
-model_save_path: "/home/saakee/Research/deep-contact-estimator/results/bipedal_contact"
-log_writer_path: "/home/saakee/Research/deep-contact-estimator/logs/bipedal_contact"
-
-model_description: "Bipedal 2-leg contact, 57 features, 4 output classes, 2block CNN, batch:60, ws:16, lr:1e-4"
-
 print_every: 1000
 
 # Data params
@@ -21,21 +13,18 @@ print_every: 1000
 window_size: 24 # Number of consecutive samples to stack as input (temporal context)
 shuffle: True
 random_seed: 42  # For reproducible train/val/test splits
-train_ratio: 0.1
-val_ratio: 0.15
+train_ratio: 0.8
+val_ratio: 0.17
 
 # Network params
 batch_size: 60  # Used for both training and testing
 init_lr: 0.0001
-num_epoch: 3  # Reduced for quick training with small dataset
+num_epoch: 3 # Reduced for quick training with small dataset
 
 # Test-specific params
 model_load_path: "/home/saakee/Research/deep-contact-estimator/results/bipedal_contact_best_val_velocity.pt"
-save_to_mat: False
-mat_save_path: "/home/saakee/Research/deep-contact-estimator/results/bipedal_test_results.mat"
 
 # Elastic Net Regularization (L1 + L2)
-# Loss = BCE_loss + l1_lambda * ||w||_1 + l2_lambda * ||w||_2^2
 l1_lambda: 0    # L1 (Lasso): encourages sparsity (many weights → 0)
 l2_lambda: 0     # L2 (Ridge): encourages small weights, prevents large values
 # Typical values: 1e-5 to 1e-3 for each
@@ -49,15 +38,27 @@ velocity_weight: 1.0    # Weight for velocity regression loss
                         # Lower values = prioritize contact accuracy
                         # Set based on which task is more important
 
+
+# -------------------------------------
+                            # Dense Supervision: Compute loss on all timesteps vs last timestep only
+use_dense_supervision: True  # True: compute loss on full velocity sequence (all timesteps)
+                             # False: compute loss only on last timestep output
+                             # Dense supervision helps learn temporal patterns
+                             # Last-only is faster and simpler but may underfit
+
 # Derivative Matching Loss: Enforces smooth temporal dynamics
 # Matches the slope/change of velocity predictions to ground truth
 # Total Loss = velocity_loss + derivative_weight * derivative_loss
+# NOTE: Only available when use_dense_supervision=True (requires full sequence)
 derivative_weight: 0.00  # Weight for derivative matching loss
                         # Typical: 0.1-1.0. Start with 0.5
                         # Higher values = prioritize smooth transitions
                         # Forces rises/drops to occur at correct timesteps
 
+
+
 # Temporal Weighting: Emphasize recent timesteps over past
+# ONLY applies when use_dense_supervision=True (requires multiple timesteps)
 # Loss at timestep t is weighted by: w_t = ((t+1) / T) ^ temporal_weight_power
 # where t=0 is oldest, t=T-1 is most recent (last timestep)
 temporal_weight_power: 0.0  # Exponent for temporal weighting
@@ -65,12 +66,15 @@ temporal_weight_power: 0.0  # Exponent for temporal weighting
                             # 1.0 = linear (w_t proportional to recency)
                             # 2.0 = quadratic (strong emphasis on recent)
                             # Higher values = more focus on last timestep
+                            # Ignored if use_dense_supervision=False
+# -------------------------------------
 
-Huber_delta: 0.01      # Delta parameter for Huber loss in velocity regression
+
+Huber_delta: 0.005      # Delta parameter for Huber loss in velocity regression
 
 # Model Architecture Selection
 # Choose which neural network architecture to use
-model_architecture: "attention_tcn"  # Options: "attention_tcn", "vanilla_cnn"
+model_architecture: "vanilla_cnn"  # Options: "attention_tcn", "vanilla_cnn"
                                    # - attention_tcn: Transformer + TCN hybrid with multi-head attention
                                    # - vanilla_cnn: Simple dilated CNN (fastest, fewest parameters)
 

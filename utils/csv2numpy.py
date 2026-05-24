@@ -41,6 +41,15 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
     - all_foot_velocities.npy: foot velocity magnitudes for LEFT leg only (shape: N x 1)
     """
     
+    # Ensure save directory exists
+    os.makedirs(save_pth, exist_ok=True)
+    
+    # Ensure paths have trailing slashes for proper concatenation
+    if not save_pth.endswith('/'):
+        save_pth += '/'
+    if not data_pth.endswith('/'):
+        data_pth += '/'
+    
     # num_features will be determined automatically from the actual data shape
     all_data = None  # Will be initialized after first sample
     all_labels = np.zeros((0, 1))  # LEFT leg only
@@ -128,7 +137,7 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
             tau_mse = np.sum(tau_est ** 2, axis=1, keepdims=True)  # All 6 left leg joints, shape: (num_samples, 1)
 
             # Concatenate features - num_features is auto-detected from shape
-            cur_data = np.abs(np.concatenate([q, qd, p, v, tau_est, tau_mse], axis=1))  # Shape: (num_samples, num_features)
+            cur_data = (np.concatenate([q, qd, p, v, tau_est, tau_mse], axis=1))  # Shape: (num_samples, num_features)
             
             # Initialize all_data and capture num_features from actual data shape
             if num_features is None:
