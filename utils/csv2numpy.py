@@ -137,7 +137,7 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
             tau_mse = np.sum(tau_est ** 2, axis=1, keepdims=True)  # All 6 left leg joints, shape: (num_samples, 1)
 
             # Concatenate features - num_features is auto-detected from shape
-            cur_data = (np.concatenate([q, qd, p, v, tau_est, tau_mse], axis=1))  # Shape: (num_samples, num_features)
+            cur_data = (np.concatenate([tau_est, tau_mse], axis=1))  # Shape: (num_samples, num_features)
             
             # Initialize all_data and capture num_features from actual data shape
             if num_features is None:
@@ -156,8 +156,8 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
             
             # Calculate foot velocity in world frame by numerical differentiation for BOTH legs
             # Left foot velocity
-            lfoot_position_world = ['lfoot_pos_x', 'lfoot_pos_y', 'lfoot_pos_z']
-            # lfoot_position_world = ['lfoot_pos_x']
+            # lfoot_position_world = ['lfoot_pos_x', 'lfoot_pos_y', 'lfoot_pos_z']
+            lfoot_position_world = ['lfoot_pos_x', 'lfoot_pos_y']
             lfoot_velocity_world = np.diff(df_run[lfoot_position_world].values, axis=0) / np.diff(df_run['timestamp'].values.reshape(-1, 1), axis=0)
             lfoot_velocity_world = np.vstack((lfoot_velocity_world, lfoot_velocity_world[-1, :]))  # Keep size consistent
             lfoot_velocity_norm = np.linalg.norm(lfoot_velocity_world, axis=1, keepdims=True) + 1e-8
@@ -230,8 +230,6 @@ def main():
     parser = argparse.ArgumentParser(description='Convert CSV to numpy.')
     parser.add_argument('--config_name', type=str, 
                         default=os.path.dirname(os.path.abspath(__file__)) + '/../config/network_params.yaml')
-    parser.add_argument('--mode', type=str, default=None, 
-                        help='Mode: train (split data) or inference (single sequence) - overrides config')
     parser.add_argument('--csv_folder', type=str, default=None,
                         help='Path to CSV folder (overrides config file)')
     parser.add_argument('--save_path', type=str, default=None,
@@ -249,33 +247,22 @@ def main():
     if args.save_path:
         config['save_path'] = args.save_path
         config['data_folder'] = args.save_path  # Also set data_folder for consistency
-    if args.mode:
-        config['csv_mode'] = args.mode
     
     # Set defaults if not in config
     config.setdefault('csv_folder', '../Data/CSVFiles/')
     config.setdefault('data_folder', '../Data/NumpyFiles/')
     config.setdefault('save_path', config['data_folder'])  # Use data_folder if save_path not set
-    config.setdefault('csv_mode', 'train')
     config.setdefault('train_ratio', 0.7)
     config.setdefault('val_ratio', 0.15)
     
     print("Using configuration:")
-    print(f"  Mode: {config['csv_mode']}")
     print(f"  CSV folder: {config['csv_folder']}")
     print(f"  Save path: {config['save_path']}")
+    print(f"  Train ratio: {config['train_ratio']}")
+    print(f"  Val ratio: {config['val_ratio']}")
     
-    if config['csv_mode'] == 'train':
-        print(f"  Train ratio: {config['train_ratio']}")
-        print(f"  Val ratio: {config['val_ratio']}")
-        csv2numpy_split(config['csv_folder'], config['save_path'], 
-                        config['train_ratio'], config['val_ratio'])
-    elif config['csv_mode'] == 'inference':
-        error = "Inference mode is not implemented in this script. Please implement inference logic if needed."
-        print(f"Error: {error}")
-        raise NotImplementedError(error)
-    else:
-        print(f"Error: Unknown mode '{config['csv_mode']}'. Use 'train' or 'inference'.")
+    csv2numpy_split(config['csv_folder'], config['save_path'], 
+                    config['train_ratio'], config['val_ratio'])
 
 
 if __name__ == '__main__':

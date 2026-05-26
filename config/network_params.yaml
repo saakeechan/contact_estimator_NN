@@ -1,8 +1,5 @@
 # CSV data processing params
 csv_folder: "/home/saakee/Research/deep-contact-estimator/Data/CSVFiles/"
-csv_mode: "train"  # "train": process all CSVs and create train/val/test splits
-                   # "inference": process single CSV without splitting
-
 # Path to the data folder. Data should be separated into train.npy, train_label.npy, val.npy, val_label.npy.
 data_folder: "/home/saakee/Research/deep-contact-estimator/Data/NumpyFiles/"
 
@@ -41,7 +38,7 @@ velocity_weight: 1.0    # Weight for velocity regression loss
 
 # -------------------------------------
                             # Dense Supervision: Compute loss on all timesteps vs last timestep only
-use_dense_supervision: True  # True: compute loss on full velocity sequence (all timesteps)
+use_dense_supervision: False # True: compute loss on full velocity sequence (all timesteps)
                              # False: compute loss only on last timestep output
                              # Dense supervision helps learn temporal patterns
                              # Last-only is faster and simpler but may underfit
@@ -74,15 +71,16 @@ Huber_delta: 0.005      # Delta parameter for Huber loss in velocity regression
 
 # Model Architecture Selection
 # Choose which neural network architecture to use
-model_architecture: "vanilla_cnn"  # Options: "attention_tcn", "vanilla_cnn"
-                                   # - attention_tcn: Transformer + TCN hybrid with multi-head attention
+model_architecture: "tcn"  # Options: "attention_tcn", "tcn", "vanilla_cnn"
+                                   # - attention_tcn: Transformer + TCN hybrid with multi-head attention (most expressive, slowest)
+                                   # - tcn: Pure Temporal Convolutional Network with residual blocks (good balance)
                                    # - vanilla_cnn: Simple dilated CNN (fastest, fewest parameters)
 
 # AttentionTCN-specific hyperparameters (only used if model_architecture = "attention_tcn")
 attention_d_model: 64       # Transformer embedding dimension (typically 64-256)
 attention_num_heads: 4      # Number of attention heads (must divide d_model evenly)
 
-# TCN hyperparameters (used by "attention_tcn" architecture for the TCN backbone)
+# TCN hyperparameters (used by "attention_tcn" and "tcn" architectures)
 tcn_num_channels: 64        # Number of channels in TCN layers
 tcn_kernel_size: 3          # Kernel size for temporal convolutions
 tcn_num_blocks: 3           # Number of TCN residual blocks (dilation: 1,2,4,8,16,...)

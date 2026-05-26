@@ -608,13 +608,24 @@ def main():
             tcn_dropout=config.get('tcn_dropout', 0.2)
         )
 
+    elif model_arch == 'tcn':
+        from contact_cnn import TCN
+        base_model = TCN(
+            window_size=config['window_size'],
+            num_features=num_features,
+            tcn_num_channels=config.get('tcn_num_channels', 64),
+            tcn_kernel_size=config.get('tcn_kernel_size', 3),
+            tcn_num_blocks=config.get('tcn_num_blocks', 5),
+            tcn_dropout=config.get('tcn_dropout', 0.2)
+        )
+
     elif model_arch == 'vanilla_cnn':
         base_model = contact_cnn(
             window_size=config['window_size'],
             num_features=num_features
         )
     else:
-        raise ValueError(f"Unknown model_architecture: {model_arch}. Options: 'attention_tcn', 'vanilla_cnn'")
+        raise ValueError(f"Unknown model_architecture: {model_arch}. Options: 'attention_tcn', 'tcn', 'vanilla_cnn'")
     
     from contact_cnn import ContactCNNWithNormalization
     model = ContactCNNWithNormalization(base_model, global_mean=global_mean, global_std=global_std)

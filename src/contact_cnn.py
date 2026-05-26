@@ -6,7 +6,7 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 
 """
-Two network architectures are available:
+Three network architectures are available:
 
 1. AttentionTCN (Hybrid Transformer + TCN):
    - Multi-head causal self-attention for long-range dependencies
@@ -14,16 +14,25 @@ Two network architectures are available:
    - Weight normalization (not batch norm)
    - Exponentially increasing dilation rates: 2^0, 2^1, 2^2, ...
    - Learnable attention blending (gamma parameter)
+   - Most expressive but slowest
    - Configurable: d_model, num_heads, tcn_num_channels, tcn_kernel_size, tcn_num_blocks, tcn_dropout
 
-2. contact_cnn (Vanilla CNN):
-   - Simple dilated CNN architecture
-   - Fixed dilation pattern: 1, 2, 4, 8
-   - Uses LeakyReLU activation
-   - No residual connections
-   - Fewer parameters, faster training
+2. TCN (Pure Temporal Convolutional Network):
+   - Residual blocks with exponentially increasing dilation
+   - Weight normalization (not batch norm)
+   - Exponentially increasing dilation rates: 2^0, 2^1, 2^2, ...
+   - Good balance between expressiveness and speed
+   - Configurable: tcn_num_channels, tcn_kernel_size, tcn_num_blocks, tcn_dropout
 
-Both architectures:
+3. contact_cnn (Vanilla CNN):
+   - Inception-style multi-scale architecture
+   - Parallel branches with kernel sizes 3, 5, 7 (captures patterns at different temporal scales)
+   - Concatenates multi-scale features
+   - Uses GELU activation
+   - No residual connections
+   - Fastest, fewest parameters
+
+All architectures:
 - Support causal convolutions (no future information leakage)
 - Output velocity predictions for all timesteps (dense supervision)
 - Extract last timestep for inference
@@ -188,6 +197,75 @@ class AttentionTCN(nn.Module):
         return velocity_seq, velocity_out
 
 
+class TCN(nn.Module):
+    """
+    Pure Temporal Convolutional Network (TCN) without attention.
+    Uses residual blocks with exponentially increasing dilation rates.
+    
+    Architecture:
+    1. Input projection: map raw features to tcn_num_channels dimension
+    2. TCN backbone: stacked residual blocks with increasing dilation
+    3. Velocity prediction head
+    
+    Key design choices:
+    - Exponentially increasing dilation: 2^0, 2^1, 2^2, ... (receptive field grows exponentially)
+    - Residual connections: enable training of deep networks
+    - Weight normalization: stabilizes training without batch statistics
+    - Causal convolutions: no future information leakage
+    """
+    def __init__(self, window_size=10, num_features=12, tcn_num_channels=64, 
+                 tcn_kernel_size=3, tcn_num_blocks=5, tcn_dropout=0.2):
+        super(TCN, self).__init__()
+        self.num_features = num_features
+        self.window_size = window_size
+        
+        # 1. Project raw features into TCN channel dimension
+        self.input_proj = nn.Conv1d(num_features, tcn_num_channels, kernel_size=1)
+        
+        # 2. TCN backbone with residual blocks
+        tcn_layers = []
+        for i in range(tcn_num_blocks):
+            dilation_rate = 2 ** i  # Exponential dilation: 1, 2, 4, 8, 16, ...
+            
+            tcn_layers.append(TCNResidualBlock(
+                tcn_num_channels, tcn_num_channels, 
+                tcn_kernel_size, dilation_rate, tcn_dropout
+            ))
+        
+        self.tcn_backbone = nn.Sequential(*tcn_layers)
+        
+        # 3. Velocity prediction head
+        self.velocity_head = nn.Sequential(
+            nn.Conv1d(tcn_num_channels, 1, kernel_size=1),
+        )
+    
+    def forward(self, x):
+        """
+        Args:
+            x: (batch_size, window_size, num_features) - RAW features
+        
+        Returns:
+            velocity_seq: (batch_size, 1, window_size) - velocity in m/s for all timesteps
+            velocity_out: (batch_size, 1) - velocity in m/s at last timestep only
+        """
+        # x: [B, T, F]
+        
+        # 1. Convert to Conv1d format
+        x = x.permute(0, 2, 1)  # [B, T, F] → [B, F, T]
+        
+        # 2. Project to TCN channel dimension
+        z = self.input_proj(x)  # [B, F, T] → [B, tcn_num_channels, T]
+        
+        # 3. TCN backbone
+        features = self.tcn_backbone(z)  # [B, tcn_num_channels, T]
+        
+        # 4. Velocity prediction
+        velocity_seq = self.velocity_head(features)  # [B, 1, T]
+        velocity_out = velocity_seq[:, :, -1]  # [B, 1] - last timestep
+        
+        return velocity_seq, velocity_out
+
+
 class CausalConv1d(nn.Module):
     """Causal convolution with weight normalization."""
     def __init__(self, in_ch, out_ch, kernel_size=3, dilation=1):
@@ -211,60 +289,48 @@ class contact_cnn(nn.Module):
         self.num_features = num_features
         self.window_size = window_size
         
-        # Shared convolutional backbone
-        # Preserves temporal dimension throughout - no MaxPool downsampling
-        # Input: [B, num_features, T]
-        # Uses dilated convolutions to capture multi-scale temporal patterns
-        
-        self.conv_backbone = nn.Sequential(
-            # Block 1 (causal)
+        # Initial convolutional layer
+        self.conv_initial = nn.Sequential(
             CausalConv1d(
                 in_ch=num_features,
-                out_ch=128,
+                out_ch=64,
                 kernel_size=3,
                 dilation=1
             ),
-            nn.ReLU(),
-
-            # Block 2 (causal)
-            CausalConv1d(
-                in_ch=128,
-                out_ch=128,
-                kernel_size=3,
-                dilation=1
-            ),
-            nn.ReLU(),
-
-            # nn.Dropout(p=0.05),
-
-            # Block 3 (causal, more dilated)
-            CausalConv1d(
-                in_ch=128,
-                out_ch=64,
-                kernel_size=3,
-                dilation=2
-            ),
-            nn.ReLU(),
-
-            # Block 4 (causal)
-            CausalConv1d(
-                in_ch=64,
-                out_ch=64,
-                kernel_size=3,
-                dilation=2
-            ),
-            nn.ReLU(),
-
-            # nn.Dropout(p=0.05),
+            nn.GELU(),
         )
         
-        # Branch 1: Velocity prediction (sequence-to-sequence with Conv1d)
-        # Predicts velocity for all timesteps, but only uses last one at inference
-        # Input: [B, 128, T] from conv_backbone
-        # Output: [B, 1, T] - velocity for each timestep (x-axis only)
+        # Parallel multi-scale branches with different kernel sizes (Inception-style)
+        # Each branch captures patterns at different temporal scales
+        self.branch_k3 = nn.Sequential(
+            CausalConv1d(in_ch=64, out_ch=32, kernel_size=3, dilation=1),
+            nn.GELU(),
+        )
+        self.branch_k5 = nn.Sequential(
+            CausalConv1d(in_ch=64, out_ch=32, kernel_size=5, dilation=1),
+            nn.GELU(),
+        )
+        self.branch_k7 = nn.Sequential(
+            CausalConv1d(in_ch=64, out_ch=32, kernel_size=7, dilation=1),
+            nn.GELU(),
+        )
+        
+        # After concatenation: 32 + 32 + 32 = 96 channels
+        # Final processing layers
+        self.conv_post = nn.Sequential(
+            CausalConv1d(
+                in_ch=96,  # Concatenated from 3 branches
+                out_ch=64,
+                kernel_size=3,
+                dilation=2
+            ),
+            nn.GELU(),
+        )
+        
+        # Velocity prediction head
         self.velocity_head = nn.Sequential(
             nn.Conv1d(64, 1, kernel_size=1),
-)
+        )
 
     def forward(self, x):
         # x shape: (batch_size, window_size, num_features) - RAW features from csv2numpy.py
@@ -272,21 +338,26 @@ class contact_cnn(nn.Module):
         # Permute to (batch_size, num_features, window_size) for Conv1d
         x = x.permute(0, 2, 1)  # [B, T, C] → [B, C, T]
         
-        # Pass through shared convolutional backbone
-        features = self.conv_backbone(x)  # [B, 128, T]
+        # Initial convolution
+        x = self.conv_initial(x)  # [B, 64, T]
         
-        # Branch 1: Velocity prediction (sequence-to-sequence)
-        # Predict velocity for all timesteps
+        # Parallel multi-scale branches
+        branch_3 = self.branch_k3(x)  # [B, 32, T]
+        branch_5 = self.branch_k5(x)  # [B, 32, T]
+        branch_7 = self.branch_k7(x)  # [B, 32, T]
+        
+        # Concatenate branches along channel dimension
+        features = torch.cat([branch_3, branch_5, branch_7], dim=1)  # [B, 96, T]
+        
+        # Final processing
+        features = self.conv_post(features)  # [B, 64, T]
+        
+        # Velocity prediction (sequence-to-sequence)
         velocity_seq = self.velocity_head(features)  # [B, 1, T]
         
         # Extract last timestep for final output (used at inference)
         velocity_out = velocity_seq[:, :, -1]  # [B, 1]
         
-        # # Branch 2: Contact classification (single value at last timestep)
-        # contact_out = self.contact_head(features)  # [B, 1]
-        
-        # return contact_out, velocity_out
-
         # Return both sequence (for training) and last timestep (for inference)
         # During training: use velocity_seq for dense supervision
         # During inference: use velocity_out (last timestep only)
