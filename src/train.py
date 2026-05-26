@@ -32,24 +32,23 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_criteri
     Args:
         dataloader: DataLoader to evaluate
         model: The neural network model
-        contact_criterion: Optional contact loss criterion
+        contact_criterion: Optional contact loss criterion (BCEWithLogitsLoss)
         velocity_criterion: Optional velocity loss criterion
     
     Returns:
         dict with metrics: contact_acc, contact_loss, velocity_mae, velocity_loss
     """
-    # num_correct = 0
-    # num_data = 0
-    # contact_loss_sum = 0
+    num_correct = 0
+    num_data = 0
+    contact_loss_sum = 0
     velocity_loss_sum = 0
     velocity_mae_sum = 0
-    num_data = 0
     
-    # # Track prediction distribution to detect bias
-    # num_pred_contact = 0
-    # num_pred_no_contact = 0
-    # num_gt_contact = 0
-    # num_gt_no_contact = 0
+    # Track prediction distribution to detect bias
+    num_pred_contact = 0
+    num_pred_no_contact = 0
+    num_gt_contact = 0
+    num_gt_no_contact = 0
     
     with torch.no_grad():
         for sample in tqdm(dataloader):
@@ -58,14 +57,13 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_criteri
             gt_velocity_seq = sample['velocity']  # Shape: (batch, window_size, 1) - full velocity sequence from dataset
             gt_velocity = gt_velocity_seq[:, -1, :]  # Extract last timestep: (batch, 1)
 
-            # contact_output, velocity_output = model(input_data)  # contact: (batch, 1), velocity: (batch, 1)
-            velocity_seq, velocity_output = model(input_data)  # velocity_seq: (batch, 1, window_size), velocity_output: (batch, 1)
-            # contact_prediction = (contact_output > 0).float()  # Binary predictions
+            velocity_seq, velocity_output, contact_output = model(input_data)  # contact: (batch, 1), velocity: (batch, 1)
+            contact_prediction = (contact_output > 0).float()  # Binary predictions
 
-            # # Compute losses if criteria provided
-            # if contact_criterion is not None:
-            #     contact_loss = contact_criterion(contact_output, gt_contact)
-            #     contact_loss_sum += contact_loss.item()
+            # Compute contact loss if criterion provided
+            if contact_criterion is not None:
+                contact_loss = contact_criterion(contact_output, gt_contact)
+                contact_loss_sum += contact_loss.item()
             
             # Velocity loss masked to contact samples only
             contact_mask = (gt_contact == 1).float()  # [B, 1]
@@ -92,16 +90,23 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_criteri
                 
                 velocity_mae_sum += velocity_mae.item()
 
-            # # Contact accuracy
-            # num_correct += (contact_prediction == gt_contact).sum().item()
+            # Contact accuracy
+            num_correct += (contact_prediction == gt_contact).sum().item()
             num_data += input_data.size(0)
             
+            # Track prediction distribution
+            num_pred_contact += contact_prediction.sum().item()
+            num_pred_no_contact += (1 - contact_prediction).sum().item()
+            num_gt_contact += gt_contact.sum().item()
+            num_gt_no_contact += (1 - gt_contact).sum().item()
 
     metrics = {
-        # 'contact_acc': num_correct / num_data,
-        # 'contact_loss': contact_loss_sum / len(dataloader) if contact_criterion else 0,
+        'contact_acc': num_correct / num_data,
+        'contact_loss': contact_loss_sum / len(dataloader) if contact_criterion else 0,
         'velocity_mae': velocity_mae_sum / len(dataloader),
-        'velocity_loss': velocity_loss_sum / len(dataloader) if velocity_criterion else 0
+        'velocity_loss': velocity_loss_sum / len(dataloader) if velocity_criterion else 0,
+        'num_pred_contact': num_pred_contact,
+        'num_gt_contact': num_gt_contact
     }
     
     return metrics
@@ -110,9 +115,10 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_criteri
 def save_onnx_model(model, checkpoint_path, window_size):
     """
     Save ONNX version of the model for C++ deployment.
-    The model has two outputs: 
+    The model has three outputs: 
         - velocity_seq: (batch, 1, window_size) - velocity predictions for all timesteps (for training)
         - velocity_output: (batch, 1) - velocity prediction at last timestep only (for inference)
+        - contact_output: (batch, 1) - contact logits at last timestep
     """
     try:
         import warnings
@@ -180,14 +186,17 @@ def train(model, train_dataloader, val_dataloader, config):
     # Initialize TensorBoard writer for scalar metrics (loss, MAE plots)
     writer = SummaryWriter(config['log_writer_path'])
 
-    # Loss functions for velocity regression
-    # # Contact: BCEWithLogitsLoss (with optional class weighting)
-    # use_weighted_loss = config.get('use_weighted_loss', False)
+    # Loss functions
+    # Contact: BCEWithLogitsLoss (binary classification)
+    contact_criterion = nn.BCEWithLogitsLoss()
+    
+    # Velocity: HuberLoss (robust to outliers)
     huber_delta = float(config.get('Huber_delta', 0.5))
     velocity_criterion = nn.HuberLoss(delta=huber_delta, reduction='none')  # Element-wise for masking
     optimizer = optim.Adam(model.parameters(), lr=config['init_lr'])
     
     # Get loss weighting parameters
+    contact_weight = float(config.get('contact_weight', 1.0))  # Weight for contact loss
     velocity_weight = float(config.get('velocity_weight', 1.0))  # Weight for velocity loss
     derivative_weight = float(config.get('derivative_weight', 0.0))  # Weight for derivative matching loss
     temporal_weight_power = float(config.get('temporal_weight_power', 0.0))  # Temporal weighting exponent
@@ -205,6 +214,7 @@ def train(model, train_dataloader, val_dataloader, config):
     # best_acc = 0
     best_loss = 1000000000
     best_velocity_mae = 1000000000
+    best_contact_acc = 0
     
     # Pre-compute temporal weights ONCE (before training loop) to avoid recomputation every batch
     device = next(model.parameters()).device
@@ -229,7 +239,7 @@ def train(model, train_dataloader, val_dataloader, config):
     for epoch in range(config['num_epoch']):
         running_loss = 0.0  # For periodic printing
         loss_sum = 0.0  # For epoch average
-        # contact_loss_sum = 0.0
+        contact_loss_sum = 0.0
         velocity_loss_sum = 0.0
         derivative_loss_sum = 0.0
         
@@ -244,7 +254,10 @@ def train(model, train_dataloader, val_dataloader, config):
 
             optimizer.zero_grad()
             
-            velocity_seq, velocity_output = model(input_data)  # velocity_seq: (batch, 1, window_size), velocity_output: (batch, 1)
+            velocity_seq, velocity_output, contact_output = model(input_data)  # velocity_seq: (batch, 1, window_size), velocity_output: (batch, 1), contact: (batch, 1)
+            
+            # Contact loss (binary classification at last timestep)
+            contact_loss = contact_criterion(contact_output, contact_label)
             
             if use_dense_supervision:
                 # DENSE SUPERVISION: Compute velocity loss on FULL SEQUENCE masked to contact only
@@ -303,7 +316,7 @@ def train(model, train_dataloader, val_dataloader, config):
                 # No derivative loss in last-timestep-only mode
                 derivative_loss = torch.tensor(0.0, device=velocity_output.device)
             
-            loss = velocity_weight * velocity_loss + derivative_weight * derivative_loss
+            loss = contact_weight * contact_loss + velocity_weight * velocity_loss + derivative_weight * derivative_loss
             
             # Add Elastic Net regularization (L1 + L2) if specified
             l1_lambda = float(config.get('l1_lambda', 0.0))
@@ -329,7 +342,7 @@ def train(model, train_dataloader, val_dataloader, config):
 
             running_loss += loss.item()
             loss_sum += loss.item()
-            # contact_loss_sum += contact_loss.item()
+            contact_loss_sum += contact_loss.item()
             velocity_loss_sum += velocity_loss.item()
             if derivative_weight > 0 and use_dense_supervision:
                 derivative_loss_sum += derivative_loss.item()
@@ -340,53 +353,55 @@ def train(model, train_dataloader, val_dataloader, config):
                     contact_count = int(contact_mask_seq.sum().item())
                 else:
                     contact_count = int(contact_mask.sum().item())
-                print("epoch %d / %d, iteration %d / %d, loss: %.8f (velocity masked: %.6f%s, contact samples: %d)" %\
+                print("epoch %d / %d, iteration %d / %d, loss: %.8f (contact: %.6f, velocity masked: %.6f%s, contact samples: %d)" %\
                     (epoch, config['num_epoch'], i, len(train_dataloader), 
                      running_loss/config['print_every'],
-                     velocity_loss.item(), derivative_str, contact_count))
+                     contact_loss.item(), velocity_loss.item(), derivative_str, contact_count))
                 running_loss = 0.0
 
         # calculate training and validation metrics
         model.eval()
-        train_metrics = compute_accuracy(train_dataloader, model, velocity_criterion=velocity_criterion)
-        val_metrics = compute_accuracy(val_dataloader, model, velocity_criterion=velocity_criterion)
+        train_metrics = compute_accuracy(train_dataloader, model, contact_criterion=contact_criterion, velocity_criterion=velocity_criterion)
+        val_metrics = compute_accuracy(val_dataloader, model, contact_criterion=contact_criterion, velocity_criterion=velocity_criterion)
         
         train_loss_avg = loss_sum / len(train_dataloader)
-        # contact_loss_avg = contact_loss_sum / len(train_dataloader)
+        contact_loss_avg = contact_loss_sum / len(train_dataloader)
         velocity_loss_avg = velocity_loss_sum / len(train_dataloader)
         derivative_loss_avg = derivative_loss_sum / len(train_dataloader) if (derivative_weight > 0 and use_dense_supervision) else 0.0
 
         # log down info in tensorboard
         writer.add_scalar('training/total_loss', train_loss_avg, epoch)
-        # writer.add_scalar('training/contact_loss', contact_loss_avg, epoch)
+        writer.add_scalar('training/contact_loss', contact_loss_avg, epoch)
         writer.add_scalar('training/velocity_loss', velocity_loss_avg, epoch)
         if derivative_weight > 0 and use_dense_supervision:
             writer.add_scalar('training/derivative_loss', derivative_loss_avg, epoch)
-        # writer.add_scalar('training/contact_accuracy', train_metrics['contact_acc'], epoch)
+        writer.add_scalar('training/contact_accuracy', train_metrics['contact_acc'], epoch)
         writer.add_scalar('training/velocity_mae', train_metrics['velocity_mae'], epoch)
         
-        writer.add_scalar('validation/total_loss', val_metrics['velocity_loss'], epoch)
-        # writer.add_scalar('validation/contact_loss', val_metrics['contact_loss'], epoch)
+        writer.add_scalar('validation/total_loss', val_metrics['contact_loss'] + val_metrics['velocity_loss'], epoch)
+        writer.add_scalar('validation/contact_loss', val_metrics['contact_loss'], epoch)
         writer.add_scalar('validation/velocity_loss', val_metrics['velocity_loss'], epoch)
-        # writer.add_scalar('validation/contact_accuracy', val_metrics['contact_acc'], epoch)
+        writer.add_scalar('validation/contact_accuracy', val_metrics['contact_acc'], epoch)
         writer.add_scalar('validation/velocity_mae', val_metrics['velocity_mae'], epoch)
 
-        # # if we achieve best val acc, save the model.
-        # if val_metrics['contact_acc'] > best_acc:
-        #     best_acc = val_metrics['contact_acc']
-        #     
-        #     state = {'epoch': epoch,
-        #             'model_state_dict': model.state_dict(),
-        #             'optimizer_state_dict': optimizer.state_dict(),
-        #             'loss': train_loss_avg,
-        #             'velocity_mae': train_metrics['velocity_mae'],
-        #             'val_loss': val_metrics['velocity_loss'],
-        #             'val_velocity_mae': val_metrics['velocity_mae']}
-        # 
-        #     checkpoint_path = config['model_save_path']+'_best_val_acc.pt'
-        #     torch.save(state, checkpoint_path)
-        #     # Also save ONNX version for faster C++ deployment
-        #     save_onnx_model(model, checkpoint_path, config['window_size'])
+        # if we achieve best contact accuracy, save the model
+        if val_metrics['contact_acc'] > best_contact_acc:
+            best_contact_acc = val_metrics['contact_acc']
+            
+            state = {'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'loss': train_loss_avg,
+                    'contact_acc': train_metrics['contact_acc'],
+                    'velocity_mae': train_metrics['velocity_mae'],
+                    'val_loss': val_metrics['contact_loss'] + val_metrics['velocity_loss'],
+                    'val_contact_acc': val_metrics['contact_acc'],
+                    'val_velocity_mae': val_metrics['velocity_mae']}
+        
+            checkpoint_path = config['model_save_path']+'_best_val_contact_acc.pt'
+            torch.save(state, checkpoint_path)
+            # Also save ONNX version for faster C++ deployment
+            save_onnx_model(model, checkpoint_path, config['window_size'])
         
         # if we achieve best velocity MAE, save the model.
         if val_metrics['velocity_mae'] < best_velocity_mae:
@@ -396,8 +411,10 @@ def train(model, train_dataloader, val_dataloader, config):
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'loss': train_loss_avg,
+                    'contact_acc': train_metrics['contact_acc'],
                     'velocity_mae': train_metrics['velocity_mae'],
-                    'val_loss': val_metrics['velocity_loss'],
+                    'val_loss': val_metrics['contact_loss'] + val_metrics['velocity_loss'],
+                    'val_contact_acc': val_metrics['contact_acc'],
                     'val_velocity_mae': val_metrics['velocity_mae']}
 
             checkpoint_path = config['model_save_path']+'_best_val_velocity.pt'
@@ -406,7 +423,7 @@ def train(model, train_dataloader, val_dataloader, config):
             save_onnx_model(model, checkpoint_path, config['window_size'])
 
         # if we achieve best val loss, save the model
-        val_total_loss = val_metrics['velocity_loss']
+        val_total_loss = val_metrics['contact_loss'] + val_metrics['velocity_loss']
         if val_total_loss < best_loss:
             best_loss = val_total_loss
             
@@ -414,8 +431,10 @@ def train(model, train_dataloader, val_dataloader, config):
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'loss': train_loss_avg,
+                    'contact_acc': train_metrics['contact_acc'],
                     'velocity_mae': train_metrics['velocity_mae'],
                     'val_loss': val_total_loss,
+                    'val_contact_acc': val_metrics['contact_acc'],
                     'val_velocity_mae': val_metrics['velocity_mae']}
 
             checkpoint_path = config['model_save_path']+'_best_val_loss.pt'
@@ -425,16 +444,18 @@ def train(model, train_dataloader, val_dataloader, config):
             
 
         print("Finished epoch %d / %d" % (epoch + 1, config['num_epoch']))
-        print("  Train - Velocity MAE: %.4f" % train_metrics['velocity_mae']) 
-        print("  Val   - Velocity MAE: %.4f" % val_metrics['velocity_mae'])
+        print("  Train - Contact Acc: %.4f, Velocity MAE: %.4f" % (train_metrics['contact_acc'], train_metrics['velocity_mae'])) 
+        print("  Val   - Contact Acc: %.4f, Velocity MAE: %.4f" % (val_metrics['contact_acc'], val_metrics['velocity_mae']))
     
     # save final model     
     state = {'epoch': epoch,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'loss': train_loss_avg,
+            'contact_acc': train_metrics['contact_acc'],
             'velocity_mae': train_metrics['velocity_mae'],
             'val_loss': val_total_loss,
+            'val_contact_acc': val_metrics['contact_acc'],
             'val_velocity_mae': val_metrics['velocity_mae']}
 
     checkpoint_path = config['model_save_path']+'_final_epoch.pt'
@@ -462,19 +483,23 @@ def train(model, train_dataloader, val_dataloader, config):
         config=config,
         train_metrics={
             "train_loss": float(train_loss_avg),
+            "train_contact_acc": float(train_metrics['contact_acc']),
             "train_velocity_mae": float(train_metrics['velocity_mae']),
             "val_loss": float(val_total_loss),
+            "val_contact_acc": float(val_metrics['contact_acc']),
             "val_velocity_mae": float(val_metrics['velocity_mae']),
         },
         val_metrics=val_metrics,
         best_metrics={
             "best_val_loss": float(best_loss),
+            "best_val_contact_acc": float(best_contact_acc),
             "best_val_velocity_mae": float(best_velocity_mae),
         },
         train_time_seconds=total_train_time,
         checkpoint_paths={
-            "best_val_loss": checkpoint_path.replace('_final_epo.pt', '_best_val_loss.pt'),
-            "best_val_velocity": checkpoint_path.replace('_final_epo.pt', '_best_val_velocity.pt'),
+            "best_val_loss": checkpoint_path.replace('_final_epoch.pt', '_best_val_loss.pt'),
+            "best_val_contact_acc": checkpoint_path.replace('_final_epoch.pt', '_best_val_contact_acc.pt'),
+            "best_val_velocity": checkpoint_path.replace('_final_epoch.pt', '_best_val_velocity.pt'),
             "final_epoch": checkpoint_path,
         }
     )

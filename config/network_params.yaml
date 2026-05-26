@@ -2,6 +2,8 @@
 csv_folder: "/home/saakee/Research/deep-contact-estimator/Data/CSVFiles/"
 # Path to the data folder. Data should be separated into train.npy, train_label.npy, val.npy, val_label.npy.
 data_folder: "/home/saakee/Research/deep-contact-estimator/Data/NumpyFiles/"
+# Test-specific params
+model_load_path: "/home/saakee/Research/deep-contact-estimator/results/bipedal_contact_best_val_velocity.pt"
 
 print_every: 1000
 
@@ -18,23 +20,20 @@ batch_size: 60  # Used for both training and testing
 init_lr: 0.0001
 num_epoch: 3 # Reduced for quick training with small dataset
 
-# Test-specific params
-model_load_path: "/home/saakee/Research/deep-contact-estimator/results/bipedal_contact_best_val_velocity.pt"
 
-# Elastic Net Regularization (L1 + L2)
-l1_lambda: 0    # L1 (Lasso): encourages sparsity (many weights → 0)
-l2_lambda: 0     # L2 (Ridge): encourages small weights, prevents large values
-# Typical values: 1e-5 to 1e-3 for each
 
-# Multi-task Learning: Foot Velocity Regression Weight
+# Multi-task Learning: Contact Classification + Velocity Regression
 # Balances contact classification loss vs. velocity regression loss
-# Total Loss = contact_BCE_loss + velocity_weight * velocity_Huber_loss
+# Total Loss = contact_weight * contact_BCE_loss + velocity_weight * velocity_Huber_loss
+contact_weight: 1.0     # Weight for contact classification loss
+                        # Typical: 0.5-2.0. Start with 1.0
+                        # Higher values = prioritize contact detection accuracy
+                        # Lower values = prioritize velocity accuracy
 velocity_weight: 1.0    # Weight for velocity regression loss
                         # Typical: 0.5-2.0. Start with 1.0
                         # Higher values = prioritize velocity accuracy
                         # Lower values = prioritize contact accuracy
                         # Set based on which task is more important
-
 
 # -------------------------------------
                             # Dense Supervision: Compute loss on all timesteps vs last timestep only
@@ -67,11 +66,17 @@ temporal_weight_power: 0.0  # Exponent for temporal weighting
 # -------------------------------------
 
 
+# Elastic Net Regularization (L1 + L2)
+l1_lambda: 0    # L1 (Lasso): encourages sparsity (many weights → 0)
+l2_lambda: 0     # L2 (Ridge): encourages small weights, prevents large values
+# Typical values: 1e-5 to 1e-3 for each
+
+
 Huber_delta: 0.005      # Delta parameter for Huber loss in velocity regression
 
 # Model Architecture Selection
 # Choose which neural network architecture to use
-model_architecture: "tcn"  # Options: "attention_tcn", "tcn", "vanilla_cnn"
+model_architecture: "attention_tcn"  # Options: "attention_tcn", "tcn", "vanilla_cnn"
                                    # - attention_tcn: Transformer + TCN hybrid with multi-head attention (most expressive, slowest)
                                    # - tcn: Pure Temporal Convolutional Network with residual blocks (good balance)
                                    # - vanilla_cnn: Simple dilated CNN (fastest, fewest parameters)
@@ -83,5 +88,5 @@ attention_num_heads: 4      # Number of attention heads (must divide d_model eve
 # TCN hyperparameters (used by "attention_tcn" and "tcn" architectures)
 tcn_num_channels: 64        # Number of channels in TCN layers
 tcn_kernel_size: 3          # Kernel size for temporal convolutions
-tcn_num_blocks: 3           # Number of TCN residual blocks (dilation: 1,2,4,8,16,...)
+tcn_num_blocks: 4           # Number of TCN residual blocks (dilation: 1,2,4,8,16,...)
 tcn_dropout: 0.2            # Dropout rate in TCN blocks (0.0-0.5)

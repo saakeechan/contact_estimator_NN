@@ -145,6 +145,16 @@ class AttentionTCN(nn.Module):
             nn.Conv1d(tcn_num_channels, 1, kernel_size=1),
             # nn.GELU()
         )
+        
+        # 7. Contact detection head (MLP: 256 → 32 → 1)
+        self.contact_head = nn.Sequential(
+            nn.Linear(tcn_num_channels, 256),
+            nn.ReLU(),
+            nn.Linear(256, 32),
+            nn.ReLU(),
+            nn.Linear(32, 1)
+            # No activation - BCEWithLogitsLoss applies sigmoid internally
+        )
     
     def forward(self, x):
         """
@@ -154,6 +164,7 @@ class AttentionTCN(nn.Module):
         Returns:
             velocity_seq: (batch_size, 1, window_size) - velocity in m/s for all timesteps
             velocity_out: (batch_size, 1) - velocity in m/s at last timestep only
+            contact_out: (batch_size, 1) - contact logits at last timestep
         """
         # x: [B, T, F]
         
@@ -190,11 +201,15 @@ class AttentionTCN(nn.Module):
         # 7. TCN backbone
         features = self.tcn_backbone(z)  # [B, tcn_num_channels, T]
         
-        # 8. Velocity prediction with Softplus activation
+        # 8. Velocity prediction
         velocity_seq = self.velocity_head(features)  # [B, 1, T]
         velocity_out = velocity_seq[:, :, -1]  # [B, 1] - last timestep
         
-        return velocity_seq, velocity_out
+        # 9. Contact prediction (MLP on last timestep features)
+        features_last = features[:, :, -1]  # [B, tcn_num_channels]
+        contact_out = self.contact_head(features_last)  # [B, 1]
+        
+        return velocity_seq, velocity_out, contact_out
 
 
 class TCN(nn.Module):
@@ -238,6 +253,16 @@ class TCN(nn.Module):
         self.velocity_head = nn.Sequential(
             nn.Conv1d(tcn_num_channels, 1, kernel_size=1),
         )
+        
+        # 4. Contact detection head (MLP: 256 → 32 → 1)
+        self.contact_head = nn.Sequential(
+            nn.Linear(tcn_num_channels, 256),
+            nn.ReLU(),
+            nn.Linear(256, 32),
+            nn.ReLU(),
+            nn.Linear(32, 1)
+            # No activation - BCEWithLogitsLoss applies sigmoid internally
+        )
     
     def forward(self, x):
         """
@@ -247,6 +272,7 @@ class TCN(nn.Module):
         Returns:
             velocity_seq: (batch_size, 1, window_size) - velocity in m/s for all timesteps
             velocity_out: (batch_size, 1) - velocity in m/s at last timestep only
+            contact_out: (batch_size, 1) - contact logits at last timestep
         """
         # x: [B, T, F]
         
@@ -263,7 +289,11 @@ class TCN(nn.Module):
         velocity_seq = self.velocity_head(features)  # [B, 1, T]
         velocity_out = velocity_seq[:, :, -1]  # [B, 1] - last timestep
         
-        return velocity_seq, velocity_out
+        # 5. Contact prediction (MLP on last timestep features)
+        features_last = features[:, :, -1]  # [B, tcn_num_channels]
+        contact_out = self.contact_head(features_last)  # [B, 1]
+        
+        return velocity_seq, velocity_out, contact_out
 
 
 class CausalConv1d(nn.Module):
@@ -331,6 +361,16 @@ class contact_cnn(nn.Module):
         self.velocity_head = nn.Sequential(
             nn.Conv1d(64, 1, kernel_size=1),
         )
+        
+        # Contact detection head (MLP: 256 → 32 → 1)
+        self.contact_head = nn.Sequential(
+            nn.Linear(64, 256),
+            nn.ReLU(),
+            nn.Linear(256, 32),
+            nn.ReLU(),
+            nn.Linear(32, 1)
+            # No activation - BCEWithLogitsLoss applies sigmoid internally
+        )
 
     def forward(self, x):
         # x shape: (batch_size, window_size, num_features) - RAW features from csv2numpy.py
@@ -358,10 +398,14 @@ class contact_cnn(nn.Module):
         # Extract last timestep for final output (used at inference)
         velocity_out = velocity_seq[:, :, -1]  # [B, 1]
         
+        # Contact prediction (MLP on last timestep features)
+        features_last = features[:, :, -1]  # [B, 64]
+        contact_out = self.contact_head(features_last)  # [B, 1]
+        
         # Return both sequence (for training) and last timestep (for inference)
         # During training: use velocity_seq for dense supervision
         # During inference: use velocity_out (last timestep only)
-        return velocity_seq, velocity_out
+        return velocity_seq, velocity_out, contact_out
 
 
 class ContactCNNWithNormalization(nn.Module):
@@ -379,6 +423,7 @@ class ContactCNNWithNormalization(nn.Module):
     Output shapes:
         - velocity_seq: (batch_size, 1, window_size) - velocity predictions for all timesteps (for training)
         - velocity_out: (batch_size, 1) - velocity prediction at last timestep only (for inference)
+        - contact_out: (batch_size, 1) - contact logits at last timestep
     
     Feature layout:
     - Input: RAW features from csv2numpy.py
@@ -423,6 +468,7 @@ class ContactCNNWithNormalization(nn.Module):
         Returns:
             velocity_seq: (batch_size, 1, window_size) - velocity predictions for all timesteps (for training)
             velocity_out: (batch_size, 1) - velocity prediction at last timestep only (for inference)
+            contact_out: (batch_size, 1) - contact logits at last timestep
         """
         # Apply global z-score normalization to all input features
         # These statistics are embedded in the model and exported to ONNX
