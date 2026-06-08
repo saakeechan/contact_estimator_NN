@@ -25,9 +25,8 @@ Three network architectures are available:
    - Configurable: tcn_num_channels, tcn_kernel_size, tcn_num_blocks, tcn_dropout
 
 3. contact_cnn (Vanilla CNN):
-   - Inception-style multi-scale architecture
-   - Parallel branches with kernel sizes 3, 5, 7 (captures patterns at different temporal scales)
-   - Concatenates multi-scale features
+   - Simple sequential convolutional architecture
+   - Three conv layers with kernel size 3
    - Uses GELU activation
    - No residual connections
    - Fastest, fewest parameters
@@ -319,52 +318,50 @@ class contact_cnn(nn.Module):
         self.num_features = num_features
         self.window_size = window_size
         
-        # Initial convolutional layer
-        self.conv_initial = nn.Sequential(
+        # Convolutional layers
+        self.conv1 = nn.Sequential(
             CausalConv1d(
                 in_ch=num_features,
-                out_ch=64,
+                out_ch=128,
                 kernel_size=3,
                 dilation=1
             ),
-            nn.GELU(),
+            nn.ReLU(),
         )
         
-        # Parallel multi-scale branches with different kernel sizes (Inception-style)
-        # Each branch captures patterns at different temporal scales
-        self.branch_k3 = nn.Sequential(
-            CausalConv1d(in_ch=64, out_ch=32, kernel_size=3, dilation=1),
-            nn.GELU(),
-        )
-        self.branch_k5 = nn.Sequential(
-            CausalConv1d(in_ch=64, out_ch=32, kernel_size=5, dilation=1),
-            nn.GELU(),
-        )
-        self.branch_k7 = nn.Sequential(
-            CausalConv1d(in_ch=64, out_ch=32, kernel_size=7, dilation=1),
-            nn.GELU(),
+        self.conv2 = nn.Sequential(
+            CausalConv1d(in_ch=128, out_ch=128, kernel_size=3, dilation=1),
+            nn.ReLU(),
         )
         
-        # After concatenation: 32 + 32 + 32 = 96 channels
-        # Final processing layers
-        self.conv_post = nn.Sequential(
+        self.conv3 = nn.Sequential(
             CausalConv1d(
-                in_ch=96,  # Concatenated from 3 branches
-                out_ch=64,
+                in_ch=128,
+                out_ch=128,
                 kernel_size=3,
-                dilation=2
+                dilation=1
             ),
-            nn.GELU(),
+            nn.ReLU(),
+        )
+
+        self.conv4 = nn.Sequential(
+            CausalConv1d(128, 128, kernel_size=3, dilation=1),
+            nn.ReLU(),
+        )
+
+        self.conv5 = nn.Sequential(
+            CausalConv1d(128, 128, kernel_size=3, dilation=1),
+            nn.ReLU(),
         )
         
         # Velocity prediction head
         self.velocity_head = nn.Sequential(
-            nn.Conv1d(64, 1, kernel_size=1),
+            nn.Conv1d(128, 1, kernel_size=1),
         )
         
         # Contact detection head (MLP: 256 → 32 → 1)
         self.contact_head = nn.Sequential(
-            nn.Linear(64, 256),
+            nn.Linear(128, 256),
             nn.ReLU(),
             nn.Linear(256, 32),
             nn.ReLU(),
@@ -378,19 +375,13 @@ class contact_cnn(nn.Module):
         # Permute to (batch_size, num_features, window_size) for Conv1d
         x = x.permute(0, 2, 1)  # [B, T, C] → [B, C, T]
         
-        # Initial convolution
-        x = self.conv_initial(x)  # [B, 64, T]
-        
-        # Parallel multi-scale branches
-        branch_3 = self.branch_k3(x)  # [B, 32, T]
-        branch_5 = self.branch_k5(x)  # [B, 32, T]
-        branch_7 = self.branch_k7(x)  # [B, 32, T]
-        
-        # Concatenate branches along channel dimension
-        features = torch.cat([branch_3, branch_5, branch_7], dim=1)  # [B, 96, T]
-        
-        # Final processing
-        features = self.conv_post(features)  # [B, 64, T]
+        # Convolutional layers
+        x = self.conv1(x)  # [B, 64, T]
+        x = self.conv2(x)  # [B, 64, T]
+        x = self.conv3(x)  # [B, 64, T]
+        x = self.conv4(x)  # [B, 64, T]
+        x = self.conv5(x)  # [B, 64, T]
+        features = x  # [B, 64, T]
         
         # Velocity prediction (sequence-to-sequence)
         velocity_seq = self.velocity_head(features)  # [B, 1, T]

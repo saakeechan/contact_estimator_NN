@@ -5,3 +5,6 @@ inference_results/
 .vscode
 *.txt
 Data/
+
+
+*footVelocitiesPlots*

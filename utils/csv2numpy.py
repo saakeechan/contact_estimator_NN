@@ -98,8 +98,15 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
             
             # Skip runs with fewer than 2 samples (can't compute velocity differences)
             if len(df_run) < 2:
-                print(f"  Skipping run {run_idx} (only {len(df_run)} sample)")
+                # print(f"  Skipping run {run_idx} (only {len(df_run)} sample)")
                 continue
+            
+            # Skip runs with cmd_vel_x outside the range [1.5, 1.8] m/s
+            if 'cmd_vel_x' in df_run.columns:
+                max_cmd_vel = df_run['cmd_vel_x'].max()
+                if max_cmd_vel < 0 or max_cmd_vel > 0.35:
+                    # print(f"  Skipping run {run_idx} (max cmd_vel_x={max_cmd_vel:.2f} not in [0, 0.65])")
+                    continue
             
             # Extract IMU data in body frame
             imu_acc = df_run[['acc_body_x', 'acc_body_y', 'acc_body_z']].values
@@ -131,13 +138,13 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
             # joint_target = df_run[joint_target_cols].values
 
             # Extract command velocity - 1 value
-            # cmd_vel = df_run[['cmd_vel_x']].values
+            cmd_vel = df_run[['cmd_vel_x']].values
 
             # Calculate tau_mse from tau_est for LEFT leg only
             tau_mse = np.sum(tau_est ** 2, axis=1, keepdims=True)  # All 6 left leg joints, shape: (num_samples, 1)
 
             # Concatenate features - num_features is auto-detected from shape
-            cur_data = (np.concatenate([imu_acc, imu_omega, q, qd, p, v, tau_est, tau_mse], axis=1))  # Shape: (num_samples, num_features)
+            cur_data = (np.concatenate([imu_acc, imu_omega, q, qd, p, v, tau_est, tau_mse, cmd_vel], axis=1))  # Shape: (num_samples, num_features)
             
             # Initialize all_data and capture num_features from actual data shape
             if num_features is None:

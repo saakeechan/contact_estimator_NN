@@ -61,7 +61,7 @@ def compute_accuracy(dataloader, model):
             gt_velocity_seq = sample['velocity']  # Shape: (batch, window_size, 1) - full velocity sequence from dataset
             gt_velocity = gt_velocity_seq[:, -1, :]  # Extract last timestep: (batch, 1)
 
-            velocity_seq, velocity_output = model(input_data)  # velocity_seq: (batch, 1, window_size), velocity_output: (batch, 1)
+            velocity_seq, velocity_output, contact_output = model(input_data)  # velocity_seq: (batch, 1, window_size), velocity_output: (batch, 1), contact: (batch, 1)
 
             num_data += input_data.size(0)
             
@@ -126,11 +126,15 @@ def main():
     
     train_num_runs = int(train_ratio * num_runs)
     val_num_runs = int(val_ratio * num_runs)
+    test_num_runs = num_runs - train_num_runs - val_num_runs  # Test gets the remainder
     
     # Ensure at least 1 run per split (same logic as train.py)
     if train_num_runs == 0:
         train_num_runs = 1
         val_num_runs = max(1, (num_runs - train_num_runs) // 2)
+        test_num_runs = num_runs - train_num_runs - val_num_runs
+    
+    print(f"\nDataset split: {train_num_runs} train runs, {val_num_runs} val runs, {test_num_runs} test runs (total: {num_runs})")
     
     # Use same random seed and shuffle setting as training to get EXACT same split
     if config.get('shuffle', True):
@@ -161,7 +165,36 @@ def main():
 
     # init network with built-in normalization (same as training)
     # num_features loaded from metadata at the start of main()
-    base_model = contact_cnn(window_size=config['window_size'], num_features=num_features)
+    # Select model architecture based on config (must match training)
+    model_arch = config.get('model_architecture', 'vanilla_cnn').lower()
+    
+    if model_arch == 'attention_tcn':
+        from contact_cnn import AttentionTCN
+        base_model = AttentionTCN(
+            window_size=config['window_size'],
+            num_features=num_features,
+            d_model=config.get('attention_d_model', 64),
+            num_heads=config.get('attention_num_heads', 4),
+            tcn_num_channels=config.get('tcn_num_channels', 64),
+            tcn_kernel_size=config.get('tcn_kernel_size', 3),
+            tcn_num_blocks=config.get('tcn_num_blocks', 5),
+            tcn_dropout=config.get('tcn_dropout', 0.2)
+        )
+    elif model_arch == 'tcn':
+        from contact_cnn import TCN
+        base_model = TCN(
+            window_size=config['window_size'],
+            num_features=num_features,
+            tcn_num_channels=config.get('tcn_num_channels', 64),
+            tcn_kernel_size=config.get('tcn_kernel_size', 3),
+            tcn_num_blocks=config.get('tcn_num_blocks', 5),
+            tcn_dropout=config.get('tcn_dropout', 0.2)
+        )
+    elif model_arch == 'vanilla_cnn':
+        base_model = contact_cnn(window_size=config['window_size'], num_features=num_features)
+    else:
+        raise ValueError(f"Unknown model_architecture: {model_arch}. Options: 'attention_tcn', 'tcn', 'vanilla_cnn'")
+    
     from contact_cnn import ContactCNNWithNormalization
     model = ContactCNNWithNormalization(base_model)  # Will load stats from checkpoint
 

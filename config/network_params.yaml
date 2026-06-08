@@ -12,20 +12,20 @@ print_every: 1000
 window_size: 24 # Number of consecutive samples to stack as input (temporal context)
 shuffle: True
 random_seed: 42  # For reproducible train/val/test splits
-train_ratio: 0.8
-val_ratio: 0.17
+train_ratio: 0.9
+val_ratio: 0.1
 
 # Network params
 batch_size: 60  # Used for both training and testing
 init_lr: 0.0001
-num_epoch: 3 # Reduced for quick training with small dataset
+num_epoch: 5 # Reduced for quick training with small dataset
 
 
 
 # Multi-task Learning: Contact Classification + Velocity Regression
 # Balances contact classification loss vs. velocity regression loss
 # Total Loss = contact_weight * contact_BCE_loss + velocity_weight * velocity_Huber_loss
-contact_weight: 1.0     # Weight for contact classification loss
+contact_weight: 0.0     # Weight for contact classification loss
                         # Typical: 0.5-2.0. Start with 1.0
                         # Higher values = prioritize contact detection accuracy
                         # Lower values = prioritize velocity accuracy
@@ -37,7 +37,7 @@ velocity_weight: 1.0    # Weight for velocity regression loss
 
 # -------------------------------------
                             # Dense Supervision: Compute loss on all timesteps vs last timestep only
-use_dense_supervision: False # True: compute loss on full velocity sequence (all timesteps)
+use_dense_supervision: True # True: compute loss on full velocity sequence (all timesteps)
                              # False: compute loss only on last timestep output
                              # Dense supervision helps learn temporal patterns
                              # Last-only is faster and simpler but may underfit
@@ -72,11 +72,11 @@ l2_lambda: 0     # L2 (Ridge): encourages small weights, prevents large values
 # Typical values: 1e-5 to 1e-3 for each
 
 
-Huber_delta: 0.005      # Delta parameter for Huber loss in velocity regression
+Huber_delta: 0.5      # Delta parameter for Huber loss in velocity regression
 
 # Model Architecture Selection
 # Choose which neural network architecture to use
-model_architecture: "attention_tcn"  # Options: "attention_tcn", "tcn", "vanilla_cnn"
+model_architecture: "vanilla_cnn"  # Options: "attention_tcn", "tcn", "vanilla_cnn"
                                    # - attention_tcn: Transformer + TCN hybrid with multi-head attention (most expressive, slowest)
                                    # - tcn: Pure Temporal Convolutional Network with residual blocks (good balance)
                                    # - vanilla_cnn: Simple dilated CNN (fastest, fewest parameters)
@@ -88,5 +88,5 @@ attention_num_heads: 4      # Number of attention heads (must divide d_model eve
 # TCN hyperparameters (used by "attention_tcn" and "tcn" architectures)
 tcn_num_channels: 64        # Number of channels in TCN layers
 tcn_kernel_size: 3          # Kernel size for temporal convolutions
-tcn_num_blocks: 4           # Number of TCN residual blocks (dilation: 1,2,4,8,16,...)
-tcn_dropout: 0.2            # Dropout rate in TCN blocks (0.0-0.5)
+tcn_num_blocks: 3           # Number of TCN residual blocks (dilation: 1,2,4,8,16,...)
+tcn_dropout: 0.0            # Dropout rate in TCN blocks (0.0-0.5)
