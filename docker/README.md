@@ -1,10 +1,10 @@
 ## 
-This docker file sets up the environment for pytorch with cuda 11.1. It aims at installing all non-conflicting related softwares, and encourages download-and-run.
+This docker file sets up the environment for pytorch with cuda 13.2. It aims at installing all non-conflicting related softwares, and encourages download-and-run.
 
 
 ### How to build the docker image from `Dockerfile`?
 
-To build the docker image, run `docker build --tag justintzuyuan/pytorch_1.8_cuda_11.1 . `
+To build the docker image, run `docker build --tag justintzuyuan/pytorch_2.12_cuda_13.2 . `
 
 If you want to make any changes to this docker image, edit the `Dockerfile`. If any changes happends, remember to update the `LABEL version` inside. 
 

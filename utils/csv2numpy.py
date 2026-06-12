@@ -9,7 +9,7 @@ import pandas as pd
 import yaml
 
 
-def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
+def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel_x_min=0.0, cmd_vel_x_max=2.0):
     """
     Load data from CSV files and concatenate into single numpy arrays.
     
@@ -101,11 +101,11 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15):
                 # print(f"  Skipping run {run_idx} (only {len(df_run)} sample)")
                 continue
             
-            # Skip runs with cmd_vel_x outside the range [1.5, 1.8] m/s
+            # Skip runs with cmd_vel_x outside the configured range
             if 'cmd_vel_x' in df_run.columns:
                 max_cmd_vel = df_run['cmd_vel_x'].max()
-                if max_cmd_vel < 0 or max_cmd_vel > 0.35:
-                    # print(f"  Skipping run {run_idx} (max cmd_vel_x={max_cmd_vel:.2f} not in [0, 0.65])")
+                if max_cmd_vel < cmd_vel_x_min or max_cmd_vel > cmd_vel_x_max:
+                    # print(f"  Skipping run {run_idx} (max cmd_vel_x={max_cmd_vel:.2f} not in [{cmd_vel_x_min}, {cmd_vel_x_max}])")
                     continue
             
             # Extract IMU data in body frame
@@ -268,8 +268,9 @@ def main():
     print(f"  Train ratio: {config['train_ratio']}")
     print(f"  Val ratio: {config['val_ratio']}")
     
-    csv2numpy_split(config['csv_folder'], config['save_path'], 
-                    config['train_ratio'], config['val_ratio'])
+    csv2numpy_split(config['csv_folder'], config['save_path'],
+                    config['train_ratio'], config['val_ratio'],
+                    config.get('cmd_vel_x_min', 0.0), config.get('cmd_vel_x_max', 2.0))
 
 
 if __name__ == '__main__':

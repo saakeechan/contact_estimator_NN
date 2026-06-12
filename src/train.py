@@ -237,6 +237,10 @@ def train(model, train_dataloader, val_dataloader, config):
         temporal_weights = 1.0  # Uniform weighting
     
     for epoch in range(config['num_epoch']):
+        if device.type == 'cuda':
+            allocated = torch.cuda.memory_allocated(device) / 1024**2
+            reserved  = torch.cuda.memory_reserved(device)  / 1024**2
+            print(f"[GPU] Epoch {epoch+1}: {allocated:.0f} MB allocated / {reserved:.0f} MB reserved")
         running_loss = 0.0  # For periodic printing
         loss_sum = 0.0  # For epoch average
         contact_loss_sum = 0.0
@@ -508,6 +512,9 @@ def main():
    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print('Using ', device)
+    if device.type == 'cuda':
+        print(f"  GPU: {torch.cuda.get_device_name(0)}")
+        print(f"  VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
 
 
     parser = argparse.ArgumentParser(description='Train network')
@@ -580,30 +587,36 @@ def main():
     # Compute global normalization statistics from TRAINING WINDOWS only
     # Extract actual data from training windows to compute unbiased statistics
     # NOTE: train_indices are window indices, not raw data indices
+    # Compute stats on CPU (quantile is faster/more stable on CPU) then move to GPU
+    print(f"Computing normalization statistics from {len(train_indices)} training windows...")
     train_windows_data = []
     for window_idx in train_indices:
-        # Get the actual window data (shape: window_size x 57)
-        window = all_dataset[window_idx]['data']  # Use __getitem__ to get proper windowed data
-        train_windows_data.append(window)  # Keep on same device as dataset
+        # Get the actual window data (shape: window_size x num_features), move to CPU for stats
+        window = all_dataset[window_idx]['data'].cpu()
+        train_windows_data.append(window)
     
     # Stack all training windows and flatten to get all training samples
     # Shape: (num_train_windows * window_size, num_features)
-    train_data_flat = torch.cat(train_windows_data, dim=0)
+    train_data_flat = torch.cat(train_windows_data, dim=0)  # CPU tensor
     
     # Compute 1st and 99th percentiles for each feature to clip outliers
-    percentile_1 = torch.quantile(train_data_flat, 0.01, dim=0, keepdim=True)  # (1, num_features)
-    percentile_99 = torch.quantile(train_data_flat, 0.99, dim=0, keepdim=True)  # (1, num_features)
+    percentile_1 = torch.quantile(train_data_flat, 0.01, dim=0, keepdim=True)  # (1, num_features) CPU
+    percentile_99 = torch.quantile(train_data_flat, 0.99, dim=0, keepdim=True)  # (1, num_features) CPU
     
     # Clip training data to percentile bounds
     train_data_clipped = torch.clamp(train_data_flat, min=percentile_1, max=percentile_99)
     
-    # Compute mean and std per feature from clipped data - LEFT LEG ONLY
-    # Layout: q(6) + qd(6) + p(3) + v(3) + tau_est(6) + tau_mse(1)
+    # Compute mean and std per feature from clipped data
     global_mean = train_data_clipped.mean(dim=0, keepdim=True).unsqueeze(0)  # Shape: (1, 1, num_features)
     global_std = train_data_clipped.std(dim=0, keepdim=True).unsqueeze(0)    # Shape: (1, 1, num_features)
     
     # Handle features with zero std (constant values) to avoid division by zero
     global_std = torch.where(global_std == 0, torch.ones_like(global_std), global_std)
+    
+    # Move normalization stats to GPU so they stay on device inside the model
+    global_mean = global_mean.to(device)
+    global_std = global_std.to(device)
+    print(f"Normalization stats computed and moved to {device}")
 
     
     # Create dataloaders

@@ -1,9 +1,11 @@
 # CSV data processing params
-csv_folder: "/home/saakee/Research/deep-contact-estimator/Data/CSVFiles/"
+csv_folder: "Data/CSVFiles/"
+cmd_vel_x_min: 0.0   # Skip runs where max cmd_vel_x is below this value
+cmd_vel_x_max: 3.0   # Skip runs where max cmd_vel_x is above this value
 # Path to the data folder. Data should be separated into train.npy, train_label.npy, val.npy, val_label.npy.
-data_folder: "/home/saakee/Research/deep-contact-estimator/Data/NumpyFiles/"
+data_folder: "Data/NumpyFiles/"
 # Test-specific params
-model_load_path: "/home/saakee/Research/deep-contact-estimator/results/bipedal_contact_best_val_velocity.pt"
+model_load_path: "results/bipedal_contact_best_val_velocity.pt"
 
 print_every: 1000
 
@@ -12,8 +14,8 @@ print_every: 1000
 window_size: 24 # Number of consecutive samples to stack as input (temporal context)
 shuffle: True
 random_seed: 42  # For reproducible train/val/test splits
-train_ratio: 0.9
-val_ratio: 0.1
+train_ratio: 0.7
+val_ratio: 0.3
 
 # Network params
 batch_size: 60  # Used for both training and testing
