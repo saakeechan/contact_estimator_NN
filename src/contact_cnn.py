@@ -344,15 +344,15 @@ class contact_cnn(nn.Module):
             nn.ReLU(),
         )
 
-        # self.conv4 = nn.Sequential(
-        #     CausalConv1d(128, 128, kernel_size=3, dilation=1),
-        #     nn.ReLU(),
-        # )
+        self.conv4 = nn.Sequential(
+            CausalConv1d(128, 128, kernel_size=3, dilation=1),
+            nn.ReLU(),
+        )
 
-        # self.conv5 = nn.Sequential(
-        #     CausalConv1d(128, 128, kernel_size=3, dilation=1),
-        #     nn.ReLU(),
-        # )
+        self.conv5 = nn.Sequential(
+            CausalConv1d(128, 128, kernel_size=3, dilation=1),
+            nn.ReLU(),
+        )
         
         # Velocity prediction head
         self.velocity_head = nn.Sequential(
@@ -379,6 +379,8 @@ class contact_cnn(nn.Module):
         x = self.conv1(x)  # [B, 64, T]
         x = self.conv2(x)  # [B, 64, T]
         x = self.conv3(x)  # [B, 64, T]
+        x = self.conv4(x)  # [B, 64, T]
+        x = self.conv5(x)  # [B, 64, T]
         features = x  # [B, 64, T]
         
         # Velocity prediction (sequence-to-sequence)
