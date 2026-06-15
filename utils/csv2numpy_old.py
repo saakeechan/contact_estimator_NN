@@ -102,22 +102,22 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
                 continue
             
             # Skip runs with cmd_vel_x outside the configured range
-            if 'command_twist_linear_x' in df_run.columns:
-                max_cmd_vel = df_run['command_twist_linear_x'].max()
+            if 'cmd_vel_x' in df_run.columns:
+                max_cmd_vel = df_run['cmd_vel_x'].max()
                 if max_cmd_vel < cmd_vel_x_min or max_cmd_vel > cmd_vel_x_max:
                     # print(f"  Skipping run {run_idx} (max cmd_vel_x={max_cmd_vel:.2f} not in [{cmd_vel_x_min}, {cmd_vel_x_max}])")
                     continue
             
             # Extract IMU data in body frame
-            imu_acc = df_run[['lowstate_accel_x', 'lowstate_accel_y', 'lowstate_accel_z']].values
-            imu_omega = df_run[['lowstate_gyro_x', 'lowstate_gyro_y', 'lowstate_gyro_z']].values
+            imu_acc = df_run[['acc_body_x', 'acc_body_y', 'acc_body_z']].values
+            imu_omega = df_run[['gyro_body_x', 'gyro_body_y', 'gyro_body_z']].values
 
             # Extract joint positions (q) - 6 values (LEFT leg only)
-            q_cols = ['joint_' + j + '_pos' for j in joint_names]
+            q_cols = ['joint_pos_' + j for j in joint_names]
             q = df_run[q_cols].values
             
             # Extract joint velocities (qd) - 6 values (LEFT leg only)
-            qd_cols = ['joint_' + j + '_vel' for j in joint_names]
+            qd_cols = ['joint_vel_' + j for j in joint_names]
             qd = df_run[qd_cols].values
             
             # Extract foot positions from FK - LEFT leg only
@@ -131,20 +131,20 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
             v = v_left  # Keep x and z for LEFT leg only, shape: (num_samples, 2)
             
             # Extract joint torques (tau_est) - 6 values (LEFT leg only)
-            tau_cols = ['joint_' + j + '_eff' for j in joint_names]
+            tau_cols = ['joint_torque_' + j for j in joint_names]
             tau_est = df_run[tau_cols].values
 
             # joint_target_cols = ['joint_action_' + j for j in joint_names]
             # joint_target = df_run[joint_target_cols].values
 
             # Extract command velocity - 1 value
-            cmd_vel = df_run[['command_twist_linear_x']].values
+            cmd_vel = df_run[['cmd_vel_x']].values
 
             # Calculate tau_mse from tau_est for LEFT leg only
             tau_mse = np.sum(tau_est ** 2, axis=1, keepdims=True)  # All 6 left leg joints, shape: (num_samples, 1)
 
             # Concatenate features - num_features is auto-detected from shape
-            cur_data = (np.concatenate([p, v, tau_mse], axis=1))  # Shape: (num_samples, num_features)
+            cur_data = (np.concatenate([imu_acc, imu_omega, q, qd, p, v, tau_est, tau_mse, cmd_vel], axis=1))  # Shape: (num_samples, num_features)
             
             # Initialize all_data and capture num_features from actual data shape
             if num_features is None:
@@ -157,15 +157,17 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
             # Output extraction
             
             # Extract contact labels - both legs (binary: 0 or 1)
-            contacts_left = df_run[['sport_foot_force_0']].values.astype(int)   # Shape: (num_samples, 1)
+            contacts_left = df_run[['lfoot-contact']].values.astype(int)   # Shape: (num_samples, 1)
             # contacts_right = df_run[['rfoot-contact']].values.astype(int)  # Shape: (num_samples, 1)
             contacts = contacts_left  # Shape: (num_samples, 1)
             
             # Calculate foot velocity in world frame by numerical differentiation for BOTH legs
             # Left foot velocity
             # lfoot_position_world = ['lfoot_pos_x', 'lfoot_pos_y', 'lfoot_pos_z']
-            lfoot_velocity_world = ['sport_foot_speed_body_0', 'sport_foot_speed_body_1', 'sport_foot_speed_body_2']  # Using body frame speeds as proxy for world frame velocities
-            lfoot_velocity_norm = np.linalg.norm(df_run[lfoot_velocity_world].values, axis=1, keepdims=True) + 1e-8
+            lfoot_position_world = ['lfoot_pos_x', 'lfoot_pos_y']
+            lfoot_velocity_world = np.diff(df_run[lfoot_position_world].values, axis=0) / np.diff(df_run['timestamp'].values.reshape(-1, 1), axis=0)
+            lfoot_velocity_world = np.vstack((lfoot_velocity_world, lfoot_velocity_world[-1, :]))  # Keep size consistent
+            lfoot_velocity_norm = np.linalg.norm(lfoot_velocity_world, axis=1, keepdims=True) + 1e-8
         
             # Left leg velocity only
             foot_velocities = lfoot_velocity_norm  # Shape: (num_samples, 1)

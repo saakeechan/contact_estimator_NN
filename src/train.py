@@ -100,11 +100,15 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_criteri
             num_gt_contact += gt_contact.sum().item()
             num_gt_no_contact += (1 - gt_contact).sum().item()
 
+    # Safeguard against empty dataloaders (no validation windows)
+    contact_acc = (num_correct / num_data) if num_data > 0 else 0.0
+    num_batches = len(dataloader) if len(dataloader) > 0 else 1
+
     metrics = {
-        'contact_acc': num_correct / num_data,
-        'contact_loss': contact_loss_sum / len(dataloader) if contact_criterion else 0,
-        'velocity_mae': velocity_mae_sum / len(dataloader),
-        'velocity_loss': velocity_loss_sum / len(dataloader) if velocity_criterion else 0,
+        'contact_acc': contact_acc,
+        'contact_loss': contact_loss_sum / num_batches if contact_criterion else 0,
+        'velocity_mae': velocity_mae_sum / num_batches,
+        'velocity_loss': velocity_loss_sum / num_batches if velocity_criterion else 0,
         'num_pred_contact': num_pred_contact,
         'num_gt_contact': num_gt_contact
     }

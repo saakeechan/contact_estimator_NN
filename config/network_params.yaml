@@ -4,34 +4,34 @@ cmd_vel_x_min: 0.0   # Skip runs where max cmd_vel_x is below this value
 cmd_vel_x_max: 3.0   # Skip runs where max cmd_vel_x is above this value
 # Path to the data folder. Data should be separated into train.npy, train_label.npy, val.npy, val_label.npy.
 data_folder: "Data/NumpyFiles/"
-# Test-specific params
-model_load_path: "results/bipedal_contact_best_val_velocity.pt"
+# # Test-specific params
+# model_load_path: "results/bipedal_contact_best_val_velocity.pt"
 
 print_every: 1000
 
 # Data params
 
-window_size: 24 # Number of consecutive samples to stack as input (temporal context)
+window_size: 12 # Number of consecutive samples to stack as input (temporal context)
 shuffle: True
 random_seed: 42  # For reproducible train/val/test splits
 train_ratio: 0.7
-val_ratio: 0.3
+val_ratio: 0.15
 
 # Network params
 batch_size: 60  # Used for both training and testing
 init_lr: 0.0001
-num_epoch: 5 # Reduced for quick training with small dataset
+num_epoch: 2 # Reduced for quick training with small dataset
 
 
 
 # Multi-task Learning: Contact Classification + Velocity Regression
 # Balances contact classification loss vs. velocity regression loss
 # Total Loss = contact_weight * contact_BCE_loss + velocity_weight * velocity_Huber_loss
-contact_weight: 0.0     # Weight for contact classification loss
+contact_weight: 1.0     # Weight for contact classification loss
                         # Typical: 0.5-2.0. Start with 1.0
                         # Higher values = prioritize contact detection accuracy
                         # Lower values = prioritize velocity accuracy
-velocity_weight: 1.0    # Weight for velocity regression loss
+velocity_weight: 0.0    # Weight for velocity regression loss
                         # Typical: 0.5-2.0. Start with 1.0
                         # Higher values = prioritize velocity accuracy
                         # Lower values = prioritize contact accuracy
@@ -39,7 +39,7 @@ velocity_weight: 1.0    # Weight for velocity regression loss
 
 # -------------------------------------
                             # Dense Supervision: Compute loss on all timesteps vs last timestep only
-use_dense_supervision: True # True: compute loss on full velocity sequence (all timesteps)
+use_dense_supervision: False # True: compute loss on full velocity sequence (all timesteps)
                              # False: compute loss only on last timestep output
                              # Dense supervision helps learn temporal patterns
                              # Last-only is faster and simpler but may underfit

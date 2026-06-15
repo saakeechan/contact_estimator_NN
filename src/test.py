@@ -42,17 +42,24 @@ def compute_jaccard(bin_pred_arr, bin_gt_arr):
     jaccard = jaccard_score(bin_gt_arr.flatten(), bin_pred_arr.flatten())
     return jaccard
 
-def compute_accuracy(dataloader, model):
+def compute_accuracy(dataloader, model, device=torch.device('cpu')):
     """
-    Compute metrics for left leg velocity at last timestep.
+    Compute metrics for left leg velocity and contact classification.
     Returns:
         velocity_mae: mean absolute error for velocity (on contact samples, last timestep only)
         velocity_mse: mean squared error for velocity (on contact samples, last timestep only)
+        contact_accuracy: binary classification accuracy
+        contact_precision: precision score
+        contact_recall: recall score
+        contact_f1: F1 score
     """
     num_data = 0
     velocity_mae_sum = 0.0
     velocity_mse_sum = 0.0
     num_contact_samples = 0
+    
+    all_contact_preds = []
+    all_contact_gt = []
     
     with torch.no_grad():
         for sample in tqdm(dataloader):
@@ -64,6 +71,11 @@ def compute_accuracy(dataloader, model):
             velocity_seq, velocity_output, contact_output = model(input_data)  # velocity_seq: (batch, 1, window_size), velocity_output: (batch, 1), contact: (batch, 1)
 
             num_data += input_data.size(0)
+            
+            # Collect contact predictions for classification metrics
+            contact_pred_binary = (contact_output > 0.5).long()  # Threshold at 0.5
+            all_contact_preds.append(contact_pred_binary.cpu())
+            all_contact_gt.append(gt_contact.cpu())
             
             # Velocity metrics (only on contact samples, last timestep only)
             contact_mask = (gt_contact == 1)  # (batch, 1)
@@ -81,7 +93,16 @@ def compute_accuracy(dataloader, model):
     velocity_mae = velocity_mae_sum / num_contact_samples if num_contact_samples > 0 else 0
     velocity_mse = velocity_mse_sum / num_contact_samples if num_contact_samples > 0 else 0
     
-    return velocity_mae, velocity_mse
+    # Compute contact classification metrics
+    all_contact_preds = torch.cat(all_contact_preds, dim=0).numpy().flatten()
+    all_contact_gt = torch.cat(all_contact_gt, dim=0).numpy().flatten()
+    
+    contact_accuracy = np.mean(all_contact_preds == all_contact_gt)
+    contact_precision = precision_score(all_contact_gt, all_contact_preds, zero_division=0)
+    contact_recall = recall_score(all_contact_gt, all_contact_preds, zero_division=0)
+    contact_f1 = 2 * (contact_precision * contact_recall) / (contact_precision + contact_recall) if (contact_precision + contact_recall) > 0 else 0
+    
+    return velocity_mae, velocity_mse, contact_accuracy, contact_precision, contact_recall, contact_f1
 
 def decimal2binary(x):
     mask = 2**torch.arange(2-1,-1,-1).to(x.device, x.dtype)  # 2 legs for biped
@@ -198,7 +219,26 @@ def main():
     from contact_cnn import ContactCNNWithNormalization
     model = ContactCNNWithNormalization(base_model)  # Will load stats from checkpoint
 
-    checkpoint = torch.load(config['model_load_path'])
+    # Find latest PyTorch checkpoint from logs
+    logs_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'logs')
+    latest_pt = None
+    if os.path.exists(logs_root):
+        # list run folders sorted by modified time
+        run_dirs = [os.path.join(logs_root, d) for d in os.listdir(logs_root) if os.path.isdir(os.path.join(logs_root, d))]
+        if run_dirs:
+            run_dirs.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+            for rd in run_dirs:
+                candidate = os.path.join(rd, 'model_best_val_velocity.pt')
+                if os.path.exists(candidate):
+                    latest_pt = candidate
+                    break
+
+    if latest_pt is None:
+        raise FileNotFoundError(f"No model_best_val_velocity.pt found in logs directory: {logs_root}")
+
+    # Load PyTorch checkpoint
+    print(f"Using PyTorch checkpoint from latest run: {latest_pt}")
+    checkpoint = torch.load(latest_pt, map_location=device)
     model.load_state_dict(checkpoint['model_state_dict'])
     model = model.eval().to(device)
     
@@ -218,11 +258,18 @@ def main():
         print(f"⚠️  WARNING: global_std is all ones (using fallback - normalization NOT loaded!)")
     print(f"{'='*60}\n")
 
-    velocity_mae, velocity_mse = compute_accuracy(test_dataloader, model)
+    velocity_mae, velocity_mse, contact_accuracy, contact_precision, contact_recall, contact_f1 = compute_accuracy(
+        test_dataloader, model, device=device)
 
     print("\n" + "="*60)
     print("LEFT LEG TEST RESULTS")
     print("="*60)
+    
+    print("\nContact Classification Metrics:")
+    print("  Accuracy:  %.4f" % contact_accuracy)
+    print("  Precision: %.4f" % contact_precision)
+    print("  Recall:    %.4f" % contact_recall)
+    print("  F1 Score:  %.4f" % contact_f1)
     
     print("\nVelocity Regression Metrics (on contact samples, last timestep only):")
     print("  Velocity MAE: %.6f" % velocity_mae)
@@ -232,9 +279,8 @@ def main():
     
     # Raw values for easy copy-paste
     print("\nRaw Values:")
-    print(velocity_mae)
-    print(velocity_mse)
-    print(np.sqrt(velocity_mse))
+    print(f"Contact: acc={contact_accuracy:.4f}, prec={contact_precision:.4f}, recall={contact_recall:.4f}, f1={contact_f1:.4f}")
+    print(f"Velocity: mae={velocity_mae:.6f}, mse={velocity_mse:.6f}, rmse={np.sqrt(velocity_mse):.6f}")
 
 if __name__ == '__main__':
     main()
