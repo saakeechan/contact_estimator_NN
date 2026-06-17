@@ -40,7 +40,7 @@ CMD_VEL_RANGE = [0.0, 100]
 # Use "all" to process all CSV files in the directory
 # Or specify individual filenames
 CSV_FILES_TO_ANALYZE = [
-    "all"
+    "robotstate_0_env1.csv",
     # Add more CSV filenames here as needed
 ]
 
@@ -172,7 +172,7 @@ def analyze_foot_velocities(csv_dir="Data/CSVFiles", output_dir=None):
                 vel_z = np.append(vel_z, vel_z[-1])
                 
                 # Compute velocity magnitude (norm)
-                vel_magnitude = np.sqrt(vel_x)
+                vel_magnitude = np.sqrt(vel_x**2 + vel_y**2 + vel_z**2)
                 
                 # Create plot
                 fig, axes = plt.subplots(2, 1, figsize=(12, 8))

@@ -14,13 +14,13 @@ print_every: 1000
 window_size: 24 # Number of consecutive samples to stack as input (temporal context)
 shuffle: True
 random_seed: 42  # For reproducible train/val/test splits
-train_ratio: 0.7
-val_ratio: 0.3
+train_ratio: 0.8
+val_ratio: 0.1
 
 # Network params
 batch_size: 60  # Used for both training and testing
 init_lr: 0.0001
-num_epoch: 3 # Reduced for quick training with small dataset
+num_epoch: 5 # Reduced for quick training with small dataset
 
 
 
@@ -31,7 +31,7 @@ contact_weight: 1.0     # Weight for contact classification loss
                         # Typical: 0.5-2.0. Start with 1.0
                         # Higher values = prioritize contact detection accuracy
                         # Lower values = prioritize velocity accuracy
-velocity_weight: 0.0    # Weight for velocity regression loss
+velocity_weight: 1.0    # Weight for velocity regression loss
                         # Typical: 0.5-2.0. Start with 1.0
                         # Higher values = prioritize velocity accuracy
                         # Lower values = prioritize contact accuracy
@@ -78,7 +78,7 @@ Huber_delta: 0.5      # Delta parameter for Huber loss in velocity regression
 
 # Model Architecture Selection
 # Choose which neural network architecture to use
-model_architecture: "vanilla_cnn"  # Options: "attention_tcn", "tcn", "vanilla_cnn"
+model_architecture: "tcn"  # Options: "attention_tcn", "tcn", "vanilla_cnn"
                                    # - attention_tcn: Transformer + TCN hybrid with multi-head attention (most expressive, slowest)
                                    # - tcn: Pure Temporal Convolutional Network with residual blocks (good balance)
                                    # - vanilla_cnn: Simple dilated CNN (fastest, fewest parameters)

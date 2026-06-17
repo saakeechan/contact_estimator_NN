@@ -9,7 +9,7 @@ docker start contact_estimator_NN && docker exec -it contact_estimator_NN /bin/b
 ### 2. Process CSV Data
 Convert CSV files to numpy format with run boundaries:
 ```bash
-python3 utils/csv2numpy.py --config_name config/network_params.yaml
+python3 utils/csv2numpyV1.py --config_name config/network_params.yaml
 ```
 
 ### 3. Train Model
