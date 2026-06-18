@@ -32,13 +32,12 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
     - val_ratio: not used (kept for backward compatibility)
     
     Output:
-    - all_data.npy: all data concatenated (num_features auto-detected from shape) - LEFT LEG ONLY
-      Layout: q[3,4](2) + p[x,z](2) + v[x,z](2) + tau_est[1-5](5) + tau_mse(1) = 12 features
+    - all_data.npy: all data concatenated (num_features auto-detected from shape) - LEFT + RIGHT LEGS
       NOTE: All features are RAW - no normalization by cmd_vel or any other feature
-    - all_labels.npy: LEFT leg contact labels only (shape: N x 1, binary 0/1)
+    - all_labels.npy: left/right contact labels (shape: N x 2, binary 0/1)
     - all_data_boundaries.npy: indices marking end of each run (CRITICAL for preventing data leakage)
     - all_data_metadata.npy: metadata dict with num_features (SOURCE OF TRUTH for network architecture)
-    - all_foot_velocities.npy: foot velocity magnitudes for LEFT leg only (shape: N x 1)
+    - all_foot_velocities.npy: left/right foot velocity magnitudes (shape: N x 2)
     """
     
     # Ensure save directory exists
@@ -52,8 +51,8 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
     
     # num_features will be determined automatically from the actual data shape
     all_data = None  # Will be initialized after first sample
-    all_labels = np.zeros((0, 1))  # LEFT leg only
-    all_foot_velocities = np.zeros((0, 1))  # World frame foot velocities: LEFT leg only - magnitudes
+    all_labels = np.zeros((0, 2))  # Left/right contact labels
+    all_foot_velocities = np.zeros((0, 2))  # World frame left/right foot velocity magnitudes
     num_features = None  # Will be set from cur_data.shape[1] after first run
     
     # Track boundaries between different runs to prevent window bleeding
@@ -61,11 +60,16 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
     # This prevents data leakage from overlapping sliding windows
     all_boundaries = []
     
-    # Define column names for data extraction - LEFT LEG ONLY
-    joint_names = [
+    # Define column names for data extraction.
+    left_joint_names = [
         'left_hip_pitch_joint', 'left_hip_roll_joint', 'left_hip_yaw_joint',
         'left_knee_joint', 'left_ankle_pitch_joint', 'left_ankle_roll_joint',
     ]
+    right_joint_names = [
+        'right_hip_pitch_joint', 'right_hip_roll_joint', 'right_hip_yaw_joint',
+        'right_knee_joint', 'right_ankle_pitch_joint', 'right_ankle_roll_joint',
+    ]
+    joint_names = left_joint_names + right_joint_names
     
     # Process all CSV files in the folder
     for data_name in sorted(glob.glob(data_pth + '*.csv')):
@@ -112,25 +116,25 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
             imu_acc = df_run[['lowstate_accel_x', 'lowstate_accel_y', 'lowstate_accel_z']].values
             imu_omega = df_run[['lowstate_gyro_x', 'lowstate_gyro_y', 'lowstate_gyro_z']].values
 
-            # Extract joint positions (q) - 6 values (LEFT leg only)
+            # Extract joint positions (q) - 12 values (left + right legs)
             q_cols = ['joint_' + j + '_pos' for j in joint_names]
             q = df_run[q_cols].values
             
-            # Extract joint velocities (qd) - 6 values (LEFT leg only)
+            # Extract joint velocities (qd) - 12 values (left + right legs)
             qd_cols = ['joint_' + j + '_vel' for j in joint_names]
             qd = df_run[qd_cols].values
             
-            # Extract foot positions from FK - LEFT leg only
+            # Extract foot positions from FK - left + right legs
             p_left = df_run[['fk_left_foot_pos_x', 'fk_left_foot_pos_y', 'fk_left_foot_pos_z']].values
-            # p_right = df_run[['fk_right_foot_pos_x', 'fk_right_foot_pos_y', 'fk_right_foot_pos_z']].values
-            p = p_left  # Keep x and z for LEFT leg only, shape: (num_samples, 2)
+            p_right = df_run[['fk_right_foot_pos_x', 'fk_right_foot_pos_y', 'fk_right_foot_pos_z']].values
+            p = np.concatenate([p_left, p_right], axis=1)
             
-            # Extract foot velocities from FK - LEFT leg only
+            # Extract foot velocities from FK - left + right legs
             v_left = df_run[['fk_left_foot_vel_x', 'fk_left_foot_vel_y', 'fk_left_foot_vel_z']].values
-            # v_right = df_run[['fk_right_foot_vel_x', 'fk_right_foot_vel_y', 'fk_right_foot_vel_z']].values
-            v = v_left  # Keep x and z for LEFT leg only, shape: (num_samples, 2)
+            v_right = df_run[['fk_right_foot_vel_x', 'fk_right_foot_vel_y', 'fk_right_foot_vel_z']].values
+            v = np.concatenate([v_left, v_right], axis=1)
             
-            # Extract joint torques (tau_est) - 6 values (LEFT leg only)
+            # Extract joint torques (tau_est) - 12 values (left + right legs)
             tau_cols = ['joint_' + j + '_eff' for j in joint_names]
             tau_est = df_run[tau_cols].values
 
@@ -140,8 +144,12 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
             # Extract command velocity - 1 value
             cmd_vel = df_run[['command_twist_linear_x']].values
 
-            # Calculate tau_mse from tau_est for LEFT leg only
-            tau_mse = np.sum(tau_est ** 2, axis=1, keepdims=True)  # All 6 left leg joints, shape: (num_samples, 1)
+            # Calculate tau_mse per leg.
+            tau_est_left = tau_est[:, :len(left_joint_names)]
+            tau_est_right = tau_est[:, len(left_joint_names):]
+            tau_mse_left = np.sum(tau_est_left ** 2, axis=1, keepdims=True)
+            tau_mse_right = np.sum(tau_est_right ** 2, axis=1, keepdims=True)
+            tau_mse = np.concatenate([tau_mse_left, tau_mse_right], axis=1)
 
             # Concatenate features - num_features is auto-detected from shape
             cur_data = (np.concatenate([imu_acc, imu_omega, q, qd, p, v, tau_est, tau_mse], axis=1))  # Shape: (num_samples, num_features)
@@ -156,28 +164,28 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
 
             # Output extraction
             
-            # Extract contact labels - both legs (binary: 0 or 1)
+            # Extract contact labels - both legs (binary: 0 or 1), ordered [left, right]
             contacts_left = df_run[['sport_foot_force_0']].values.astype(int)   # Shape: (num_samples, 1)
-            # contacts_right = df_run[['rfoot-contact']].values.astype(int)  # Shape: (num_samples, 1)
-            contacts = contacts_left  # Shape: (num_samples, 1)
+            contacts_right = df_run[['sport_foot_force_1']].values.astype(int)  # Shape: (num_samples, 1)
+            contacts = np.concatenate([contacts_left, contacts_right], axis=1)  # Shape: (num_samples, 2)
             
-            # Calculate foot velocity in world frame by numerical differentiation for BOTH legs
-            # Left foot velocity
-            # lfoot_position_world = ['lfoot_pos_x', 'lfoot_pos_y', 'lfoot_pos_z']
+            # Calculate foot velocity magnitudes from body-frame foot speeds, ordered [left, right].
             lfoot_velocity_world = ['sport_foot_speed_body_0', 'sport_foot_speed_body_1', 'sport_foot_speed_body_2']  # Using body frame speeds as proxy for world frame velocities
             lfoot_velocity_norm = np.linalg.norm(df_run[lfoot_velocity_world].values, axis=1, keepdims=True) + 1e-8
+
+            rfoot_velocity_world = ['sport_foot_speed_body_3', 'sport_foot_speed_body_4', 'sport_foot_speed_body_5']
+            rfoot_velocity_norm = np.linalg.norm(df_run[rfoot_velocity_world].values, axis=1, keepdims=True) + 1e-8
         
-            # Left leg velocity only
-            foot_velocities = lfoot_velocity_norm  # Shape: (num_samples, 1)
+            foot_velocities = np.concatenate([lfoot_velocity_norm, rfoot_velocity_norm], axis=1)  # Shape: (num_samples, 2)
 
 
-            # LEFT leg contact labels (already 0 or 1, no conversion needed)
-            cur_label = contacts  # Shape: (num_samples, 1) - LEFT leg only
+            # Contact labels are already 0 or 1.
+            cur_label = contacts  # Shape: (num_samples, 2)
             
             # Append to full dataset
             all_data = np.vstack((all_data, cur_data))
             all_labels = np.vstack((all_labels, cur_label))
-            all_foot_velocities = np.vstack((all_foot_velocities, foot_velocities))  # LEFT leg velocities
+            all_foot_velocities = np.vstack((all_foot_velocities, foot_velocities))
             
             # Record boundary index (end of this run in the full dataset)
             all_boundaries.append(all_data.shape[0])
@@ -205,7 +213,7 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
         print(f"\n{'='*60}")
         print(f"⚠️  WARNING: Only 1 run boundary detected!")
     
-    # Labels are already 0/1 for left foot (no flattening needed since they're already 1D per sample)
+    # Labels are already 0/1 for each foot.
     
     print("\nSaving data...")
     
@@ -224,8 +232,8 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
     np.save(save_pth + "all_data_metadata.npy", metadata)
     
     print(f"Saved {all_data.shape[0]} samples to all_data.npy")
-    print(f"Saved {all_labels.shape[0]} contact labels (left + right leg) to all_labels.npy")
-    print(f"Saved {all_foot_velocities.shape[0]} foot velocity norms (LEFT leg only) to all_foot_velocities.npy")
+    print(f"Saved {all_labels.shape[0]} contact labels (left + right legs) to all_labels.npy")
+    print(f"Saved {all_foot_velocities.shape[0]} foot velocity norms (left + right legs) to all_foot_velocities.npy")
     print(f"Saved {len(all_boundaries)} run boundaries to all_data_boundaries.npy")
     print(f"Saved metadata (num_features={num_features}) to all_data_metadata.npy")
     print("Done!")

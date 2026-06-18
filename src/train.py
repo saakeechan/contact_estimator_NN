@@ -27,7 +27,7 @@ warnings.filterwarnings(
 
 def compute_accuracy(dataloader, model, contact_criterion=None, velocity_criterion=None):
     """
-    Compute accuracy and losses for left leg contact and velocity at last timestep.
+    Compute contact and velocity metrics for left/right legs at the last timestep.
     
     Args:
         dataloader: DataLoader to evaluate
@@ -42,7 +42,8 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_criteri
     num_data = 0
     contact_loss_sum = 0
     velocity_loss_sum = 0
-    velocity_mae_sum = 0
+    velocity_abs_error_sum = 0.0
+    velocity_contact_count = 0.0
     
     # Track prediction distribution to detect bias
     num_pred_contact = 0
@@ -53,11 +54,11 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_criteri
     with torch.no_grad():
         for sample in tqdm(dataloader):
             input_data = sample['data']
-            gt_contact = sample['label']  # Shape: (batch, 1) - binary labels for left leg (last timestep)
-            gt_velocity_seq = sample['velocity']  # Shape: (batch, window_size, 1) - full velocity sequence from dataset
-            gt_velocity = gt_velocity_seq[:, -1, :]  # Extract last timestep: (batch, 1)
+            gt_contact = sample['label']  # [B, 2] - left/right binary labels at last timestep
+            gt_velocity_seq = sample['velocity']  # [B, T, 2] - full left/right velocity sequence
+            gt_velocity = gt_velocity_seq[:, -1, :]  # [B, 2] - last timestep
 
-            velocity_seq, velocity_output, contact_output = model(input_data)  # contact: (batch, 1), velocity: (batch, 1)
+            velocity_seq, velocity_output, contact_output = model(input_data)  # velocity_seq: [B, 2, T], velocity/contact: [B, 2]
             contact_prediction = (contact_output > 0).float()  # Binary predictions
 
             # Compute contact loss if criterion provided
@@ -66,13 +67,13 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_criteri
                 contact_loss_sum += contact_loss.item()
             
             # Velocity loss masked to contact samples only
-            contact_mask = (gt_contact == 1).float()  # [B, 1]
+            contact_mask = (gt_contact == 1).float()  # [B, 2]
             
             if velocity_criterion is not None:
                 # Velocity loss on last timestep only, masked to contact samples only
                 velocity_loss_each = velocity_criterion(
                     velocity_output, gt_velocity
-                )  # [B, 1], requires reduction="none"
+                )  # [B, 2], requires reduction="none"
                 
                 velocity_loss_masked = (
                     velocity_loss_each * contact_mask
@@ -82,17 +83,13 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_criteri
             
             # MAE for velocity (only on contact samples, last timestep)
             if contact_mask.sum() > 0:
-                velocity_errors = torch.abs(velocity_output - gt_velocity)  # [B, 1]
-                
-                velocity_mae = (
-                    velocity_errors * contact_mask
-                ).sum() / (contact_mask.sum() + 1e-8)
-                
-                velocity_mae_sum += velocity_mae.item()
+                velocity_errors = torch.abs(velocity_output - gt_velocity)  # [B, 2]
+                velocity_abs_error_sum += (velocity_errors * contact_mask).sum().item()
+                velocity_contact_count += contact_mask.sum().item()
 
             # Contact accuracy
             num_correct += (contact_prediction == gt_contact).sum().item()
-            num_data += input_data.size(0)
+            num_data += gt_contact.numel()
             
             # Track prediction distribution
             num_pred_contact += contact_prediction.sum().item()
@@ -107,7 +104,7 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_criteri
     metrics = {
         'contact_acc': contact_acc,
         'contact_loss': contact_loss_sum / num_batches if contact_criterion else 0,
-        'velocity_mae': velocity_mae_sum / num_batches,
+        'velocity_mae': velocity_abs_error_sum / (velocity_contact_count + 1e-8),
         'velocity_loss': velocity_loss_sum / num_batches if velocity_criterion else 0,
         'num_pred_contact': num_pred_contact,
         'num_gt_contact': num_gt_contact
@@ -120,9 +117,9 @@ def save_onnx_model(model, checkpoint_path, window_size):
     """
     Save ONNX version of the model for C++ deployment.
     The model has three outputs: 
-        - velocity_seq: (batch, 1, window_size) - velocity predictions for all timesteps (for training)
-        - velocity_output: (batch, 1) - velocity prediction at last timestep only (for inference)
-        - contact_output: (batch, 1) - contact logits at last timestep
+        - velocity_seq: (batch, 2, window_size) - left/right velocity predictions for all timesteps
+        - velocity_output: (batch, 2) - left/right velocity prediction at last timestep only
+        - contact_output: (batch, 2) - left/right contact logits at last timestep
     """
     try:
         import warnings
@@ -133,7 +130,7 @@ def save_onnx_model(model, checkpoint_path, window_size):
         device = next(model.parameters()).device
         model.eval()
         
-        # Create example input (RAW features from csv2numpy.py for LEFT leg only)
+        # Create example input with raw features from csv2numpy.py.
         # num_features is read from model's base_model attribute
         num_features = model.base_model.num_features
         example_input = torch.randn(1, window_size, num_features).to(device)
@@ -150,16 +147,17 @@ def save_onnx_model(model, checkpoint_path, window_size):
                 export_params=True,
                 opset_version=18,
                 input_names=['input'],
-                output_names=['velocity_seq', 'velocity_output'],  # velocity_seq: (batch,1,T), velocity_output: (batch,1)
+                output_names=['velocity_seq', 'velocity_output', 'contact_output'],
                 dynamic_axes={
                     'input': {0: 'batch_size'},
                     'velocity_seq': {0: 'batch_size', 2: 'window_size'},
-                    'velocity_output': {0: 'batch_size'}
+                    'velocity_output': {0: 'batch_size'},
+                    'contact_output': {0: 'batch_size'}
                 },
                 verbose=False
             )
         
-        print(f"  ✓ ONNX model saved (velocity sequence + last timestep): {onnx_path}")
+        print(f"  ✓ ONNX model saved (left/right velocity + contact outputs): {onnx_path}")
         
     except Exception as e:
         print(f"  ⚠ Warning: Failed to save ONNX model: {e}")
@@ -254,30 +252,30 @@ def train(model, train_dataloader, val_dataloader, config):
         model.train()
         for i, samples in tqdm(enumerate(train_dataloader, start=0)):
             input_data = samples['data'] 
-            contact_label = samples['label']  # Shape: (batch, 1) - left leg only (last timestep) - for reporting
-            contact_label_seq = samples['label_seq']  # Shape: (batch, window_size, 1) - full contact sequence for masking
-            velocity_label_seq = samples['velocity']  # Shape: (batch, window_size, 1) - full velocity sequence from dataset
-            velocity_label = velocity_label_seq[:, -1, :]  # Extract last timestep: (batch, 1)
+            contact_label = samples['label']  # [B, 2] - left/right contact at last timestep
+            contact_label_seq = samples['label_seq']  # [B, T, 2] - full left/right contact sequence
+            velocity_label_seq = samples['velocity']  # [B, T, 2] - full left/right velocity sequence
+            velocity_label = velocity_label_seq[:, -1, :]  # [B, 2] - last timestep
         
 
             optimizer.zero_grad()
             
-            velocity_seq, velocity_output, contact_output = model(input_data)  # velocity_seq: (batch, 1, window_size), velocity_output: (batch, 1), contact: (batch, 1)
+            velocity_seq, velocity_output, contact_output = model(input_data)  # velocity_seq: [B, 2, T], velocity/contact: [B, 2]
             
             # Contact loss (binary classification at last timestep)
             contact_loss = contact_criterion(contact_output, contact_label)
             
             if use_dense_supervision:
                 # DENSE SUPERVISION: Compute velocity loss on FULL SEQUENCE masked to contact only
-                velocity_seq_permuted = velocity_seq.permute(0, 2, 1)  # [B, T, 1]
+                velocity_seq_permuted = velocity_seq.permute(0, 2, 1)  # [B, T, 2]
                 
                 velocity_loss_elementwise = velocity_criterion(
                     velocity_seq_permuted,
                     velocity_label_seq
-                )  # [B, T, 1]
+                )  # [B, T, 2]
                 
                 # Use full contact sequence for masking (dense supervision only at contact timesteps)
-                contact_mask_seq = (contact_label_seq == 1).float()  # [B, T, 1]
+                contact_mask_seq = (contact_label_seq == 1).float()  # [B, T, 2]
                 
                 # Apply temporal weighting (pre-computed before training loop)
                 velocity_loss = (
@@ -289,8 +287,8 @@ def train(model, train_dataloader, val_dataloader, config):
                 derivative_loss = torch.tensor(0.0, device=velocity_output.device)
                 if derivative_weight > 0:
                     # Compute derivatives: Δy_t = y_t - y_{t-1}
-                    pred_derivative = velocity_seq_permuted[:, 1:, :] - velocity_seq_permuted[:, :-1, :]  # [B, T-1, 1]
-                    gt_derivative = velocity_label_seq[:, 1:, :] - velocity_label_seq[:, :-1, :]  # [B, T-1, 1]
+                    pred_derivative = velocity_seq_permuted[:, 1:, :] - velocity_seq_permuted[:, :-1, :]  # [B, T-1, 2]
+                    gt_derivative = velocity_label_seq[:, 1:, :] - velocity_label_seq[:, :-1, :]  # [B, T-1, 2]
                     
                     # Compute derivative loss using Huber loss (robust to outliers)
                     derivative_loss_elementwise = F.smooth_l1_loss(
@@ -298,11 +296,11 @@ def train(model, train_dataloader, val_dataloader, config):
                         gt_derivative,
                         reduction='none',
                         beta=0.05
-                    )  # [B, T-1, 1]
+                    )  # [B, T-1, 2]
                     
                     # Mask to contact timesteps - both t and t+1 must be in contact
                     # (derivative spans from timestep t to t+1)
-                    contact_mask_derivative = contact_mask_seq[:, 1:, :] * contact_mask_seq[:, :-1, :]  # [B, T-1, 1]
+                    contact_mask_derivative = contact_mask_seq[:, 1:, :] * contact_mask_seq[:, :-1, :]  # [B, T-1, 2]
                     
                     derivative_loss = (
                         derivative_loss_elementwise * contact_mask_derivative
@@ -312,10 +310,10 @@ def train(model, train_dataloader, val_dataloader, config):
                 velocity_loss_elementwise = velocity_criterion(
                     velocity_output,
                     velocity_label
-                )  # [B, 1]
+                )  # [B, 2]
                 
                 # Mask to contact samples only (last timestep)
-                contact_mask = (contact_label == 1).float()  # [B, 1]
+                contact_mask = (contact_label == 1).float()  # [B, 2]
                 
                 velocity_loss = (
                     velocity_loss_elementwise * contact_mask
@@ -544,6 +542,16 @@ def main():
     all_dataset = contact_dataset(data_path=config['data_folder']+"all_data.npy",\
                                   label_path=config['data_folder']+"all_labels.npy",\
                                   window_size=config['window_size'],device=device)
+    if all_dataset.label.ndim != 2 or all_dataset.label.shape[1] != 2:
+        raise ValueError(
+            "Expected all_labels.npy to have shape (N, 2) ordered [left, right]. "
+            "Regenerate the numpy dataset with the updated csv2numpy script."
+        )
+    if all_dataset.foot_velocity.ndim != 2 or all_dataset.foot_velocity.shape[1] != 2:
+        raise ValueError(
+            "Expected all_foot_velocities.npy to have shape (N, 2) ordered [left, right]. "
+            "Regenerate the numpy dataset with the updated csv2numpy script."
+        )
     
     # Split by RUNS (not windows) to prevent data leakage from overlapping sliding windows
     # Get all unique run IDs
