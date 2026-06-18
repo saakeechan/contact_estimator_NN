@@ -20,7 +20,7 @@ val_ratio: 0.1
 # Network params
 batch_size: 60  # Used for both training and testing
 init_lr: 0.0001
-num_epoch: 5 # Reduced for quick training with small dataset
+num_epoch: 3 # Reduced for quick training with small dataset
 
 
 
