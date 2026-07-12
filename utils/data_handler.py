@@ -16,8 +16,8 @@ class contact_dataset(Dataset):
         """
         At initialization we load .npy files for data, labels, and foot velocities.
         self.data: a 2D array of all data points. rows are time axis, columns are features. (num_data, num_features)
-        self.label: LEFT leg contact state (0 or 1). Shape: (num_data, 1) - LEFT leg only
-        self.foot_velocity: LEFT leg signed foot velocity. Shape: (num_data, 3) - LEFT leg only
+        self.label: left/right contact states. Shape: (num_data, 2)
+        self.foot_velocity: left/right signed foot velocities. Shape: (num_data, 2, 3)
         """
         data = np.load(data_path)
         label = np.load(label_path)
@@ -26,19 +26,29 @@ class contact_dataset(Dataset):
         self.window_size = window_size
         self.data = torch.from_numpy(data).type('torch.FloatTensor').to(device)
         
-        # Load left-leg signed foot velocities (vx, vy, vz).
+        # Load signed [left, right, vx/vy/vz] foot velocities.
         velocity_path = data_path.replace('all_data.npy', 'all_foot_velocities.npy')
         if os.path.exists(velocity_path):
             foot_velocity = np.load(velocity_path)
             print(f"Loaded foot velocities from {velocity_path}")
         else:
             print(f"Warning: No foot velocity file found at {velocity_path}. Creating zero velocities.")
-            foot_velocity = np.zeros((len(data), 3), dtype=np.float32)  # LEFT leg only
+            foot_velocity = np.zeros((len(data), 2, 3), dtype=np.float32)
+
+        if label.shape != (len(data), 2):
+            raise ValueError(
+                f"Expected labels with shape ({len(data)}, 2) ordered [left, right], got {label.shape}."
+            )
+        if foot_velocity.shape != (len(data), 2, 3):
+            raise ValueError(
+                "Expected foot velocities with shape (N, 2, 3) ordered [left, right, vx/vy/vz]. "
+                f"Got {foot_velocity.shape}. Regenerate the numpy dataset."
+            )
         
         self.foot_velocity = torch.from_numpy(foot_velocity).type('torch.FloatTensor').to(device)
         
-        # Labels are LEFT leg contact (0 or 1) - Shape: (num_data, 1) - LEFT leg only
-        label_binary = label.astype(np.float32)  # Shape: (num_data, 1)
+        # Labels are [left, right] contacts with shape (num_data, 2).
+        label_binary = label.astype(np.float32)
         self.label = torch.from_numpy(label_binary).type('torch.FloatTensor').to(device)
         
         # Load run boundaries to prevent window bleeding across different runs
@@ -122,9 +132,9 @@ class contact_dataset(Dataset):
         
         Output: 
         - data: (batch_size, window_size, num_features)
-        - label: (batch_size, 1) - binary contact for left leg (last timestep only)
-        - label_seq: (batch_size, window_size, 1) - full contact sequence for dense supervision
-        - velocity: (batch_size, window_size, 3) - full signed velocity sequence
+        - label: (batch_size, 2) - [left, right] contact at the last timestep
+        - label_seq: (batch_size, window_size, 2) - full contact sequence
+        - velocity: (batch_size, window_size, 2, 3) - signed [left, right, vx/vy/vz] sequence
         """
         if torch.is_tensor(idx):
             idx = idx.tolist()
@@ -133,17 +143,16 @@ class contact_dataset(Dataset):
         real_idx = self.valid_indices[idx]
         
         # Return raw unnormalized data (normalization done inside the model)
-        # Feature layout: LEFT leg features from csv2numpy.py
         this_data = self.data[real_idx:real_idx+self.window_size,:]
         
         # Label: contact at last timestep only
-        this_label = self.label[real_idx+self.window_size-1]  # Shape: (1,) - left leg only
+        this_label = self.label[real_idx+self.window_size-1]  # Shape: (2,)
         
         # Label sequence: full contact sequence for all timesteps (for dense supervision)
-        this_label_seq = self.label[real_idx:real_idx+self.window_size, :]  # Shape: (window_size, 1)
+        this_label_seq = self.label[real_idx:real_idx+self.window_size, :]  # Shape: (window_size, 2)
         
         # Velocity: full sequence
-        this_velocity = self.foot_velocity[real_idx:real_idx+self.window_size, :]  # Shape: (window_size, 3)
+        this_velocity = self.foot_velocity[real_idx:real_idx+self.window_size, :]  # Shape: (window_size, 2, 3)
             
         sample = {'data': this_data, 'label': this_label, 'label_seq': this_label_seq, 'velocity': this_velocity}
 

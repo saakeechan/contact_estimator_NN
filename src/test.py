@@ -5,8 +5,11 @@ import sys
 sys.path.append('.')
 import yaml
 from tqdm import tqdm
-
-import torch.optim as optim
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
 
 from sklearn.metrics import precision_score
 from sklearn.metrics import recall_score
@@ -16,112 +19,146 @@ from sklearn.metrics import confusion_matrix
 from contact_cnn import *
 from utils.data_handler import *
 
+PLOT_WINDOW_SIZE = 100
+
 def compute_confusion_mat(bin_contact_pred_arr, bin_contact_gt_arr):
-    """Compute confusion matrix for left leg only."""
-    confusion_mat = {}
-    
-    # Only left leg (single column)
-    confusion_mat['left_leg'] = confusion_matrix(bin_contact_gt_arr.flatten(), bin_contact_pred_arr.flatten(), labels=[0,1])
-    confusion_mat['ratio'] = confusion_mat['left_leg'] / np.sum(confusion_mat['left_leg'])
-    
-    # false negative and false positive rate
-    # false negative = FN/P; false positive = FP/N
-    fn_rate = confusion_mat['left_leg'][1,0] / (confusion_mat['left_leg'][1,0] + confusion_mat['left_leg'][1,1])
-    fp_rate = confusion_mat['left_leg'][0,1] / (confusion_mat['left_leg'][0,0] + confusion_mat['left_leg'][0,1])
+    """Compute combined and per-leg confusion matrices."""
+    confusion_mat = {
+        leg: confusion_matrix(bin_contact_gt_arr[:, index], bin_contact_pred_arr[:, index], labels=[0, 1])
+        for index, leg in enumerate(('left_leg', 'right_leg'))
+    }
+    combined = confusion_matrix(bin_contact_gt_arr.ravel(), bin_contact_pred_arr.ravel(), labels=[0, 1])
+    confusion_mat['combined'] = combined
+    fn_rate = combined[1, 0] / (combined[1, 0] + combined[1, 1] + 1e-8)
+    fp_rate = combined[0, 1] / (combined[0, 0] + combined[0, 1] + 1e-8)
 
     return confusion_mat, fn_rate, fp_rate
 
 
 def compute_precision(bin_pred_arr, bin_gt_arr):
-    """Compute precision for left leg binary classification."""
-    precision = precision_score(bin_gt_arr.flatten(), bin_pred_arr.flatten())
+    """Compute precision across both legs."""
+    precision = precision_score(bin_gt_arr.ravel(), bin_pred_arr.ravel(), zero_division=0)
     return precision
 
 def compute_jaccard(bin_pred_arr, bin_gt_arr):
-    """Compute Jaccard score for left leg binary classification."""
-    jaccard = jaccard_score(bin_gt_arr.flatten(), bin_pred_arr.flatten())
+    """Compute Jaccard score across both legs."""
+    jaccard = jaccard_score(bin_gt_arr.ravel(), bin_pred_arr.ravel(), zero_division=0)
     return jaccard
 
 def compute_accuracy(dataloader, model, device=torch.device('cpu')):
     """
-    Compute metrics for left leg velocity and contact classification.
-    Returns:
-        velocity_mae: mean absolute error for velocity (on contact samples, last timestep only)
-        velocity_mse: mean squared error for velocity (on contact samples, last timestep only)
-        contact_accuracy: binary classification accuracy
-        contact_precision: precision score
-        contact_recall: recall score
-        contact_f1: F1 score
+    Compute combined and per-leg metrics for biped contact and signed velocity.
     """
-    num_data = 0
-    velocity_mae_sum = 0.0
-    velocity_mse_sum = 0.0
-    num_contact_samples = 0
-    velocity_mae_components_sum = None
-    velocity_mse_components_sum = None
+    velocity_abs_error_sum = torch.zeros((2, 3), device=device)
+    velocity_sq_error_sum = torch.zeros((2, 3), device=device)
+    num_contact_samples = torch.zeros(2, device=device)
     
-    all_contact_preds = []
-    all_contact_gt = []
+    true_positive = torch.zeros(2, device=device)
+    false_positive = torch.zeros(2, device=device)
+    false_negative = torch.zeros(2, device=device)
+    true_negative = torch.zeros(2, device=device)
     
     with torch.no_grad():
         for sample in tqdm(dataloader):
             input_data = sample['data']
-            gt_contact = sample['label']  # Shape: (batch, 1) - binary labels for left leg (last timestep)
-            gt_velocity_seq = sample['velocity']  # Shape: (batch, window_size, 3) - full velocity sequence from dataset
-            gt_velocity = gt_velocity_seq[:, -1, :]  # Extract last timestep: (batch, 3)
+            gt_contact = sample['label']  # [B, 2] ordered [left, right]
+            gt_velocity_seq = sample['velocity']  # [B, T, 2, 3]
+            gt_velocity = gt_velocity_seq[:, -1, :, :]  # [B, 2, 3]
 
-            velocity_seq, velocity_output, contact_output = model(input_data)  # velocity_seq: (batch, 3, window_size), velocity_output: (batch, 3), contact: (batch, 1)
-
-            num_data += input_data.size(0)
+            velocity_seq, velocity_output, contact_output = model(input_data)  # [B, 2, 3, T], [B, 2, 3], [B, 2]
             
             # Collect contact predictions for classification metrics
-            contact_pred_binary = (contact_output > 0).long()  # Logit threshold at 0.0
-            all_contact_preds.append(contact_pred_binary.cpu())
-            all_contact_gt.append(gt_contact.cpu())
+            contact_pred_binary = contact_output > 0  # Logit threshold at 0.0
+            contact_gt_binary = gt_contact > 0.5
+            true_positive += (contact_pred_binary & contact_gt_binary).sum(dim=0)
+            false_positive += (contact_pred_binary & ~contact_gt_binary).sum(dim=0)
+            false_negative += (~contact_pred_binary & contact_gt_binary).sum(dim=0)
+            true_negative += (~contact_pred_binary & ~contact_gt_binary).sum(dim=0)
             
             # Velocity metrics (only on contact samples, last timestep only)
-            contact_mask = (gt_contact == 1)  # (batch, 1)
+            contact_mask = (gt_contact == 1).float().unsqueeze(-1)  # [B, 2, 1]
             if contact_mask.sum() > 0:
-                # Compute errors at last timestep for contact samples
-                velocity_errors = torch.abs(velocity_output - gt_velocity)  # (batch, 3)
-                velocity_errors_masked = velocity_errors * contact_mask  # Zero out non-contact samples
-                
-                velocity_mae_sum += velocity_errors_masked.sum().item()
-                velocity_mse_sum += ((velocity_output - gt_velocity) ** 2 * contact_mask).sum().item()
-                
-                velocity_mae_components = velocity_errors_masked.sum(dim=0)
-                velocity_mse_components = (((velocity_output - gt_velocity) ** 2) * contact_mask).sum(dim=0)
-                if velocity_mae_components_sum is None:
-                    velocity_mae_components_sum = torch.zeros_like(velocity_mae_components)
-                    velocity_mse_components_sum = torch.zeros_like(velocity_mse_components)
-                velocity_mae_components_sum += velocity_mae_components
-                velocity_mse_components_sum += velocity_mse_components
-                
-                # Count contact samples
-                num_contact_samples += contact_mask.sum().item()
+                velocity_abs_error_sum += (torch.abs(velocity_output - gt_velocity) * contact_mask).sum(dim=0)
+                velocity_sq_error_sum += (((velocity_output - gt_velocity) ** 2) * contact_mask).sum(dim=0)
+                num_contact_samples += contact_mask.squeeze(-1).sum(dim=0)
+    
+    total_true_positive = true_positive.sum().item()
+    total_false_positive = false_positive.sum().item()
+    total_false_negative = false_negative.sum().item()
+    total_true_negative = true_negative.sum().item()
+    contact_accuracy = (total_true_positive + total_true_negative) / (total_true_positive + total_false_positive + total_false_negative + total_true_negative + 1e-8)
+    contact_precision = total_true_positive / (total_true_positive + total_false_positive + 1e-8)
+    contact_recall = total_true_positive / (total_true_positive + total_false_negative + 1e-8)
+    contact_f1 = 2 * contact_precision * contact_recall / (contact_precision + contact_recall + 1e-8)
 
-    num_velocity_components = 3
-    velocity_mae = velocity_mae_sum / (num_contact_samples * num_velocity_components) if num_contact_samples > 0 else 0
-    velocity_mse = velocity_mse_sum / (num_contact_samples * num_velocity_components) if num_contact_samples > 0 else 0
-    velocity_mae_components = (
-        (velocity_mae_components_sum / num_contact_samples).cpu().numpy()
-        if num_contact_samples > 0 else np.zeros(num_velocity_components)
-    )
-    velocity_mse_components = (
-        (velocity_mse_components_sum / num_contact_samples).cpu().numpy()
-        if num_contact_samples > 0 else np.zeros(num_velocity_components)
-    )
-    
-    # Compute contact classification metrics
-    all_contact_preds = torch.cat(all_contact_preds, dim=0).numpy().flatten()
-    all_contact_gt = torch.cat(all_contact_gt, dim=0).numpy().flatten()
-    
-    contact_accuracy = np.mean(all_contact_preds == all_contact_gt)
-    contact_precision = precision_score(all_contact_gt, all_contact_preds, zero_division=0)
-    contact_recall = recall_score(all_contact_gt, all_contact_preds, zero_division=0)
-    contact_f1 = 2 * (contact_precision * contact_recall) / (contact_precision + contact_recall) if (contact_precision + contact_recall) > 0 else 0
-    
-    return velocity_mae, velocity_mse, velocity_mae_components, velocity_mse_components, contact_accuracy, contact_precision, contact_recall, contact_f1
+    per_leg_mae = (velocity_abs_error_sum / (num_contact_samples[:, None] + 1e-8)).cpu().numpy()
+    per_leg_mse = (velocity_sq_error_sum / (num_contact_samples[:, None] + 1e-8)).cpu().numpy()
+    metrics = {
+        'velocity_mae': float(velocity_abs_error_sum.sum().item() / (num_contact_samples.sum().item() * 3 + 1e-8)),
+        'velocity_mse': float(velocity_sq_error_sum.sum().item() / (num_contact_samples.sum().item() * 3 + 1e-8)),
+        'contact_accuracy': float(contact_accuracy),
+        'contact_precision': float(contact_precision),
+        'contact_recall': float(contact_recall),
+        'contact_f1': float(contact_f1),
+        'per_leg': {},
+    }
+    for index, leg in enumerate(('left', 'right')):
+        precision = true_positive[index].item() / (true_positive[index].item() + false_positive[index].item() + 1e-8)
+        recall = true_positive[index].item() / (true_positive[index].item() + false_negative[index].item() + 1e-8)
+        accuracy = (true_positive[index].item() + true_negative[index].item()) / (
+            true_positive[index].item() + false_positive[index].item() + false_negative[index].item() + true_negative[index].item() + 1e-8
+        )
+        metrics['per_leg'][leg] = {
+            'velocity_mae': float(per_leg_mae[index].mean()),
+            'velocity_mse': float(per_leg_mse[index].mean()),
+            'velocity_mae_components': per_leg_mae[index],
+            'velocity_mse_components': per_leg_mse[index],
+            'contact_accuracy': float(accuracy),
+            'contact_precision': float(precision),
+            'contact_recall': float(recall),
+            'contact_f1': float(2 * precision * recall / (precision + recall)) if precision + recall else 0.0,
+        }
+    return metrics
+
+
+def save_velocity_plots(dataloader, model, output_dir):
+    """Save one three-component predicted-vs-ground-truth velocity plot per leg."""
+    predicted, ground_truth, contact = [], [], []
+    with torch.no_grad():
+        for sample in dataloader:
+            _, velocity_output, _ = model(sample['data'])
+            predicted.append(velocity_output.cpu())
+            ground_truth.append(sample['velocity'][:, -1, :, :].cpu())
+            contact.append(sample['label'].cpu())
+
+    predicted = torch.cat(predicted).numpy()
+    ground_truth = torch.cat(ground_truth).numpy()
+    contact = torch.cat(contact).numpy()
+    sample_index = np.arange(len(contact))
+    os.makedirs(output_dir, exist_ok=True)
+
+    for leg_index, leg_name in enumerate(('left', 'right')):
+        fig, axes = plt.subplots(3, 1, figsize=(14, 9), sharex=True)
+        contact_changes = np.diff(np.concatenate(([0], contact[:, leg_index] > 0.5, [0])))
+        contact_starts = np.where(contact_changes == 1)[0]
+        contact_ends = np.where(contact_changes == -1)[0]
+
+        for component, ax in enumerate(axes):
+            for start, end in zip(contact_starts, contact_ends):
+                ax.axvspan(start, end - 1, color='red', alpha=0.2)
+            ax.plot(sample_index, ground_truth[:, leg_index, component], color='black', label='Ground truth')
+            ax.plot(sample_index, predicted[:, leg_index, component], color='tab:blue', linestyle='--', label='Predicted')
+            ax.set_ylabel(f'v{"xyz"[component]} (m/s)')
+            ax.grid(True, alpha=0.3)
+            ax.legend(loc='upper right')
+
+        axes[0].set_title(f'{leg_name.capitalize()} Foot Velocity: prediction vs ground truth')
+        axes[-1].set_xlabel('Time step in sampled window')
+        fig.tight_layout()
+        output_path = os.path.join(output_dir, f'{leg_name}_leg_velocity_comparison.png')
+        fig.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f'Saved {leg_name}-leg velocity plot: {output_path}')
 
 def decimal2binary(x):
     mask = 2**torch.arange(2-1,-1,-1).to(x.device, x.dtype)  # 2 legs for biped
@@ -202,6 +239,17 @@ def main():
     test_dataloader = DataLoader(dataset=test_dataset, batch_size=test_batch_size,\
                                  shuffle=False)
 
+    plot_starts = [
+        start for start in range(len(test_indices) - PLOT_WINDOW_SIZE + 1)
+        if all_dataset.get_run_id(test_indices[start]) == all_dataset.get_run_id(test_indices[start + PLOT_WINDOW_SIZE - 1])
+    ]
+    if not plot_starts:
+        raise ValueError(f"No test run has the {PLOT_WINDOW_SIZE} windows required for velocity plots.")
+    plot_start = int(np.random.default_rng().choice(plot_starts))
+    plot_indices = test_indices[plot_start:plot_start + PLOT_WINDOW_SIZE]
+    plot_dataloader = DataLoader(Subset(all_dataset, plot_indices), batch_size=test_batch_size, shuffle=False)
+    print(f"Plotting {PLOT_WINDOW_SIZE} random consecutive test windows from run {all_dataset.get_run_id(plot_indices[0])}.")
+
 
     # init network with built-in normalization (same as training)
     # num_features loaded from metadata at the start of main()
@@ -277,32 +325,35 @@ def main():
         print(f"⚠️  WARNING: global_std is all ones (using fallback - normalization NOT loaded!)")
     print(f"{'='*60}\n")
 
-    velocity_mae, velocity_mse, velocity_mae_components, velocity_mse_components, contact_accuracy, contact_precision, contact_recall, contact_f1 = compute_accuracy(
-        test_dataloader, model, device=device)
+    metrics = compute_accuracy(test_dataloader, model, device=device)
+    save_velocity_plots(plot_dataloader, model, os.path.dirname(latest_pt))
 
     print("\n" + "="*60)
-    print("LEFT LEG TEST RESULTS")
+    print("BIPED TEST RESULTS")
     print("="*60)
     
-    print("\nContact Classification Metrics:")
-    print("  Accuracy:  %.4f" % contact_accuracy)
-    print("  Precision: %.4f" % contact_precision)
-    print("  Recall:    %.4f" % contact_recall)
-    print("  F1 Score:  %.4f" % contact_f1)
+    print("\nContact Classification Metrics (combined):")
+    print("  Accuracy:  %.4f" % metrics['contact_accuracy'])
+    print("  Precision: %.4f" % metrics['contact_precision'])
+    print("  Recall:    %.4f" % metrics['contact_recall'])
+    print("  F1 Score:  %.4f" % metrics['contact_f1'])
     
     print("\nVelocity Regression Metrics (on contact samples, last timestep only):")
-    print("  Velocity MAE: %.6f" % velocity_mae)
-    print("  Velocity MSE: %.6f" % velocity_mse)
-    print("  Velocity RMSE: %.6f" % np.sqrt(velocity_mse))
-    print("  Velocity MAE [vx, vy, vz]: [%0.6f, %0.6f, %0.6f]" % tuple(velocity_mae_components))
-    print("  Velocity MSE [vx, vy, vz]: [%0.6f, %0.6f, %0.6f]" % tuple(velocity_mse_components))
+    print("  Velocity MAE: %.6f" % metrics['velocity_mae'])
+    print("  Velocity MSE: %.6f" % metrics['velocity_mse'])
+    print("  Velocity RMSE: %.6f" % np.sqrt(metrics['velocity_mse']))
+    for leg, leg_metrics in metrics['per_leg'].items():
+        print(f"\n{leg.capitalize()} leg:")
+        print("  Contact Accuracy:  %.4f" % leg_metrics['contact_accuracy'])
+        print("  Contact Precision: %.4f" % leg_metrics['contact_precision'])
+        print("  Contact Recall:    %.4f" % leg_metrics['contact_recall'])
+        print("  Contact F1:        %.4f" % leg_metrics['contact_f1'])
+        print("  Velocity MAE:      %.6f [vx, vy, vz: %.6f, %.6f, %.6f]" % (
+            leg_metrics['velocity_mae'], *leg_metrics['velocity_mae_components']))
+        print("  Velocity MSE:      %.6f [vx, vy, vz: %.6f, %.6f, %.6f]" % (
+            leg_metrics['velocity_mse'], *leg_metrics['velocity_mse_components']))
     print("="*60)
     
-    # Raw values for easy copy-paste
-    print("\nRaw Values:")
-    print(f"Contact: acc={contact_accuracy:.4f}, prec={contact_precision:.4f}, recall={contact_recall:.4f}, f1={contact_f1:.4f}")
-    print(f"Velocity: mae={velocity_mae:.6f}, mse={velocity_mse:.6f}, rmse={np.sqrt(velocity_mse):.6f}")
-    print(f"Velocity components: mae={velocity_mae_components.tolist()}, mse={velocity_mse_components.tolist()}")
 
 if __name__ == '__main__':
     main()

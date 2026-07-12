@@ -6,6 +6,44 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 
 VELOCITY_COMPONENTS = ("x", "y", "z")
+LEGS = ("left", "right")
+
+
+def make_velocity_heads(num_features):
+    """One signed-velocity MLP per leg, each predicting [vx, vy, vz]."""
+    return nn.ModuleDict({
+        leg: nn.Sequential(
+            nn.Linear(num_features, 128),
+            nn.ReLU(),
+            nn.Linear(128, 32),
+            nn.ReLU(),
+            nn.Linear(32, len(VELOCITY_COMPONENTS)),
+        )
+        for leg in LEGS
+    })
+
+
+def predict_biped_velocity(velocity_heads, features):
+    """Return signed velocities as [B, 2, 3, T] and [B, 2, 3]."""
+    features_by_time = features.permute(0, 2, 1)  # [B, T, channels]
+    velocity_seq = torch.stack([
+        velocity_heads[leg](features_by_time).permute(0, 2, 1)
+        for leg in LEGS
+    ], dim=1)  # [B, left/right, xyz, T]
+    return velocity_seq, velocity_seq[:, :, :, -1]
+
+
+def make_contact_heads(num_features):
+    return nn.ModuleDict({
+        leg: nn.Sequential(
+            nn.Linear(num_features, 256),
+            nn.ReLU(),
+            nn.Linear(256, 32),
+            nn.ReLU(),
+            nn.Linear(32, 1),
+        )
+        for leg in LEGS
+    })
 
 """
 Three network architectures are available:
@@ -142,20 +180,10 @@ class AttentionTCN(nn.Module):
         self.tcn_backbone = nn.Sequential(*tcn_layers)
         
         # 6. Velocity prediction heads
-        self.velocity_heads = nn.ModuleDict({
-            axis: nn.Conv1d(tcn_num_channels, 1, kernel_size=1)
-            for axis in VELOCITY_COMPONENTS
-        })
+        self.velocity_heads = make_velocity_heads(tcn_num_channels)
         
-        # 7. Contact detection head (MLP: 256 → 32 → 1)
-        self.contact_head = nn.Sequential(
-            nn.Linear(tcn_num_channels, 256),
-            nn.ReLU(),
-            nn.Linear(256, 32),
-            nn.ReLU(),
-            nn.Linear(32, 1)
-            # No activation - BCEWithLogitsLoss applies sigmoid internally
-        )
+        # 7. One contact logit per leg.
+        self.contact_heads = make_contact_heads(tcn_num_channels)
     
     def forward(self, x):
         """
@@ -163,9 +191,9 @@ class AttentionTCN(nn.Module):
             x: (batch_size, window_size, num_features) - RAW features
         
         Returns:
-            velocity_seq: (batch_size, 3, window_size) - signed velocity in m/s for all timesteps
-            velocity_out: (batch_size, 3) - signed velocity in m/s at last timestep only
-            contact_out: (batch_size, 1) - contact logits at last timestep
+            velocity_seq: (batch_size, 2, 3, window_size) - signed [left/right, vx/vy/vz] velocities
+            velocity_out: (batch_size, 2, 3) - signed last-timestep velocities
+            contact_out: (batch_size, 2) - [left, right] contact logits at last timestep
         """
         # x: [B, T, F]
         
@@ -203,15 +231,11 @@ class AttentionTCN(nn.Module):
         features = self.tcn_backbone(z)  # [B, tcn_num_channels, T]
         
         # 8. Velocity prediction
-        velocity_seq = torch.cat(
-            [self.velocity_heads[axis](features) for axis in VELOCITY_COMPONENTS],
-            dim=1
-        )  # [B, 3, T]
-        velocity_out = velocity_seq[:, :, -1]  # [B, 3] - last timestep
+        velocity_seq, velocity_out = predict_biped_velocity(self.velocity_heads, features)
         
         # 9. Contact prediction (MLP on last timestep features)
         features_last = features[:, :, -1]  # [B, tcn_num_channels]
-        contact_out = self.contact_head(features_last)  # [B, 1]
+        contact_out = torch.cat([self.contact_heads[leg](features_last) for leg in LEGS], dim=1)
         
         return velocity_seq, velocity_out, contact_out
 
@@ -254,20 +278,10 @@ class TCN(nn.Module):
         self.tcn_backbone = nn.Sequential(*tcn_layers)
         
         # 3. Velocity prediction heads
-        self.velocity_heads = nn.ModuleDict({
-            axis: nn.Conv1d(tcn_num_channels, 1, kernel_size=1)
-            for axis in VELOCITY_COMPONENTS
-        })
+        self.velocity_heads = make_velocity_heads(tcn_num_channels)
         
-        # 4. Contact detection head (MLP: 256 → 32 → 1)
-        self.contact_head = nn.Sequential(
-            nn.Linear(tcn_num_channels, 256),
-            nn.ReLU(),
-            nn.Linear(256, 32),
-            nn.ReLU(),
-            nn.Linear(32, 1)
-            # No activation - BCEWithLogitsLoss applies sigmoid internally
-        )
+        # 4. One contact logit per leg.
+        self.contact_heads = make_contact_heads(tcn_num_channels)
     
     def forward(self, x):
         """
@@ -275,9 +289,9 @@ class TCN(nn.Module):
             x: (batch_size, window_size, num_features) - RAW features
         
         Returns:
-            velocity_seq: (batch_size, 3, window_size) - signed velocity in m/s for all timesteps
-            velocity_out: (batch_size, 3) - signed velocity in m/s at last timestep only
-            contact_out: (batch_size, 1) - contact logits at last timestep
+            velocity_seq: (batch_size, 2, 3, window_size) - signed [left/right, vx/vy/vz] velocities
+            velocity_out: (batch_size, 2, 3) - signed last-timestep velocities
+            contact_out: (batch_size, 2) - [left, right] contact logits at last timestep
         """
         # x: [B, T, F]
         
@@ -291,15 +305,11 @@ class TCN(nn.Module):
         features = self.tcn_backbone(z)  # [B, tcn_num_channels, T]
         
         # 4. Velocity prediction
-        velocity_seq = torch.cat(
-            [self.velocity_heads[axis](features) for axis in VELOCITY_COMPONENTS],
-            dim=1
-        )  # [B, 3, T]
-        velocity_out = velocity_seq[:, :, -1]  # [B, 3] - last timestep
+        velocity_seq, velocity_out = predict_biped_velocity(self.velocity_heads, features)
         
         # 5. Contact prediction (MLP on last timestep features)
         features_last = features[:, :, -1]  # [B, tcn_num_channels]
-        contact_out = self.contact_head(features_last)  # [B, 1]
+        contact_out = torch.cat([self.contact_heads[leg](features_last) for leg in LEGS], dim=1)
         
         return velocity_seq, velocity_out, contact_out
 
@@ -364,20 +374,10 @@ class contact_cnn(nn.Module):
         )
         
         # Velocity prediction heads
-        self.velocity_heads = nn.ModuleDict({
-            axis: nn.Conv1d(128, 1, kernel_size=1)
-            for axis in VELOCITY_COMPONENTS
-        })
+        self.velocity_heads = make_velocity_heads(128)
         
-        # Contact detection head (MLP: 256 → 32 → 1)
-        self.contact_head = nn.Sequential(
-            nn.Linear(128, 256),
-            nn.ReLU(),
-            nn.Linear(256, 32),
-            nn.ReLU(),
-            nn.Linear(32, 1)
-            # No activation - BCEWithLogitsLoss applies sigmoid internally
-        )
+        # One contact logit per leg.
+        self.contact_heads = make_contact_heads(128)
 
     def forward(self, x):
         # x shape: (batch_size, window_size, num_features) - RAW features from csv2numpy.py
@@ -394,17 +394,11 @@ class contact_cnn(nn.Module):
         features = x  # [B, 64, T]
         
         # Velocity prediction (sequence-to-sequence)
-        velocity_seq = torch.cat(
-            [self.velocity_heads[axis](features) for axis in VELOCITY_COMPONENTS],
-            dim=1
-        )  # [B, 3, T]
-        
-        # Extract last timestep for final output (used at inference)
-        velocity_out = velocity_seq[:, :, -1]  # [B, 3]
+        velocity_seq, velocity_out = predict_biped_velocity(self.velocity_heads, features)
         
         # Contact prediction (MLP on last timestep features)
         features_last = features[:, :, -1]  # [B, 64]
-        contact_out = self.contact_head(features_last)  # [B, 1]
+        contact_out = torch.cat([self.contact_heads[leg](features_last) for leg in LEGS], dim=1)
         
         # Return both sequence (for training) and last timestep (for inference)
         # During training: use velocity_seq for dense supervision
@@ -423,11 +417,11 @@ class ContactCNNWithNormalization(nn.Module):
     - Normalize: (x - global_mean) / (global_std + eps)
     - Statistics are saved with the model and exported to ONNX
     
-    Input shape: (batch_size, window_size, num_features) - RAW features from csv2numpy.py (LEFT LEG ONLY)
+    Input shape: (batch_size, window_size, num_features) - RAW biped features from csv2numpy.py
     Output shapes:
-        - velocity_seq: (batch_size, 3, window_size) - velocity predictions for all timesteps (for training)
-        - velocity_out: (batch_size, 3) - velocity prediction at last timestep only (for inference)
-        - contact_out: (batch_size, 1) - contact logits at last timestep
+        - velocity_seq: (batch_size, 2, 3, window_size) - signed velocities for both legs
+        - velocity_out: (batch_size, 2, 3) - signed last-timestep velocities
+        - contact_out: (batch_size, 2) - [left, right] contact logits at last timestep
     
     Feature layout:
     - Input: RAW features from csv2numpy.py
@@ -466,13 +460,12 @@ class ContactCNNWithNormalization(nn.Module):
         Apply z-score normalization, then pass through base model.
         
         Args:
-            x: Raw input data (batch_size, window_size, num_features) - NOT z-score normalized (LEFT LEG ONLY)
-               Features: q[3,4](2) + p[x,z](2) + v[x,z](2) + tau_est[1-5](5) + tau_mse(1) = 12 features
+            x: Raw input data (batch_size, window_size, num_features) - NOT z-score normalized
         
         Returns:
-            velocity_seq: (batch_size, 3, window_size) - velocity predictions for all timesteps (for training)
-            velocity_out: (batch_size, 3) - velocity prediction at last timestep only (for inference)
-            contact_out: (batch_size, 1) - contact logits at last timestep
+            velocity_seq: (batch_size, 2, 3, window_size) - velocity predictions for both legs
+            velocity_out: (batch_size, 2, 3) - last-timestep velocity predictions
+            contact_out: (batch_size, 2) - [left, right] contact logits at last timestep
         """
         # Apply global z-score normalization to all input features
         # These statistics are embedded in the model and exported to ONNX

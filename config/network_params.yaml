@@ -1,7 +1,7 @@
 # CSV data processing params
 csv_folder: "Data/CSVFiles/"
 cmd_vel_x_min: 0.0   # Skip runs where max cmd_vel_x is below this value
-cmd_vel_x_max: 3.0   # Skip runs where max cmd_vel_x is above this value
+cmd_vel_x_max: 1.5   # Skip runs where max cmd_vel_x is above this value
 # Path to the data folder. Data should be separated into train.npy, train_label.npy, val.npy, val_label.npy.
 data_folder: "Data/NumpyFiles/"
 # # Test-specific params
@@ -19,8 +19,8 @@ val_ratio: 0.1
 
 # Network params
 batch_size: 60  # Used for both training and testing
-init_lr: 0.0001
-num_epoch: 7 # Reduced for quick training with small dataset
+init_lr: 0.001
+num_epoch: 4 # Reduced for quick training with small dataset
 
 
 
@@ -39,7 +39,7 @@ velocity_weight: 1.0    # Weight for velocity regression loss
 
 # -------------------------------------
                             # Dense Supervision: Compute loss on all timesteps vs last timestep only
-use_dense_supervision: False # True: compute loss on full velocity sequence (all timesteps)
+use_dense_supervision: True # True: compute loss on full velocity sequence (all timesteps)
                              # False: compute loss only on last timestep output
                              # Dense supervision helps learn temporal patterns
                              # Last-only is faster and simpler but may underfit
@@ -74,7 +74,7 @@ l2_lambda: 0     # L2 (Ridge): encourages small weights, prevents large values
 # Typical values: 1e-5 to 1e-3 for each
 
 
-Huber_delta: 0.5      # Delta parameter for Huber loss in velocity regression
+Huber_delta: 0.3      # Delta parameter for Huber loss in velocity regression
 
 # Model Architecture Selection
 # Choose which neural network architecture to use
