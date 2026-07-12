@@ -5,6 +5,8 @@ from torch.utils.data import Dataset, DataLoader
 
 import numpy as np
 
+VELOCITY_COMPONENTS = ("x", "y", "z")
+
 """
 Three network architectures are available:
 
@@ -33,7 +35,7 @@ Three network architectures are available:
 
 All architectures:
 - Support causal convolutions (no future information leakage)
-- Output velocity predictions for all timesteps (dense supervision)
+- Output signed velocity predictions for all timesteps (dense supervision)
 - Extract last timestep for inference
 """
 
@@ -96,7 +98,7 @@ class AttentionTCN(nn.Module):
     3. Residual fusion with learnable gamma (initialized to 0.0)
     4. Layer normalization before TCN
     5. TCN backbone: local temporal feature extraction
-    6. Velocity prediction head
+    6. Velocity prediction heads
     
     Key design choices:
     - Causal attention mask: prevents looking into the future (critical for real-time inference)
@@ -139,11 +141,11 @@ class AttentionTCN(nn.Module):
         
         self.tcn_backbone = nn.Sequential(*tcn_layers)
         
-        # 6. Velocity prediction head
-        self.velocity_head = nn.Sequential(
-            nn.Conv1d(tcn_num_channels, 1, kernel_size=1),
-            # nn.GELU()
-        )
+        # 6. Velocity prediction heads
+        self.velocity_heads = nn.ModuleDict({
+            axis: nn.Conv1d(tcn_num_channels, 1, kernel_size=1)
+            for axis in VELOCITY_COMPONENTS
+        })
         
         # 7. Contact detection head (MLP: 256 → 32 → 1)
         self.contact_head = nn.Sequential(
@@ -161,8 +163,8 @@ class AttentionTCN(nn.Module):
             x: (batch_size, window_size, num_features) - RAW features
         
         Returns:
-            velocity_seq: (batch_size, 1, window_size) - velocity in m/s for all timesteps
-            velocity_out: (batch_size, 1) - velocity in m/s at last timestep only
+            velocity_seq: (batch_size, 3, window_size) - signed velocity in m/s for all timesteps
+            velocity_out: (batch_size, 3) - signed velocity in m/s at last timestep only
             contact_out: (batch_size, 1) - contact logits at last timestep
         """
         # x: [B, T, F]
@@ -201,8 +203,11 @@ class AttentionTCN(nn.Module):
         features = self.tcn_backbone(z)  # [B, tcn_num_channels, T]
         
         # 8. Velocity prediction
-        velocity_seq = self.velocity_head(features)  # [B, 1, T]
-        velocity_out = velocity_seq[:, :, -1]  # [B, 1] - last timestep
+        velocity_seq = torch.cat(
+            [self.velocity_heads[axis](features) for axis in VELOCITY_COMPONENTS],
+            dim=1
+        )  # [B, 3, T]
+        velocity_out = velocity_seq[:, :, -1]  # [B, 3] - last timestep
         
         # 9. Contact prediction (MLP on last timestep features)
         features_last = features[:, :, -1]  # [B, tcn_num_channels]
@@ -219,7 +224,7 @@ class TCN(nn.Module):
     Architecture:
     1. Input projection: map raw features to tcn_num_channels dimension
     2. TCN backbone: stacked residual blocks with increasing dilation
-    3. Velocity prediction head
+    3. Velocity prediction heads
     
     Key design choices:
     - Exponentially increasing dilation: 2^0, 2^1, 2^2, ... (receptive field grows exponentially)
@@ -248,10 +253,11 @@ class TCN(nn.Module):
         
         self.tcn_backbone = nn.Sequential(*tcn_layers)
         
-        # 3. Velocity prediction head
-        self.velocity_head = nn.Sequential(
-            nn.Conv1d(tcn_num_channels, 1, kernel_size=1),
-        )
+        # 3. Velocity prediction heads
+        self.velocity_heads = nn.ModuleDict({
+            axis: nn.Conv1d(tcn_num_channels, 1, kernel_size=1)
+            for axis in VELOCITY_COMPONENTS
+        })
         
         # 4. Contact detection head (MLP: 256 → 32 → 1)
         self.contact_head = nn.Sequential(
@@ -269,8 +275,8 @@ class TCN(nn.Module):
             x: (batch_size, window_size, num_features) - RAW features
         
         Returns:
-            velocity_seq: (batch_size, 1, window_size) - velocity in m/s for all timesteps
-            velocity_out: (batch_size, 1) - velocity in m/s at last timestep only
+            velocity_seq: (batch_size, 3, window_size) - signed velocity in m/s for all timesteps
+            velocity_out: (batch_size, 3) - signed velocity in m/s at last timestep only
             contact_out: (batch_size, 1) - contact logits at last timestep
         """
         # x: [B, T, F]
@@ -285,8 +291,11 @@ class TCN(nn.Module):
         features = self.tcn_backbone(z)  # [B, tcn_num_channels, T]
         
         # 4. Velocity prediction
-        velocity_seq = self.velocity_head(features)  # [B, 1, T]
-        velocity_out = velocity_seq[:, :, -1]  # [B, 1] - last timestep
+        velocity_seq = torch.cat(
+            [self.velocity_heads[axis](features) for axis in VELOCITY_COMPONENTS],
+            dim=1
+        )  # [B, 3, T]
+        velocity_out = velocity_seq[:, :, -1]  # [B, 3] - last timestep
         
         # 5. Contact prediction (MLP on last timestep features)
         features_last = features[:, :, -1]  # [B, tcn_num_channels]
@@ -354,10 +363,11 @@ class contact_cnn(nn.Module):
             nn.ReLU(),
         )
         
-        # Velocity prediction head
-        self.velocity_head = nn.Sequential(
-            nn.Conv1d(128, 1, kernel_size=1),
-        )
+        # Velocity prediction heads
+        self.velocity_heads = nn.ModuleDict({
+            axis: nn.Conv1d(128, 1, kernel_size=1)
+            for axis in VELOCITY_COMPONENTS
+        })
         
         # Contact detection head (MLP: 256 → 32 → 1)
         self.contact_head = nn.Sequential(
@@ -384,10 +394,13 @@ class contact_cnn(nn.Module):
         features = x  # [B, 64, T]
         
         # Velocity prediction (sequence-to-sequence)
-        velocity_seq = self.velocity_head(features)  # [B, 1, T]
+        velocity_seq = torch.cat(
+            [self.velocity_heads[axis](features) for axis in VELOCITY_COMPONENTS],
+            dim=1
+        )  # [B, 3, T]
         
         # Extract last timestep for final output (used at inference)
-        velocity_out = velocity_seq[:, :, -1]  # [B, 1]
+        velocity_out = velocity_seq[:, :, -1]  # [B, 3]
         
         # Contact prediction (MLP on last timestep features)
         features_last = features[:, :, -1]  # [B, 64]
@@ -412,8 +425,8 @@ class ContactCNNWithNormalization(nn.Module):
     
     Input shape: (batch_size, window_size, num_features) - RAW features from csv2numpy.py (LEFT LEG ONLY)
     Output shapes:
-        - velocity_seq: (batch_size, 1, window_size) - velocity predictions for all timesteps (for training)
-        - velocity_out: (batch_size, 1) - velocity prediction at last timestep only (for inference)
+        - velocity_seq: (batch_size, 3, window_size) - velocity predictions for all timesteps (for training)
+        - velocity_out: (batch_size, 3) - velocity prediction at last timestep only (for inference)
         - contact_out: (batch_size, 1) - contact logits at last timestep
     
     Feature layout:
@@ -457,8 +470,8 @@ class ContactCNNWithNormalization(nn.Module):
                Features: q[3,4](2) + p[x,z](2) + v[x,z](2) + tau_est[1-5](5) + tau_mse(1) = 12 features
         
         Returns:
-            velocity_seq: (batch_size, 1, window_size) - velocity predictions for all timesteps (for training)
-            velocity_out: (batch_size, 1) - velocity prediction at last timestep only (for inference)
+            velocity_seq: (batch_size, 3, window_size) - velocity predictions for all timesteps (for training)
+            velocity_out: (batch_size, 3) - velocity prediction at last timestep only (for inference)
             contact_out: (batch_size, 1) - contact logits at last timestep
         """
         # Apply global z-score normalization to all input features

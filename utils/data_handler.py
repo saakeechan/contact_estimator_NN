@@ -17,7 +17,7 @@ class contact_dataset(Dataset):
         At initialization we load .npy files for data, labels, and foot velocities.
         self.data: a 2D array of all data points. rows are time axis, columns are features. (num_data, num_features)
         self.label: LEFT leg contact state (0 or 1). Shape: (num_data, 1) - LEFT leg only
-        self.foot_velocity: LEFT leg foot velocity magnitude (norm). Shape: (num_data, 1) - LEFT leg only
+        self.foot_velocity: LEFT leg signed foot velocity. Shape: (num_data, 3) - LEFT leg only
         """
         data = np.load(data_path)
         label = np.load(label_path)
@@ -26,14 +26,14 @@ class contact_dataset(Dataset):
         self.window_size = window_size
         self.data = torch.from_numpy(data).type('torch.FloatTensor').to(device)
         
-        # Load foot velocities - LEFT LEG ONLY
+        # Load left-leg signed foot velocities (vx, vy, vz).
         velocity_path = data_path.replace('all_data.npy', 'all_foot_velocities.npy')
         if os.path.exists(velocity_path):
             foot_velocity = np.load(velocity_path)
             print(f"Loaded foot velocities from {velocity_path}")
         else:
             print(f"Warning: No foot velocity file found at {velocity_path}. Creating zero velocities.")
-            foot_velocity = np.zeros((len(data), 1), dtype=np.float32)  # LEFT leg only
+            foot_velocity = np.zeros((len(data), 3), dtype=np.float32)  # LEFT leg only
         
         self.foot_velocity = torch.from_numpy(foot_velocity).type('torch.FloatTensor').to(device)
         
@@ -124,7 +124,7 @@ class contact_dataset(Dataset):
         - data: (batch_size, window_size, num_features)
         - label: (batch_size, 1) - binary contact for left leg (last timestep only)
         - label_seq: (batch_size, window_size, 1) - full contact sequence for dense supervision
-        - velocity: (batch_size, window_size, 1) - full velocity sequence
+        - velocity: (batch_size, window_size, 3) - full signed velocity sequence
         """
         if torch.is_tensor(idx):
             idx = idx.tolist()
@@ -143,7 +143,7 @@ class contact_dataset(Dataset):
         this_label_seq = self.label[real_idx:real_idx+self.window_size, :]  # Shape: (window_size, 1)
         
         # Velocity: full sequence
-        this_velocity = self.foot_velocity[real_idx:real_idx+self.window_size, :]  # Shape: (window_size, 1)
+        this_velocity = self.foot_velocity[real_idx:real_idx+self.window_size, :]  # Shape: (window_size, 3)
             
         sample = {'data': this_data, 'label': this_label, 'label_seq': this_label_seq, 'velocity': this_velocity}
 

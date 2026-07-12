@@ -38,7 +38,7 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
     - all_labels.npy: LEFT leg contact labels only (shape: N x 1, binary 0/1)
     - all_data_boundaries.npy: indices marking end of each run (CRITICAL for preventing data leakage)
     - all_data_metadata.npy: metadata dict with num_features (SOURCE OF TRUTH for network architecture)
-    - all_foot_velocities.npy: foot velocity magnitudes for LEFT leg only (shape: N x 1)
+    - all_foot_velocities.npy: signed world-frame foot velocities for LEFT leg only (shape: N x 3)
     """
     
     # Ensure save directory exists
@@ -53,7 +53,7 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
     # num_features will be determined automatically from the actual data shape
     all_data = None  # Will be initialized after first sample
     all_labels = np.zeros((0, 1))  # LEFT leg only
-    all_foot_velocities = np.zeros((0, 1))  # World frame foot velocities: LEFT leg only - magnitudes
+    all_foot_velocities = np.zeros((0, 3))  # World frame foot velocities: LEFT leg only - signed vx, vy, vz
     num_features = None  # Will be set from cur_data.shape[1] after first run
     
     # Track boundaries between different runs to prevent window bleeding
@@ -161,16 +161,13 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
             # contacts_right = df_run[['rfoot-contact']].values.astype(int)  # Shape: (num_samples, 1)
             contacts = contacts_left  # Shape: (num_samples, 1)
             
-            # Calculate foot velocity in world frame by numerical differentiation for BOTH legs
-            # Left foot velocity
-            # lfoot_position_world = ['lfoot_pos_x', 'lfoot_pos_y', 'lfoot_pos_z']
-            lfoot_position_world = ['lfoot_pos_x', 'lfoot_pos_y']
+            # Calculate signed left-foot velocity in the world frame by numerical differentiation.
+            lfoot_position_world = ['lfoot_pos_x', 'lfoot_pos_y', 'lfoot_pos_z']
             lfoot_velocity_world = np.diff(df_run[lfoot_position_world].values, axis=0) / np.diff(df_run['timestamp'].values.reshape(-1, 1), axis=0)
             lfoot_velocity_world = np.vstack((lfoot_velocity_world, lfoot_velocity_world[-1, :]))  # Keep size consistent
-            lfoot_velocity_norm = np.linalg.norm(lfoot_velocity_world, axis=1, keepdims=True) + 1e-8
         
-            # Left leg velocity only
-            foot_velocities = lfoot_velocity_norm  # Shape: (num_samples, 1)
+            # Left leg velocity only: keep signed components separate.
+            foot_velocities = lfoot_velocity_world  # Shape: (num_samples, 3)
 
 
             # LEFT leg contact labels (already 0 or 1, no conversion needed)
@@ -220,6 +217,7 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
     # Save metadata including num_features (source of truth for network architecture)
     metadata = {
         'num_features': num_features,
+        'num_velocity_targets': all_foot_velocities.shape[1],
         'num_samples': all_data.shape[0],
         'num_runs': len(all_boundaries)
     }
@@ -227,7 +225,7 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
     
     print(f"Saved {all_data.shape[0]} samples to all_data.npy")
     print(f"Saved {all_labels.shape[0]} contact labels (left + right leg) to all_labels.npy")
-    print(f"Saved {all_foot_velocities.shape[0]} foot velocity norms (LEFT leg only) to all_foot_velocities.npy")
+    print(f"Saved {all_foot_velocities.shape[0]} signed foot velocity samples (LEFT leg only, vx/vy/vz) to all_foot_velocities.npy")
     print(f"Saved {len(all_boundaries)} run boundaries to all_data_boundaries.npy")
     print(f"Saved metadata (num_features={num_features}) to all_data_metadata.npy")
     print("Done!")
