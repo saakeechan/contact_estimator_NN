@@ -86,7 +86,7 @@ def generate_training_summary(run_dir, config, train_metrics, val_metrics, best_
             "model_architecture": config.get('model_architecture', 'vanilla_cnn'),
             "velocity_weight": config.get('velocity_weight', 1.0),
             "use_dense_supervision": config.get('use_dense_supervision', False),
-            "huber_delta": config.get('Huber_delta', 0.5),
+            "velocity_loss": "gaussian_nll",
             "l1_lambda": config.get('l1_lambda', 0.0),
             "l2_lambda": config.get('l2_lambda', 0.0),
             "derivative_weight": config.get('derivative_weight', 0.0),

@@ -25,7 +25,11 @@ warnings.filterwarnings(
 )
 
 
-def compute_accuracy(dataloader, model, contact_criterion=None, velocity_criterion=None):
+def gaussian_nll(mean, target, variance):
+    return 0.5 * (variance.log() + (mean - target).square() / variance)
+
+
+def compute_accuracy(dataloader, model, contact_criterion=None, velocity_loss_fn=None):
     """
     Compute combined left/right contact and signed-velocity metrics at the last timestep.
     
@@ -33,7 +37,7 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_criteri
         dataloader: DataLoader to evaluate
         model: The neural network model
         contact_criterion: Optional contact loss criterion (BCEWithLogitsLoss)
-        velocity_criterion: Optional velocity loss criterion
+        velocity_loss_fn: Optional elementwise Gaussian NLL function
     
     Returns:
         dict with metrics: contact_acc, contact_loss, velocity_mae, velocity_loss
@@ -58,7 +62,7 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_criteri
             gt_velocity_seq = sample['velocity']  # [B, T, 2, 3]
             gt_velocity = gt_velocity_seq[:, -1, :, :]  # [B, 2, 3]
 
-            velocity_seq, velocity_output, contact_output = model(input_data)  # [B, 2, 3, T], [B, 2, 3], [B, 2]
+            velocity_seq, velocity_output, covariance_seq, covariance_output, contact_output = model(input_data)
             contact_prediction = (contact_output > 0).float()  # Binary predictions
 
             # Compute contact loss if criterion provided
@@ -69,11 +73,9 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_criteri
             # Velocity loss masked to contact samples only
             contact_mask = (gt_contact == 1).float().unsqueeze(-1)  # [B, 2, 1]
             
-            if velocity_criterion is not None:
+            if velocity_loss_fn is not None:
                 # Velocity loss on last timestep only, masked to contact samples only
-                velocity_loss_each = velocity_criterion(
-                    velocity_output, gt_velocity
-                )  # [B, 2, 3], requires reduction="none"
+                velocity_loss_each = velocity_loss_fn(velocity_output, gt_velocity, covariance_output)
                 
                 velocity_loss_masked = (
                     velocity_loss_each * contact_mask
@@ -115,7 +117,7 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_criteri
         'contact_acc': contact_acc,
         'contact_loss': contact_loss_sum / num_batches if contact_criterion else 0,
         'velocity_mae': velocity_mae,
-        'velocity_loss': velocity_loss_sum / num_batches if velocity_criterion else 0,
+        'velocity_loss': velocity_loss_sum / num_batches if velocity_loss_fn else 0,
         'velocity_mae_components': velocity_mae_components,
         'num_pred_contact': num_pred_contact,
         'num_gt_contact': num_gt_contact
@@ -127,9 +129,11 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_criteri
 def save_onnx_model(model, checkpoint_path, window_size):
     """
     Save ONNX version of the model for C++ deployment.
-    The model has three outputs: 
+    The model has five outputs:
         - velocity_seq: (batch, 2, 3, window_size) - [left, right, vx/vy/vz] predictions
         - velocity_output: (batch, 2, 3) - last-timestep velocity predictions
+        - covariance_seq: (batch, 2, 3, window_size) - diagonal velocity variances
+        - covariance_output: (batch, 2, 3) - diagonal last-timestep velocity variances
         - contact_output: (batch, 2) - [left, right] contact logits
     """
     try:
@@ -157,11 +161,13 @@ def save_onnx_model(model, checkpoint_path, window_size):
                 export_params=True,
                 opset_version=18,
                 input_names=['input'],
-                output_names=['velocity_seq', 'velocity_output', 'contact_output'],
+                output_names=['velocity_seq', 'velocity_output', 'covariance_seq', 'covariance_output', 'contact_output'],
                 dynamic_axes={
                     'input': {0: 'batch_size'},
                     'velocity_seq': {0: 'batch_size', 3: 'window_size'},
                     'velocity_output': {0: 'batch_size'},
+                    'covariance_seq': {0: 'batch_size', 3: 'window_size'},
+                    'covariance_output': {0: 'batch_size'},
                     'contact_output': {0: 'batch_size'}
                 },
                 verbose=False
@@ -202,9 +208,8 @@ def train(model, train_dataloader, val_dataloader, config):
     # Contact: BCEWithLogitsLoss (binary classification)
     contact_criterion = nn.BCEWithLogitsLoss()
     
-    # Velocity: HuberLoss (robust to outliers)
-    huber_delta = float(config.get('Huber_delta', 0.5))
-    velocity_criterion = nn.HuberLoss(delta=huber_delta, reduction='none')  # Element-wise for masking
+    # Velocity: diagonal Gaussian NLL, learning one variance per axis and leg.
+    velocity_loss_fn = gaussian_nll
     optimizer = optim.Adam(model.parameters(), lr=config['init_lr'])
     
     # Get loss weighting parameters
@@ -270,7 +275,7 @@ def train(model, train_dataloader, val_dataloader, config):
 
             optimizer.zero_grad()
             
-            velocity_seq, velocity_output, contact_output = model(input_data)  # [B, 2, 3, T], [B, 2, 3], [B, 2]
+            velocity_seq, velocity_output, covariance_seq, covariance_output, contact_output = model(input_data)
             
             # Contact loss (binary classification at last timestep)
             contact_loss = contact_criterion(contact_output, contact_label)
@@ -279,9 +284,11 @@ def train(model, train_dataloader, val_dataloader, config):
                 # DENSE SUPERVISION: Compute velocity loss on FULL SEQUENCE masked to contact only
                 velocity_seq_permuted = velocity_seq.permute(0, 3, 1, 2)  # [B, T, 2, 3]
                 
-                velocity_loss_elementwise = velocity_criterion(
+                covariance_seq_permuted = covariance_seq.permute(0, 3, 1, 2)  # [B, T, 2, 3]
+                velocity_loss_elementwise = velocity_loss_fn(
                     velocity_seq_permuted,
-                    velocity_label_seq
+                    velocity_label_seq,
+                    covariance_seq_permuted,
                 )  # [B, T, 2, 3]
                 
                 # Use full contact sequence for masking (dense supervision only at contact timesteps)
@@ -317,9 +324,10 @@ def train(model, train_dataloader, val_dataloader, config):
                     ).sum() / (contact_mask_derivative.sum() * velocity_label_seq.shape[-1] + 1e-8)
             else:
                 # LAST TIMESTEP ONLY: Compute velocity loss only on final output (simpler, faster)
-                velocity_loss_elementwise = velocity_criterion(
+                velocity_loss_elementwise = velocity_loss_fn(
                     velocity_output,
-                    velocity_label
+                    velocity_label,
+                    covariance_output,
                 )  # [B, 2, 3]
                 
                 # Mask to contact samples only (last timestep)
@@ -377,8 +385,8 @@ def train(model, train_dataloader, val_dataloader, config):
 
         # calculate training and validation metrics
         model.eval()
-        train_metrics = compute_accuracy(train_dataloader, model, contact_criterion=contact_criterion, velocity_criterion=velocity_criterion)
-        val_metrics = compute_accuracy(val_dataloader, model, contact_criterion=contact_criterion, velocity_criterion=velocity_criterion)
+        train_metrics = compute_accuracy(train_dataloader, model, contact_criterion=contact_criterion, velocity_loss_fn=velocity_loss_fn)
+        val_metrics = compute_accuracy(val_dataloader, model, contact_criterion=contact_criterion, velocity_loss_fn=velocity_loss_fn)
         
         train_loss_avg = loss_sum / len(train_dataloader)
         contact_loss_avg = contact_loss_sum / len(train_dataloader)

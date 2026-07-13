@@ -7,30 +7,40 @@ import numpy as np
 
 VELOCITY_COMPONENTS = ("x", "y", "z")
 LEGS = ("left", "right")
+MIN_VELOCITY_VARIANCE = 1e-6
 
 
 def make_velocity_heads(num_features):
-    """One signed-velocity MLP per leg, each predicting [vx, vy, vz]."""
+    """One MLP per leg, predicting mean and diagonal variance for [vx, vy, vz]."""
     return nn.ModuleDict({
         leg: nn.Sequential(
-            nn.Linear(num_features, 128),
+            nn.Linear(num_features, 512),
+            nn.ReLU(),
+            nn.Linear(512, 128),
             nn.ReLU(),
             nn.Linear(128, 32),
             nn.ReLU(),
-            nn.Linear(32, len(VELOCITY_COMPONENTS)),
+            nn.Linear(32, 2 * len(VELOCITY_COMPONENTS)),
         )
         for leg in LEGS
     })
 
 
 def predict_biped_velocity(velocity_heads, features):
-    """Return signed velocities as [B, 2, 3, T] and [B, 2, 3]."""
+    """Return mean and diagonal covariance as [B, 2, 3, T] and [B, 2, 3]."""
     features_by_time = features.permute(0, 2, 1)  # [B, T, channels]
-    velocity_seq = torch.stack([
-        velocity_heads[leg](features_by_time).permute(0, 2, 1)
-        for leg in LEGS
-    ], dim=1)  # [B, left/right, xyz, T]
-    return velocity_seq, velocity_seq[:, :, :, -1]
+    outputs = [velocity_heads[leg](features_by_time) for leg in LEGS]  # [B, T, 6] per leg
+    velocity_seq = torch.stack([output[..., :3].permute(0, 2, 1) for output in outputs], dim=1)
+    covariance_seq = torch.stack([
+        (F.softplus(output[..., 3:]) + MIN_VELOCITY_VARIANCE).permute(0, 2, 1)
+        for output in outputs
+    ], dim=1)
+    return (
+        velocity_seq,
+        velocity_seq[:, :, :, -1],
+        covariance_seq,
+        covariance_seq[:, :, :, -1],
+    )
 
 
 def make_contact_heads(num_features):
@@ -193,6 +203,8 @@ class AttentionTCN(nn.Module):
         Returns:
             velocity_seq: (batch_size, 2, 3, window_size) - signed [left/right, vx/vy/vz] velocities
             velocity_out: (batch_size, 2, 3) - signed last-timestep velocities
+            covariance_seq: (batch_size, 2, 3, window_size) - diagonal velocity variances
+            covariance_out: (batch_size, 2, 3) - diagonal last-timestep velocity variances
             contact_out: (batch_size, 2) - [left, right] contact logits at last timestep
         """
         # x: [B, T, F]
@@ -231,13 +243,13 @@ class AttentionTCN(nn.Module):
         features = self.tcn_backbone(z)  # [B, tcn_num_channels, T]
         
         # 8. Velocity prediction
-        velocity_seq, velocity_out = predict_biped_velocity(self.velocity_heads, features)
+        velocity_seq, velocity_out, covariance_seq, covariance_out = predict_biped_velocity(self.velocity_heads, features)
         
         # 9. Contact prediction (MLP on last timestep features)
         features_last = features[:, :, -1]  # [B, tcn_num_channels]
         contact_out = torch.cat([self.contact_heads[leg](features_last) for leg in LEGS], dim=1)
         
-        return velocity_seq, velocity_out, contact_out
+        return velocity_seq, velocity_out, covariance_seq, covariance_out, contact_out
 
 
 class TCN(nn.Module):
@@ -291,6 +303,8 @@ class TCN(nn.Module):
         Returns:
             velocity_seq: (batch_size, 2, 3, window_size) - signed [left/right, vx/vy/vz] velocities
             velocity_out: (batch_size, 2, 3) - signed last-timestep velocities
+            covariance_seq: (batch_size, 2, 3, window_size) - diagonal velocity variances
+            covariance_out: (batch_size, 2, 3) - diagonal last-timestep velocity variances
             contact_out: (batch_size, 2) - [left, right] contact logits at last timestep
         """
         # x: [B, T, F]
@@ -305,13 +319,13 @@ class TCN(nn.Module):
         features = self.tcn_backbone(z)  # [B, tcn_num_channels, T]
         
         # 4. Velocity prediction
-        velocity_seq, velocity_out = predict_biped_velocity(self.velocity_heads, features)
+        velocity_seq, velocity_out, covariance_seq, covariance_out = predict_biped_velocity(self.velocity_heads, features)
         
         # 5. Contact prediction (MLP on last timestep features)
         features_last = features[:, :, -1]  # [B, tcn_num_channels]
         contact_out = torch.cat([self.contact_heads[leg](features_last) for leg in LEGS], dim=1)
         
-        return velocity_seq, velocity_out, contact_out
+        return velocity_seq, velocity_out, covariance_seq, covariance_out, contact_out
 
 
 class CausalConv1d(nn.Module):
@@ -394,7 +408,7 @@ class contact_cnn(nn.Module):
         features = x  # [B, 64, T]
         
         # Velocity prediction (sequence-to-sequence)
-        velocity_seq, velocity_out = predict_biped_velocity(self.velocity_heads, features)
+        velocity_seq, velocity_out, covariance_seq, covariance_out = predict_biped_velocity(self.velocity_heads, features)
         
         # Contact prediction (MLP on last timestep features)
         features_last = features[:, :, -1]  # [B, 64]
@@ -403,7 +417,7 @@ class contact_cnn(nn.Module):
         # Return both sequence (for training) and last timestep (for inference)
         # During training: use velocity_seq for dense supervision
         # During inference: use velocity_out (last timestep only)
-        return velocity_seq, velocity_out, contact_out
+        return velocity_seq, velocity_out, covariance_seq, covariance_out, contact_out
 
 
 class ContactCNNWithNormalization(nn.Module):
@@ -421,6 +435,8 @@ class ContactCNNWithNormalization(nn.Module):
     Output shapes:
         - velocity_seq: (batch_size, 2, 3, window_size) - signed velocities for both legs
         - velocity_out: (batch_size, 2, 3) - signed last-timestep velocities
+        - covariance_seq: (batch_size, 2, 3, window_size) - diagonal velocity variances
+        - covariance_out: (batch_size, 2, 3) - diagonal last-timestep velocity variances
         - contact_out: (batch_size, 2) - [left, right] contact logits at last timestep
     
     Feature layout:
@@ -465,6 +481,8 @@ class ContactCNNWithNormalization(nn.Module):
         Returns:
             velocity_seq: (batch_size, 2, 3, window_size) - velocity predictions for both legs
             velocity_out: (batch_size, 2, 3) - last-timestep velocity predictions
+            covariance_seq: (batch_size, 2, 3, window_size) - diagonal velocity variances
+            covariance_out: (batch_size, 2, 3) - diagonal last-timestep velocity variances
             contact_out: (batch_size, 2) - [left, right] contact logits at last timestep
         """
         # Apply global z-score normalization to all input features

@@ -20,13 +20,13 @@ val_ratio: 0.1
 # Network params
 batch_size: 60  # Used for both training and testing
 init_lr: 0.001
-num_epoch: 4 # Reduced for quick training with small dataset
+num_epoch: 14 # Reduced for quick training with small dataset
 
 
 
 # Multi-task Learning: Contact Classification + Velocity Regression
 # Balances contact classification loss vs. velocity regression loss
-# Total Loss = contact_weight * contact_BCE_loss + velocity_weight * velocity_Huber_loss
+# Total Loss = contact_weight * contact_BCE_loss + velocity_weight * velocity_Gaussian_NLL
 contact_weight: 0.0     # Weight for contact classification loss
                         # Typical: 0.5-2.0. Start with 1.0
                         # Higher values = prioritize contact detection accuracy
@@ -74,7 +74,7 @@ l2_lambda: 0     # L2 (Ridge): encourages small weights, prevents large values
 # Typical values: 1e-5 to 1e-3 for each
 
 
-Huber_delta: 0.3      # Delta parameter for Huber loss in velocity regression
+# Velocity uncertainty is learned as diagonal covariance via Gaussian NLL; no covariance labels are used.
 
 # Model Architecture Selection
 # Choose which neural network architecture to use
