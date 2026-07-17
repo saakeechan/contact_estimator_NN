@@ -29,7 +29,7 @@ Three network architectures are available:
 3. contact_cnn (Vanilla CNN):
    - Simple sequential convolutional architecture
    - Three conv layers with kernel size 3
-   - Uses GELU activation
+   - Uses SiLU activation
    - No residual connections
    - Fastest, fewest parameters
 
@@ -50,17 +50,17 @@ class TCNResidualBlock(nn.Module):
         
         # First causal conv layer (with weight normalization)
         self.conv1 = CausalConv1d(in_channels, out_channels, kernel_size, dilation)
-        self.relu1 = nn.ReLU()
+        self.silu1 = nn.SiLU()
         self.dropout1 = nn.Dropout(dropout)
         
         # Second causal conv layer (with weight normalization)
         self.conv2 = CausalConv1d(out_channels, out_channels, kernel_size, dilation)
-        self.relu2 = nn.ReLU()
+        self.silu2 = nn.SiLU()
         self.dropout2 = nn.Dropout(dropout)
         
         # 1x1 convolution for residual connection if dimensions don't match
         self.downsample = nn.Conv1d(in_channels, out_channels, 1) if in_channels != out_channels else None
-        self.relu_out = nn.ReLU()
+        self.silu_out = nn.SiLU()
         
     def forward(self, x):
         # Save input for residual connection
@@ -68,12 +68,12 @@ class TCNResidualBlock(nn.Module):
         
         # First conv block
         out = self.conv1(x)
-        out = self.relu1(out)
+        out = self.silu1(out)
         out = self.dropout1(out)
         
         # Second conv block
         out = self.conv2(out)
-        out = self.relu2(out)
+        out = self.silu2(out)
         out = self.dropout2(out)
         
         # Apply 1x1 conv to residual if needed
@@ -82,7 +82,7 @@ class TCNResidualBlock(nn.Module):
         
         # Add residual connection
         out = out + residual
-        out = self.relu_out(out)
+        out = self.silu_out(out)
         
         return out
 
@@ -150,9 +150,9 @@ class AttentionTCN(nn.Module):
         # 7. Contact detection head (MLP: 256 → 32 → 1)
         self.contact_head = nn.Sequential(
             nn.Linear(tcn_num_channels, 256),
-            nn.ReLU(),
+            nn.SiLU(),
             nn.Linear(256, 32),
-            nn.ReLU(),
+            nn.SiLU(),
             nn.Linear(32, 1)
             # No activation - BCEWithLogitsLoss applies sigmoid internally
         )
@@ -262,9 +262,9 @@ class TCN(nn.Module):
         # 4. Contact detection head (MLP: 256 → 32 → 1)
         self.contact_head = nn.Sequential(
             nn.Linear(tcn_num_channels, 256),
-            nn.ReLU(),
+            nn.SiLU(),
             nn.Linear(256, 32),
-            nn.ReLU(),
+            nn.SiLU(),
             nn.Linear(32, 1)
             # No activation - BCEWithLogitsLoss applies sigmoid internally
         )
@@ -335,12 +335,12 @@ class contact_cnn(nn.Module):
                 kernel_size=3,
                 dilation=1
             ),
-            nn.ReLU(),
+            nn.SiLU(),
         )
         
         self.conv2 = nn.Sequential(
             CausalConv1d(in_ch=128, out_ch=128, kernel_size=3, dilation=1),
-            nn.ReLU(),
+            nn.SiLU(),
         )
         
         self.conv3 = nn.Sequential(
@@ -350,17 +350,17 @@ class contact_cnn(nn.Module):
                 kernel_size=3,
                 dilation=1
             ),
-            nn.ReLU(),
+            nn.SiLU(),
         )
 
         self.conv4 = nn.Sequential(
             CausalConv1d(128, 128, kernel_size=3, dilation=1),
-            nn.ReLU(),
+            nn.SiLU(),
         )
 
         self.conv5 = nn.Sequential(
             CausalConv1d(128, 128, kernel_size=3, dilation=1),
-            nn.ReLU(),
+            nn.SiLU(),
         )
         
         # Velocity prediction heads
@@ -372,9 +372,9 @@ class contact_cnn(nn.Module):
         # Contact detection head (MLP: 256 → 32 → 1)
         self.contact_head = nn.Sequential(
             nn.Linear(128, 256),
-            nn.ReLU(),
+            nn.SiLU(),
             nn.Linear(256, 32),
-            nn.ReLU(),
+            nn.SiLU(),
             nn.Linear(32, 1)
             # No activation - BCEWithLogitsLoss applies sigmoid internally
         )
