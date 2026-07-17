@@ -29,6 +29,10 @@ def gaussian_nll(mean, target, variance):
     return 0.5 * (variance.log() + (mean - target).square() / variance)
 
 
+def mse_loss(mean, target, variance):
+    return (mean - target).square()
+
+
 def compute_accuracy(dataloader, model, contact_criterion=None, velocity_loss_fn=None):
     """
     Compute left-foot contact and signed-velocity metrics at the last timestep.
@@ -62,7 +66,9 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_loss_fn
             gt_velocity_seq = sample['velocity']  # [B, T, 1, 3]
             gt_velocity = gt_velocity_seq[:, -1, :, :]  # [B, 1, 3]
 
-            velocity_seq, velocity_output, covariance_seq, covariance_output, contact_output = model(input_data)
+            velocity_seq, velocity_output, covariance_seq, covariance_output, contact_output = model(
+                input_data, return_sequence=False
+            )
             contact_prediction = (contact_output > 0).float()  # Binary predictions
 
             # Compute contact loss if criterion provided
@@ -218,6 +224,8 @@ def train(model, train_dataloader, val_dataloader, config):
     derivative_weight = float(config.get('derivative_weight', 0.0))  # Weight for derivative matching loss
     temporal_weight_power = float(config.get('temporal_weight_power', 0.0))  # Temporal weighting exponent
     use_dense_supervision = config.get('use_dense_supervision', False)
+    use_mse_warmup_then_nll = config.get('use_mse_warmup_then_nll', False)
+    mse_warmup_epochs = config['num_epoch'] // 2
     
     # Print supervision mode
     print(f"\n{'='*60}")
@@ -226,6 +234,8 @@ def train(model, train_dataloader, val_dataloader, config):
 
     else:
         print(f"LAST TIMESTEP ONLY MODE: Loss on final output only")
+    if use_mse_warmup_then_nll:
+        print(f"VELOCITY LOSS: MSE for first {mse_warmup_epochs} epochs, then Gaussian NLL")
 
 
     # best_acc = 0
@@ -254,6 +264,9 @@ def train(model, train_dataloader, val_dataloader, config):
         temporal_weights = 1.0  # Uniform weighting
     
     for epoch in range(config['num_epoch']):
+        training_velocity_loss_fn = mse_loss if use_mse_warmup_then_nll and epoch < mse_warmup_epochs else gaussian_nll
+        velocity_loss_name = "MSE" if training_velocity_loss_fn is mse_loss else "Gaussian NLL"
+        print(f"Velocity loss: {velocity_loss_name}")
         if device.type == 'cuda':
             allocated = torch.cuda.memory_allocated(device) / 1024**2
             reserved  = torch.cuda.memory_reserved(device)  / 1024**2
@@ -275,7 +288,9 @@ def train(model, train_dataloader, val_dataloader, config):
 
             optimizer.zero_grad()
             
-            velocity_seq, velocity_output, covariance_seq, covariance_output, contact_output = model(input_data)
+            velocity_seq, velocity_output, covariance_seq, covariance_output, contact_output = model(
+                input_data, return_sequence=use_dense_supervision
+            )
             
             # Contact loss (binary classification at last timestep)
             contact_loss = contact_criterion(contact_output, contact_label)
@@ -285,7 +300,7 @@ def train(model, train_dataloader, val_dataloader, config):
                 velocity_seq_permuted = velocity_seq.permute(0, 3, 1, 2)  # [B, T, 1, 3]
                 
                 covariance_seq_permuted = covariance_seq.permute(0, 3, 1, 2)  # [B, T, 1, 3]
-                velocity_loss_elementwise = velocity_loss_fn(
+                velocity_loss_elementwise = training_velocity_loss_fn(
                     velocity_seq_permuted,
                     velocity_label_seq,
                     covariance_seq_permuted,
@@ -324,7 +339,7 @@ def train(model, train_dataloader, val_dataloader, config):
                     ).sum() / (contact_mask_derivative.sum() * velocity_label_seq.shape[-1] + 1e-8)
             else:
                 # LAST TIMESTEP ONLY: Compute velocity loss only on final output (simpler, faster)
-                velocity_loss_elementwise = velocity_loss_fn(
+                velocity_loss_elementwise = training_velocity_loss_fn(
                     velocity_output,
                     velocity_label,
                     covariance_output,

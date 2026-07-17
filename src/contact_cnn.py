@@ -26,8 +26,16 @@ def make_velocity_heads(num_features):
     })
 
 
-def predict_velocity(velocity_heads, features):
-    """Return left-foot mean and diagonal covariance as [B, 1, 3, T] and [B, 1, 3]."""
+def predict_velocity(velocity_heads, features, return_sequence=True):
+    """Predict all timesteps for dense supervision, or only the final timestep."""
+    if not return_sequence:
+        outputs = [velocity_heads[leg](features[:, :, -1]) for leg in LEGS]  # [B, 6]
+        velocity_out = torch.stack([output[..., :3] for output in outputs], dim=1)
+        covariance_out = torch.stack([
+            F.softplus(output[..., 3:]) + MIN_VELOCITY_VARIANCE for output in outputs
+        ], dim=1)
+        return None, velocity_out, None, covariance_out
+
     features_by_time = features.permute(0, 2, 1)  # [B, T, channels]
     outputs = [velocity_heads[leg](features_by_time) for leg in LEGS]  # [B, T, 6]
     velocity_seq = torch.stack([output[..., :3].permute(0, 2, 1) for output in outputs], dim=1)
@@ -35,12 +43,7 @@ def predict_velocity(velocity_heads, features):
         (F.softplus(output[..., 3:]) + MIN_VELOCITY_VARIANCE).permute(0, 2, 1)
         for output in outputs
     ], dim=1)
-    return (
-        velocity_seq,
-        velocity_seq[:, :, :, -1],
-        covariance_seq,
-        covariance_seq[:, :, :, -1],
-    )
+    return velocity_seq, velocity_seq[:, :, :, -1], covariance_seq, covariance_seq[:, :, :, -1]
 
 
 def make_contact_heads(num_features):
@@ -195,7 +198,7 @@ class AttentionTCN(nn.Module):
         # 7. Left-foot contact logit.
         self.contact_heads = make_contact_heads(tcn_num_channels)
     
-    def forward(self, x):
+    def forward(self, x, return_sequence=True):
         """
         Args:
             x: (batch_size, window_size, num_features) - RAW features
@@ -243,7 +246,9 @@ class AttentionTCN(nn.Module):
         features = self.tcn_backbone(z)  # [B, tcn_num_channels, T]
         
         # 8. Velocity prediction
-        velocity_seq, velocity_out, covariance_seq, covariance_out = predict_velocity(self.velocity_heads, features)
+        velocity_seq, velocity_out, covariance_seq, covariance_out = predict_velocity(
+            self.velocity_heads, features, return_sequence
+        )
         
         # 9. Contact prediction (MLP on last timestep features)
         features_last = features[:, :, -1]  # [B, tcn_num_channels]
@@ -295,7 +300,7 @@ class TCN(nn.Module):
         # 4. Left-foot contact logit.
         self.contact_heads = make_contact_heads(tcn_num_channels)
     
-    def forward(self, x):
+    def forward(self, x, return_sequence=True):
         """
         Args:
             x: (batch_size, window_size, num_features) - RAW features
@@ -319,7 +324,9 @@ class TCN(nn.Module):
         features = self.tcn_backbone(z)  # [B, tcn_num_channels, T]
         
         # 4. Velocity prediction
-        velocity_seq, velocity_out, covariance_seq, covariance_out = predict_velocity(self.velocity_heads, features)
+        velocity_seq, velocity_out, covariance_seq, covariance_out = predict_velocity(
+            self.velocity_heads, features, return_sequence
+        )
         
         # 5. Contact prediction (MLP on last timestep features)
         features_last = features[:, :, -1]  # [B, tcn_num_channels]
@@ -393,7 +400,7 @@ class contact_cnn(nn.Module):
         # Left-foot contact logit.
         self.contact_heads = make_contact_heads(128)
 
-    def forward(self, x):
+    def forward(self, x, return_sequence=True):
         # x shape: (batch_size, window_size, num_features) - RAW features from csv2numpy.py
         
         # Permute to (batch_size, num_features, window_size) for Conv1d
@@ -408,7 +415,9 @@ class contact_cnn(nn.Module):
         features = x  # [B, 64, T]
         
         # Velocity prediction (sequence-to-sequence)
-        velocity_seq, velocity_out, covariance_seq, covariance_out = predict_velocity(self.velocity_heads, features)
+        velocity_seq, velocity_out, covariance_seq, covariance_out = predict_velocity(
+            self.velocity_heads, features, return_sequence
+        )
         
         # Contact prediction (MLP on last timestep features)
         features_last = features[:, :, -1]  # [B, 64]
@@ -471,7 +480,7 @@ class ContactCNNWithNormalization(nn.Module):
             # Fallback: no normalization if stats not provided
             self.register_buffer('global_std', torch.ones(1, 1, num_features))
         
-    def forward(self, x):
+    def forward(self, x, return_sequence=True):
         """
         Apply z-score normalization, then pass through base model.
         
@@ -490,4 +499,4 @@ class ContactCNNWithNormalization(nn.Module):
         x_normalized = (x - self.global_mean) / (self.global_std + self.eps)
         
         # Pass normalized data through the base model
-        return self.base_model(x_normalized)
+        return self.base_model(x_normalized, return_sequence=return_sequence)

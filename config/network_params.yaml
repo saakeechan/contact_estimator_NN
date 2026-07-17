@@ -39,7 +39,7 @@ velocity_weight: 1.0    # Weight for velocity regression loss
 
 # -------------------------------------
                             # Dense Supervision: Compute loss on all timesteps vs last timestep only
-use_dense_supervision: True # True: compute loss on full velocity sequence (all timesteps)
+use_dense_supervision: False # True: compute loss on full velocity sequence (all timesteps)
                              # False: compute loss only on last timestep output
                              # Dense supervision helps learn temporal patterns
                              # Last-only is faster and simpler but may underfit
@@ -75,6 +75,8 @@ l2_lambda: 0     # L2 (Ridge): encourages small weights, prevents large values
 
 
 # Velocity uncertainty is learned as diagonal covariance via Gaussian NLL; no covariance labels are used.
+# When enabled, train mean velocity with MSE for the first half of epochs, then Gaussian NLL.
+use_mse_warmup_then_nll: true
 
 # Model Architecture Selection
 # Choose which neural network architecture to use
@@ -91,4 +93,4 @@ attention_num_heads: 4      # Number of attention heads (must divide d_model eve
 tcn_num_channels: 64        # Number of channels in TCN layers
 tcn_kernel_size: 3          # Kernel size for temporal convolutions
 tcn_num_blocks: 3           # Number of TCN residual blocks (dilation: 1,2,4,8,16,...)
-tcn_dropout: 0.0            # Dropout rate in TCN blocks (0.0-0.5)
+tcn_dropout: 0.2            # Dropout rate in TCN blocks (0.0-0.5)

@@ -65,7 +65,9 @@ def compute_accuracy(dataloader, model, device=torch.device('cpu')):
             gt_velocity_seq = sample['velocity']  # [B, T, 1, 3]
             gt_velocity = gt_velocity_seq[:, -1, :, :]  # [B, 1, 3]
 
-            velocity_seq, velocity_output, covariance_seq, covariance_output, contact_output = model(input_data)
+            velocity_seq, velocity_output, covariance_seq, covariance_output, contact_output = model(
+                input_data, return_sequence=False
+            )
             
             # Collect contact predictions for classification metrics
             contact_pred_binary = contact_output > 0  # Logit threshold at 0.0
@@ -126,7 +128,7 @@ def save_velocity_plots(dataloader, model, output_dir):
     predicted, ground_truth, contact = [], [], []
     with torch.no_grad():
         for sample in dataloader:
-            _, velocity_output, _, _, _ = model(sample['data'])
+            _, velocity_output, _, _, _ = model(sample['data'], return_sequence=False)
             predicted.append(velocity_output.cpu())
             ground_truth.append(sample['velocity'][:, -1, :, :].cpu())
             contact.append(sample['label'].cpu())
