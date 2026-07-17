@@ -1,0 +1,94 @@
+# CSV data processing params
+csv_folder: "Data/CSVFiles/"
+cmd_vel_x_min: 0.0   # Skip runs where max cmd_vel_x is below this value
+cmd_vel_x_max: 1.5   # Skip runs where max cmd_vel_x is above this value
+# Path to the data folder. Data should be separated into train.npy, train_label.npy, val.npy, val_label.npy.
+data_folder: "Data/NumpyFiles/"
+# # Test-specific params
+# model_load_path: "results/bipedal_contact_best_val_velocity.pt"
+
+print_every: 1000
+
+# Data params
+
+window_size: 24 # Number of consecutive samples to stack as input (temporal context)
+shuffle: True
+random_seed: 42  # For reproducible train/val/test splits
+train_ratio: 0.8
+val_ratio: 0.1
+
+# Network params
+batch_size: 60  # Used for both training and testing
+init_lr: 0.001
+num_epoch: 14 # Reduced for quick training with small dataset
+
+
+
+# Multi-task Learning: Contact Classification + Velocity Regression
+# Balances contact classification loss vs. velocity regression loss
+# Total Loss = contact_weight * contact_BCE_loss + velocity_weight * velocity_Gaussian_NLL
+contact_weight: 0.0     # Weight for contact classification loss
+                        # Typical: 0.5-2.0. Start with 1.0
+                        # Higher values = prioritize contact detection accuracy
+                        # Lower values = prioritize velocity accuracy
+velocity_weight: 1.0    # Weight for velocity regression loss
+                        # Typical: 0.5-2.0. Start with 1.0
+                        # Higher values = prioritize velocity accuracy
+                        # Lower values = prioritize contact accuracy
+                        # Set based on which task is more important
+
+# -------------------------------------
+                            # Dense Supervision: Compute loss on all timesteps vs last timestep only
+use_dense_supervision: True # True: compute loss on full velocity sequence (all timesteps)
+                             # False: compute loss only on last timestep output
+                             # Dense supervision helps learn temporal patterns
+                             # Last-only is faster and simpler but may underfit
+
+# Derivative Matching Loss: Enforces smooth temporal dynamics
+# Matches the slope/change of velocity predictions to ground truth
+# Total Loss = velocity_loss + derivative_weight * derivative_loss
+# NOTE: Only available when use_dense_supervision=True (requires full sequence)
+derivative_weight: 0.00  # Weight for derivative matching loss
+                        # Typical: 0.1-1.0. Start with 0.5
+                        # Higher values = prioritize smooth transitions
+                        # Forces rises/drops to occur at correct timesteps
+
+
+
+# Temporal Weighting: Emphasize recent timesteps over past
+# ONLY applies when use_dense_supervision=True (requires multiple timesteps)
+# Loss at timestep t is weighted by: w_t = ((t+1) / T) ^ temporal_weight_power
+# where t=0 is oldest, t=T-1 is most recent (last timestep)
+temporal_weight_power: 0.0  # Exponent for temporal weighting
+                            # 0.0 = uniform (no temporal bias)
+                            # 1.0 = linear (w_t proportional to recency)
+                            # 2.0 = quadratic (strong emphasis on recent)
+                            # Higher values = more focus on last timestep
+                            # Ignored if use_dense_supervision=False
+# -------------------------------------
+
+
+# Elastic Net Regularization (L1 + L2)
+l1_lambda: 0    # L1 (Lasso): encourages sparsity (many weights → 0)
+l2_lambda: 0     # L2 (Ridge): encourages small weights, prevents large values
+# Typical values: 1e-5 to 1e-3 for each
+
+
+# Velocity uncertainty is learned as diagonal covariance via Gaussian NLL; no covariance labels are used.
+
+# Model Architecture Selection
+# Choose which neural network architecture to use
+model_architecture: "tcn"  # Options: "attention_tcn", "tcn", "vanilla_cnn"
+                                   # - attention_tcn: Transformer + TCN hybrid with multi-head attention (most expressive, slowest)
+                                   # - tcn: Pure Temporal Convolutional Network with residual blocks (good balance)
+                                   # - vanilla_cnn: Simple dilated CNN (fastest, fewest parameters)
+
+# AttentionTCN-specific hyperparameters (only used if model_architecture = "attention_tcn")
+attention_d_model: 64       # Transformer embedding dimension (typically 64-256)
+attention_num_heads: 4      # Number of attention heads (must divide d_model evenly)
+
+# TCN hyperparameters (used by "attention_tcn" and "tcn" architectures)
+tcn_num_channels: 64        # Number of channels in TCN layers
+tcn_kernel_size: 3          # Kernel size for temporal convolutions
+tcn_num_blocks: 3           # Number of TCN residual blocks (dilation: 1,2,4,8,16,...)
+tcn_dropout: 0.0            # Dropout rate in TCN blocks (0.0-0.5)
