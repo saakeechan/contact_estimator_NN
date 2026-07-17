@@ -203,7 +203,7 @@ def generate_training_summary(run_dir, config, train_metrics, val_metrics, best_
 def main():
     parser = argparse.ArgumentParser(description='Plot training metrics from TensorBoard logs')
     parser.add_argument('--log-dir', type=str, 
-                        default='logs/bipedal_contact',
+                        default='logs/left_leg_contact',
                         help='Path to TensorBoard log directory')
     parser.add_argument('--output-dir', type=str,
                         default='results',

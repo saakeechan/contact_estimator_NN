@@ -31,7 +31,7 @@ def gaussian_nll(mean, target, variance):
 
 def compute_accuracy(dataloader, model, contact_criterion=None, velocity_loss_fn=None):
     """
-    Compute combined left/right contact and signed-velocity metrics at the last timestep.
+    Compute left-foot contact and signed-velocity metrics at the last timestep.
     
     Args:
         dataloader: DataLoader to evaluate
@@ -58,9 +58,9 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_loss_fn
     with torch.no_grad():
         for sample in tqdm(dataloader):
             input_data = sample['data']
-            gt_contact = sample['label']  # [B, 2] ordered [left, right]
-            gt_velocity_seq = sample['velocity']  # [B, T, 2, 3]
-            gt_velocity = gt_velocity_seq[:, -1, :, :]  # [B, 2, 3]
+            gt_contact = sample['label']  # [B, 1] left foot
+            gt_velocity_seq = sample['velocity']  # [B, T, 1, 3]
+            gt_velocity = gt_velocity_seq[:, -1, :, :]  # [B, 1, 3]
 
             velocity_seq, velocity_output, covariance_seq, covariance_output, contact_output = model(input_data)
             contact_prediction = (contact_output > 0).float()  # Binary predictions
@@ -71,7 +71,7 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_loss_fn
                 contact_loss_sum += contact_loss.item()
             
             # Velocity loss masked to contact samples only
-            contact_mask = (gt_contact == 1).float().unsqueeze(-1)  # [B, 2, 1]
+            contact_mask = (gt_contact == 1).float().unsqueeze(-1)  # [B, 1, 1]
             
             if velocity_loss_fn is not None:
                 # Velocity loss on last timestep only, masked to contact samples only
@@ -85,7 +85,7 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_loss_fn
             
             # MAE for velocity (only on contact samples, last timestep)
             if contact_mask.sum() > 0:
-                velocity_errors = torch.abs(velocity_output - gt_velocity)  # [B, 2, 3]
+                velocity_errors = torch.abs(velocity_output - gt_velocity)  # [B, 1, 3]
                 if velocity_abs_error_sum is None:
                     velocity_abs_error_sum = torch.zeros_like(velocity_errors[0])
                     velocity_contact_count = torch.zeros_like(gt_contact[0])
@@ -107,7 +107,7 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_loss_fn
     num_batches = len(dataloader) if len(dataloader) > 0 else 1
 
     if velocity_abs_error_sum is None:
-        velocity_mae_components = np.zeros((2, 3))
+        velocity_mae_components = np.zeros((1, 3))
         velocity_mae = 0.0
     else:
         velocity_mae_components = (velocity_abs_error_sum / (velocity_contact_count[:, None] + 1e-8)).cpu().tolist()
@@ -130,11 +130,11 @@ def save_onnx_model(model, checkpoint_path, window_size):
     """
     Save ONNX version of the model for C++ deployment.
     The model has five outputs:
-        - velocity_seq: (batch, 2, 3, window_size) - [left, right, vx/vy/vz] predictions
-        - velocity_output: (batch, 2, 3) - last-timestep velocity predictions
-        - covariance_seq: (batch, 2, 3, window_size) - diagonal velocity variances
-        - covariance_output: (batch, 2, 3) - diagonal last-timestep velocity variances
-        - contact_output: (batch, 2) - [left, right] contact logits
+        - velocity_seq: (batch, 1, 3, window_size) - left-foot [vx/vy/vz] predictions
+        - velocity_output: (batch, 1, 3) - last-timestep velocity prediction
+        - covariance_seq: (batch, 1, 3, window_size) - diagonal velocity variances
+        - covariance_output: (batch, 1, 3) - diagonal last-timestep velocity variances
+        - contact_output: (batch, 1) - left-foot contact logit
     """
     try:
         import warnings
@@ -267,10 +267,10 @@ def train(model, train_dataloader, val_dataloader, config):
         model.train()
         for i, samples in tqdm(enumerate(train_dataloader, start=0)):
             input_data = samples['data'] 
-            contact_label = samples['label']  # [B, 2] ordered [left, right]
-            contact_label_seq = samples['label_seq']  # [B, T, 2]
-            velocity_label_seq = samples['velocity']  # [B, T, 2, 3]
-            velocity_label = velocity_label_seq[:, -1, :, :]  # [B, 2, 3]
+            contact_label = samples['label']  # [B, 1] left foot
+            contact_label_seq = samples['label_seq']  # [B, T, 1]
+            velocity_label_seq = samples['velocity']  # [B, T, 1, 3]
+            velocity_label = velocity_label_seq[:, -1, :, :]  # [B, 1, 3]
         
 
             optimizer.zero_grad()
@@ -282,17 +282,17 @@ def train(model, train_dataloader, val_dataloader, config):
             
             if use_dense_supervision:
                 # DENSE SUPERVISION: Compute velocity loss on FULL SEQUENCE masked to contact only
-                velocity_seq_permuted = velocity_seq.permute(0, 3, 1, 2)  # [B, T, 2, 3]
+                velocity_seq_permuted = velocity_seq.permute(0, 3, 1, 2)  # [B, T, 1, 3]
                 
-                covariance_seq_permuted = covariance_seq.permute(0, 3, 1, 2)  # [B, T, 2, 3]
+                covariance_seq_permuted = covariance_seq.permute(0, 3, 1, 2)  # [B, T, 1, 3]
                 velocity_loss_elementwise = velocity_loss_fn(
                     velocity_seq_permuted,
                     velocity_label_seq,
                     covariance_seq_permuted,
-                )  # [B, T, 2, 3]
+                )  # [B, T, 1, 3]
                 
                 # Use full contact sequence for masking (dense supervision only at contact timesteps)
-                contact_mask_seq = (contact_label_seq == 1).float().unsqueeze(-1)  # [B, T, 2, 1]
+                contact_mask_seq = (contact_label_seq == 1).float().unsqueeze(-1)  # [B, T, 1, 1]
                 
                 # Apply temporal weighting (pre-computed before training loop)
                 velocity_loss = (
@@ -313,7 +313,7 @@ def train(model, train_dataloader, val_dataloader, config):
                         gt_derivative,
                         reduction='none',
                         beta=0.05
-                    )  # [B, T-1, 2, 3]
+                    )  # [B, T-1, 1, 3]
                     
                     # Mask to contact timesteps - both t and t+1 must be in contact
                     # (derivative spans from timestep t to t+1)
@@ -328,10 +328,10 @@ def train(model, train_dataloader, val_dataloader, config):
                     velocity_output,
                     velocity_label,
                     covariance_output,
-                )  # [B, 2, 3]
+                )  # [B, 1, 3]
                 
                 # Mask to contact samples only (last timestep)
-                contact_mask = (contact_label == 1).float().unsqueeze(-1)  # [B, 2, 1]
+                contact_mask = (contact_label == 1).float().unsqueeze(-1)  # [B, 1, 1]
                 
                 velocity_loss = (
                     velocity_loss_elementwise * contact_mask
@@ -467,23 +467,21 @@ def train(model, train_dataloader, val_dataloader, config):
             save_onnx_model(model, checkpoint_path, config['window_size'])
             
 
-        train_left_mae, train_right_mae = train_metrics['velocity_mae_components']
-        val_left_mae, val_right_mae = val_metrics['velocity_mae_components']
+        train_left_mae = train_metrics['velocity_mae_components'][0]
+        val_left_mae = val_metrics['velocity_mae_components'][0]
         print("Finished epoch %d / %d" % (epoch + 1, config['num_epoch']))
         print(
-            "  Train - Contact Acc: %.4f, Velocity MAE: %.4f [left vx/vy/vz: %.4f/%.4f/%.4f, right: %.4f/%.4f/%.4f]" % (
+            "  Train - Contact Acc: %.4f, Velocity MAE: %.4f [left vx/vy/vz: %.4f/%.4f/%.4f]" % (
                 train_metrics['contact_acc'],
                 train_metrics['velocity_mae'],
-                *train_left_mae,
-                *train_right_mae
+                *train_left_mae
             )
         )
         print(
-            "  Val   - Contact Acc: %.4f, Velocity MAE: %.4f [left vx/vy/vz: %.4f/%.4f/%.4f, right: %.4f/%.4f/%.4f]" % (
+            "  Val   - Contact Acc: %.4f, Velocity MAE: %.4f [left vx/vy/vz: %.4f/%.4f/%.4f]" % (
                 val_metrics['contact_acc'],
                 val_metrics['velocity_mae'],
-                *val_left_mae,
-                *val_right_mae
+                *val_left_mae
             )
         )
     

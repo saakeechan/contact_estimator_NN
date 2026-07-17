@@ -6,7 +6,7 @@ For each CSV file:
 1. Load the data
 2. Split by runs (when timestamp resets)
 3. For each run:
-   - Compute left/right foot velocities in world frame by numerical differentiation
+   - Compute left-foot velocity in world frame by numerical differentiation
    - Calculate velocity magnitude (norm)
    - Plot velocity over time
    - Save plot as PNG
@@ -103,13 +103,12 @@ def analyze_foot_velocities(csv_dir="../Data/CSVFiles", output_dir=None):
         required_cols = [
             'timestamp',
             'lfoot_pos_x', 'lfoot_pos_y', 'lfoot_pos_z',
-            'rfoot_pos_x', 'rfoot_pos_y', 'rfoot_pos_z',
         ]
         if not all(col in df.columns for col in required_cols):
             print(f"  Skipping - missing required columns")
             continue
         
-        contact_columns = {'Left': 'lfoot-contact', 'Right': 'rfoot-contact'}
+        contact_column = 'lfoot-contact'
         
         # Split by runs - detect when timestamp resets
         run_boundaries = [0]
@@ -140,10 +139,7 @@ def analyze_foot_velocities(csv_dir="../Data/CSVFiles", output_dir=None):
                 continue
             
             time = df_run['timestamp'].values
-            foot_positions = {
-                'Left': df_run[['lfoot_pos_x', 'lfoot_pos_y', 'lfoot_pos_z']].values,
-                'Right': df_run[['rfoot_pos_x', 'rfoot_pos_y', 'rfoot_pos_z']].values,
-            }
+            foot_positions = df_run[['lfoot_pos_x', 'lfoot_pos_y', 'lfoot_pos_z']].values
             
             # Extract cmd_vel_x if available
             cmd_vel_x = df_run['cmd_vel_x'].values[0] if 'cmd_vel_x' in df_run.columns else None
@@ -160,34 +156,32 @@ def analyze_foot_velocities(csv_dir="../Data/CSVFiles", output_dir=None):
             
             # Only compute velocities and plot if foot velocity plotting is enabled
             if PLOT_FOOT_VELOCITIES:
-                fig, axes = plt.subplots(4, 1, figsize=(12, 14), sharex=True)
+                fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=True)
                 title_suffix = f' | cmd_vel_x: {cmd_vel_x:.3f} m/s' if cmd_vel_x is not None else ''
-                for leg_index, (leg_name, positions) in enumerate(foot_positions.items()):
-                    velocity = np.diff(positions, axis=0) / np.diff(time)[:, None]
-                    velocity = np.vstack((velocity, velocity[-1]))
-                    components_ax, magnitude_ax = axes[2 * leg_index:2 * leg_index + 2]
-                    contact_column = contact_columns[leg_name]
+                velocity = np.diff(foot_positions, axis=0) / np.diff(time)[:, None]
+                velocity = np.vstack((velocity, velocity[-1]))
+                components_ax, magnitude_ax = axes
 
-                    if contact_column in df_run:
-                        in_contact = df_run[contact_column].values > 0.5
-                        changes = np.diff(np.concatenate(([0], in_contact, [0])))
-                        for start, end in zip(np.where(changes == 1)[0], np.where(changes == -1)[0]):
-                            for ax in (components_ax, magnitude_ax):
-                                ax.axvspan(time[start], time[min(end, len(time) - 1)], alpha=0.3, color='red')
+                if contact_column in df_run:
+                    in_contact = df_run[contact_column].values > 0.5
+                    changes = np.diff(np.concatenate(([0], in_contact, [0])))
+                    for start, end in zip(np.where(changes == 1)[0], np.where(changes == -1)[0]):
+                        for ax in (components_ax, magnitude_ax):
+                            ax.axvspan(time[start], time[min(end, len(time) - 1)], alpha=0.3, color='red')
 
-                    components_ax.plot(time, velocity[:, 0], label='vel_x', alpha=0.7)
-                    components_ax.plot(time, velocity[:, 1], label='vel_y', alpha=0.7)
-                    components_ax.plot(time, velocity[:, 2], label='vel_z', alpha=0.7)
-                    components_ax.set_ylabel('Velocity (m/s)')
-                    components_ax.set_title(f'{leg_name} Foot Velocity Components - Run {global_run_number}{title_suffix}')
-                    components_ax.legend()
-                    components_ax.grid(True, alpha=0.3)
+                components_ax.plot(time, velocity[:, 0], label='vel_x', alpha=0.7)
+                components_ax.plot(time, velocity[:, 1], label='vel_y', alpha=0.7)
+                components_ax.plot(time, velocity[:, 2], label='vel_z', alpha=0.7)
+                components_ax.set_ylabel('Velocity (m/s)')
+                components_ax.set_title(f'Left Foot Velocity Components - Run {global_run_number}{title_suffix}')
+                components_ax.legend()
+                components_ax.grid(True, alpha=0.3)
 
-                    magnitude_ax.plot(time, np.linalg.norm(velocity, axis=1), 'b-', linewidth=2)
-                    magnitude_ax.set_xlabel('Time (s)')
-                    magnitude_ax.set_ylabel('Velocity Magnitude (m/s)')
-                    magnitude_ax.set_title(f'{leg_name} Foot Velocity Magnitude - Run {global_run_number}{title_suffix}')
-                    magnitude_ax.grid(True, alpha=0.3)
+                magnitude_ax.plot(time, np.linalg.norm(velocity, axis=1), 'b-', linewidth=2)
+                magnitude_ax.set_xlabel('Time (s)')
+                magnitude_ax.set_ylabel('Velocity Magnitude (m/s)')
+                magnitude_ax.set_title(f'Left Foot Velocity Magnitude - Run {global_run_number}{title_suffix}')
+                magnitude_ax.grid(True, alpha=0.3)
                 
                 plt.tight_layout()
                 

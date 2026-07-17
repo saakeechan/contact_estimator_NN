@@ -32,12 +32,12 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
     - val_ratio: not used (kept for backward compatibility)
     
     Output:
-    - all_data.npy: all data concatenated with left/right leg features
+    - all_data.npy: all data concatenated with left-leg features
       NOTE: All features are RAW - no normalization by cmd_vel or any other feature
-    - all_labels.npy: left/right contact labels (shape: N x 2, binary 0/1)
+    - all_labels.npy: left-foot contact labels (shape: N x 1, binary 0/1)
     - all_data_boundaries.npy: indices marking end of each run (CRITICAL for preventing data leakage)
     - all_data_metadata.npy: metadata dict with num_features (SOURCE OF TRUTH for network architecture)
-    - all_foot_velocities.npy: signed world-frame foot velocities (shape: N x 2 x 3)
+    - all_foot_velocities.npy: signed world-frame left-foot velocities (shape: N x 1 x 3)
     """
     
     # Ensure save directory exists
@@ -51,8 +51,8 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
     
     # num_features will be determined automatically from the actual data shape
     all_data = None  # Will be initialized after first sample
-    all_labels = np.zeros((0, 2))
-    all_foot_velocities = np.zeros((0, 2, 3))
+    all_labels = np.zeros((0, 1))
+    all_foot_velocities = np.zeros((0, 1, 3))
     num_features = None  # Will be set from cur_data.shape[1] after first run
     
     # Track boundaries between different runs to prevent window bleeding
@@ -64,11 +64,7 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
         'left_hip_pitch_joint', 'left_hip_roll_joint', 'left_hip_yaw_joint',
         'left_knee_joint', 'left_ankle_pitch_joint', 'left_ankle_roll_joint',
     ]
-    right_joint_names = [
-        'right_hip_pitch_joint', 'right_hip_roll_joint', 'right_hip_yaw_joint',
-        'right_knee_joint', 'right_ankle_pitch_joint', 'right_ankle_roll_joint',
-    ]
-    joint_names = left_joint_names + right_joint_names
+    joint_names = left_joint_names
     
     # Process all CSV files in the folder
     for data_name in sorted(glob.glob(data_pth + '*.csv')):
@@ -115,7 +111,7 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
             imu_acc = df_run[['acc_body_x', 'acc_body_y', 'acc_body_z']].values
             imu_omega = df_run[['gyro_body_x', 'gyro_body_y', 'gyro_body_z']].values
 
-            # Extract joint positions and velocities for both legs.
+            # Extract left-leg joint positions and velocities.
             q_cols = ['joint_pos_' + j for j in joint_names]
             q = df_run[q_cols].values
             
@@ -123,12 +119,10 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
             qd = df_run[qd_cols].values
             
             p_left = df_run[['fk_left_foot_pos_x', 'fk_left_foot_pos_y', 'fk_left_foot_pos_z']].values
-            p_right = df_run[['fk_right_foot_pos_x', 'fk_right_foot_pos_y', 'fk_right_foot_pos_z']].values
-            p = np.concatenate([p_left, p_right], axis=1)
+            p = p_left
             
             v_left = df_run[['fk_left_foot_vel_x', 'fk_left_foot_vel_y', 'fk_left_foot_vel_z']].values
-            v_right = df_run[['fk_right_foot_vel_x', 'fk_right_foot_vel_y', 'fk_right_foot_vel_z']].values
-            v = np.concatenate([v_left, v_right], axis=1)
+            v = v_left
             
             tau_cols = ['joint_torque_' + j for j in joint_names]
             tau_est = df_run[tau_cols].values
@@ -139,10 +133,7 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
             # Extract command velocity - 1 value
             cmd_vel = df_run[['cmd_vel_x']].values
 
-            tau_mse = np.concatenate([
-                np.sum(tau_est[:, :len(left_joint_names)] ** 2, axis=1, keepdims=True),
-                np.sum(tau_est[:, len(left_joint_names):] ** 2, axis=1, keepdims=True),
-            ], axis=1)
+            tau_mse = np.sum(tau_est ** 2, axis=1, keepdims=True)
 
             # Concatenate features - num_features is auto-detected from shape
             cur_data = (np.concatenate([imu_acc, imu_omega, q, qd, p, v, tau_est, tau_mse], axis=1))  # Shape: (num_samples, num_features)
@@ -157,19 +148,13 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
 
             # Output extraction
             
-            contacts = np.concatenate([
-                df_run[['lfoot-contact']].values.astype(int),
-                df_run[['rfoot-contact']].values.astype(int),
-            ], axis=1)
+            contacts = df_run[['lfoot-contact']].values.astype(int)
             
             lfoot_position_world = ['lfoot_pos_x', 'lfoot_pos_y', 'lfoot_pos_z']
-            rfoot_position_world = ['rfoot_pos_x', 'rfoot_pos_y', 'rfoot_pos_z']
             dt = np.diff(df_run['timestamp'].values.reshape(-1, 1), axis=0)
             lfoot_velocity_world = np.diff(df_run[lfoot_position_world].values, axis=0) / dt
-            rfoot_velocity_world = np.diff(df_run[rfoot_position_world].values, axis=0) / dt
             lfoot_velocity_world = np.vstack((lfoot_velocity_world, lfoot_velocity_world[-1, :]))
-            rfoot_velocity_world = np.vstack((rfoot_velocity_world, rfoot_velocity_world[-1, :]))
-            foot_velocities = np.stack([lfoot_velocity_world, rfoot_velocity_world], axis=1)
+            foot_velocities = lfoot_velocity_world[:, np.newaxis, :]
 
 
             cur_label = contacts
@@ -223,8 +208,8 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
     np.save(save_pth + "all_data_metadata.npy", metadata)
     
     print(f"Saved {all_data.shape[0]} samples to all_data.npy")
-    print(f"Saved {all_labels.shape[0]} [left, right] contact labels to all_labels.npy")
-    print(f"Saved {all_foot_velocities.shape[0]} signed [left, right, vx/vy/vz] velocity samples to all_foot_velocities.npy")
+    print(f"Saved {all_labels.shape[0]} left-foot contact labels to all_labels.npy")
+    print(f"Saved {all_foot_velocities.shape[0]} signed [left, vx/vy/vz] velocity samples to all_foot_velocities.npy")
     print(f"Saved {len(all_boundaries)} run boundaries to all_data_boundaries.npy")
     print(f"Saved metadata (num_features={num_features}) to all_data_metadata.npy")
     print("Done!")

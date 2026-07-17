@@ -22,10 +22,10 @@ from utils.data_handler import *
 PLOT_WINDOW_SIZE = 100
 
 def compute_confusion_mat(bin_contact_pred_arr, bin_contact_gt_arr):
-    """Compute combined and per-leg confusion matrices."""
+    """Compute left-foot and combined confusion matrices."""
     confusion_mat = {
         leg: confusion_matrix(bin_contact_gt_arr[:, index], bin_contact_pred_arr[:, index], labels=[0, 1])
-        for index, leg in enumerate(('left_leg', 'right_leg'))
+        for index, leg in enumerate(('left_leg',))
     }
     combined = confusion_matrix(bin_contact_gt_arr.ravel(), bin_contact_pred_arr.ravel(), labels=[0, 1])
     confusion_mat['combined'] = combined
@@ -36,34 +36,34 @@ def compute_confusion_mat(bin_contact_pred_arr, bin_contact_gt_arr):
 
 
 def compute_precision(bin_pred_arr, bin_gt_arr):
-    """Compute precision across both legs."""
+    """Compute left-foot precision."""
     precision = precision_score(bin_gt_arr.ravel(), bin_pred_arr.ravel(), zero_division=0)
     return precision
 
 def compute_jaccard(bin_pred_arr, bin_gt_arr):
-    """Compute Jaccard score across both legs."""
+    """Compute left-foot Jaccard score."""
     jaccard = jaccard_score(bin_gt_arr.ravel(), bin_pred_arr.ravel(), zero_division=0)
     return jaccard
 
 def compute_accuracy(dataloader, model, device=torch.device('cpu')):
     """
-    Compute combined and per-leg metrics for biped contact and signed velocity.
+    Compute left-foot contact and signed-velocity metrics.
     """
-    velocity_abs_error_sum = torch.zeros((2, 3), device=device)
-    velocity_sq_error_sum = torch.zeros((2, 3), device=device)
-    num_contact_samples = torch.zeros(2, device=device)
+    velocity_abs_error_sum = torch.zeros((1, 3), device=device)
+    velocity_sq_error_sum = torch.zeros((1, 3), device=device)
+    num_contact_samples = torch.zeros(1, device=device)
     
-    true_positive = torch.zeros(2, device=device)
-    false_positive = torch.zeros(2, device=device)
-    false_negative = torch.zeros(2, device=device)
-    true_negative = torch.zeros(2, device=device)
+    true_positive = torch.zeros(1, device=device)
+    false_positive = torch.zeros(1, device=device)
+    false_negative = torch.zeros(1, device=device)
+    true_negative = torch.zeros(1, device=device)
     
     with torch.no_grad():
         for sample in tqdm(dataloader):
             input_data = sample['data']
-            gt_contact = sample['label']  # [B, 2] ordered [left, right]
-            gt_velocity_seq = sample['velocity']  # [B, T, 2, 3]
-            gt_velocity = gt_velocity_seq[:, -1, :, :]  # [B, 2, 3]
+            gt_contact = sample['label']  # [B, 1] left foot
+            gt_velocity_seq = sample['velocity']  # [B, T, 1, 3]
+            gt_velocity = gt_velocity_seq[:, -1, :, :]  # [B, 1, 3]
 
             velocity_seq, velocity_output, covariance_seq, covariance_output, contact_output = model(input_data)
             
@@ -76,7 +76,7 @@ def compute_accuracy(dataloader, model, device=torch.device('cpu')):
             true_negative += (~contact_pred_binary & ~contact_gt_binary).sum(dim=0)
             
             # Velocity metrics (only on contact samples, last timestep only)
-            contact_mask = (gt_contact == 1).float().unsqueeze(-1)  # [B, 2, 1]
+            contact_mask = (gt_contact == 1).float().unsqueeze(-1)  # [B, 1, 1]
             if contact_mask.sum() > 0:
                 velocity_abs_error_sum += (torch.abs(velocity_output - gt_velocity) * contact_mask).sum(dim=0)
                 velocity_sq_error_sum += (((velocity_output - gt_velocity) ** 2) * contact_mask).sum(dim=0)
@@ -102,7 +102,7 @@ def compute_accuracy(dataloader, model, device=torch.device('cpu')):
         'contact_f1': float(contact_f1),
         'per_leg': {},
     }
-    for index, leg in enumerate(('left', 'right')):
+    for index, leg in enumerate(('left',)):
         precision = true_positive[index].item() / (true_positive[index].item() + false_positive[index].item() + 1e-8)
         recall = true_positive[index].item() / (true_positive[index].item() + false_negative[index].item() + 1e-8)
         accuracy = (true_positive[index].item() + true_negative[index].item()) / (
@@ -122,7 +122,7 @@ def compute_accuracy(dataloader, model, device=torch.device('cpu')):
 
 
 def save_velocity_plots(dataloader, model, output_dir):
-    """Save one three-component predicted-vs-ground-truth velocity plot per leg."""
+    """Save a three-component left-foot predicted-vs-ground-truth velocity plot."""
     predicted, ground_truth, contact = [], [], []
     with torch.no_grad():
         for sample in dataloader:
@@ -137,7 +137,7 @@ def save_velocity_plots(dataloader, model, output_dir):
     sample_index = np.arange(len(contact))
     os.makedirs(output_dir, exist_ok=True)
 
-    for leg_index, leg_name in enumerate(('left', 'right')):
+    for leg_index, leg_name in enumerate(('left',)):
         fig, axes = plt.subplots(3, 1, figsize=(14, 9), sharex=True)
         contact_changes = np.diff(np.concatenate(([0], contact[:, leg_index] > 0.5, [0])))
         contact_starts = np.where(contact_changes == 1)[0]
@@ -159,10 +159,6 @@ def save_velocity_plots(dataloader, model, output_dir):
         fig.savefig(output_path, dpi=150, bbox_inches='tight')
         plt.close(fig)
         print(f'Saved {leg_name}-leg velocity plot: {output_path}')
-
-def decimal2binary(x):
-    mask = 2**torch.arange(2-1,-1,-1).to(x.device, x.dtype)  # 2 legs for biped
-    return x.unsqueeze(-1).bitwise_and(mask).ne(0).byte()
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -329,7 +325,7 @@ def main():
     save_velocity_plots(plot_dataloader, model, os.path.dirname(latest_pt))
 
     print("\n" + "="*60)
-    print("BIPED TEST RESULTS")
+    print("LEFT-LEG TEST RESULTS")
     print("="*60)
     
     print("\nContact Classification Metrics (combined):")
