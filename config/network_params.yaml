@@ -1,7 +1,7 @@
 # CSV data processing params
 csv_folder: "Data/CSVFiles/"
 cmd_vel_x_min: 0.0   # Skip runs where max cmd_vel_x is below this value
-cmd_vel_x_max: 1.5   # Skip runs where max cmd_vel_x is above this value
+cmd_vel_x_max: 3   # Skip runs where max cmd_vel_x is above this value
 # Path to the data folder. Data should be separated into train.npy, train_label.npy, val.npy, val_label.npy.
 data_folder: "Data/NumpyFiles/"
 # # Test-specific params

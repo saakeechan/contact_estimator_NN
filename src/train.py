@@ -33,6 +33,70 @@ def mse_loss(mean, target, variance):
     return (mean - target).square()
 
 
+def save_tcn_last_timestep_umap(dataloader, model, output_path, random_seed=42, max_samples=5000):
+    """Save final-timestep TCN UMAPs colored by contact and ground-truth velocity norm."""
+    base_model = getattr(model, 'base_model', model)
+    if not hasattr(base_model, 'tcn_backbone'):
+        print("Skipping TCN UMAP: selected model has no TCN backbone.")
+        return
+
+    from umap import UMAP
+    import matplotlib.pyplot as plt
+
+    latents, contacts, velocity_norms = [], [], []
+    hook = base_model.tcn_backbone.register_forward_hook(
+        lambda _, __, output: latents.append(output[:, :, -1].detach().cpu())
+    )
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            for sample in dataloader:
+                model(sample['data'], return_sequence=False)
+                contacts.append(sample['label'].detach().cpu())
+                velocity_norms.append(sample['velocity'][:, -1, :, :].norm(dim=-1).detach().cpu())
+                if sum(latent.shape[0] for latent in latents) >= max_samples:
+                    break
+    finally:
+        hook.remove()
+        model.train(was_training)
+
+    if len(latents) == 0:
+        print("Skipping TCN UMAP: no validation samples.")
+        return
+
+    latent_array = torch.cat(latents)[:max_samples].numpy()
+    contact_array = torch.cat(contacts).reshape(-1)[:max_samples].numpy()
+    velocity_norm_array = torch.cat(velocity_norms).reshape(-1)[:max_samples].numpy()
+    if len(latent_array) < 3:
+        print("Skipping TCN UMAP: need at least 3 validation samples.")
+        return
+
+    embedding = UMAP(n_components=2, random_state=random_seed).fit_transform(latent_array)
+    figure, axis = plt.subplots(figsize=(8, 6))
+    for contact_state, color, label in ((0, 'tab:blue', 'No contact'), (1, 'tab:orange', 'Contact')):
+        mask = contact_array == contact_state
+        axis.scatter(embedding[mask, 0], embedding[mask, 1], s=8, alpha=0.7, color=color, label=label)
+    axis.set(title='Final-timestep TCN latent UMAP', xlabel='UMAP 1', ylabel='UMAP 2')
+    axis.legend()
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=150)
+    plt.close(figure)
+    print(f"TCN UMAP saved to: {output_path}")
+
+    velocity_norm_output_path = os.path.splitext(output_path)[0] + "_dv_norm.png"
+    figure, axis = plt.subplots(figsize=(8, 6))
+    points = axis.scatter(
+        embedding[:, 0], embedding[:, 1], c=velocity_norm_array, cmap='viridis', s=8, alpha=0.7
+    )
+    figure.colorbar(points, ax=axis, label='Ground-truth ||dv|| (m/s)')
+    axis.set(title='Final-timestep TCN latent UMAP', xlabel='UMAP 1', ylabel='UMAP 2')
+    figure.tight_layout()
+    figure.savefig(velocity_norm_output_path, dpi=150)
+    plt.close(figure)
+    print(f"TCN velocity-norm UMAP saved to: {velocity_norm_output_path}")
+
+
 def compute_accuracy(dataloader, model, contact_criterion=None, velocity_loss_fn=None):
     """
     Compute left-foot contact and signed-velocity metrics at the last timestep.
@@ -529,6 +593,13 @@ def train(model, train_dataloader, val_dataloader, config):
     print(f"Training completed!")
     print(f"Total training time: {hours:02d}:{minutes:02d}:{seconds:02d}")
     print(f"{'='*60}\n")
+
+    save_tcn_last_timestep_umap(
+        val_dataloader,
+        model,
+        os.path.join(run_dir, "tcn_last_timestep_umap.png"),
+        config.get('random_seed', 42),
+    )
     
     # Generate comprehensive training summary with plots
     generate_training_summary(

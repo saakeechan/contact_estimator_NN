@@ -1,6 +1,6 @@
 FROM pytorch/pytorch:2.12.0-cuda13.2-cudnn9-runtime
 
-LABEL version="0.6"
+LABEL version="0.7"
 
 USER root
 
@@ -27,6 +27,7 @@ RUN python -m pip install --no-cache-dir \
     scipy \
     tensorboard \
     scikit-learn \
+    umap-learn \
     pandas \
     onnx \
     onnxscript \
@@ -34,4 +35,4 @@ RUN python -m pip install --no-cache-dir \
     pyyaml \
     matplotlib
 
-RUN python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
+RUN python -c "import torch, umap; print(torch.__version__); print(torch.cuda.is_available()); print(umap.__version__)"
