@@ -9,7 +9,7 @@ import pandas as pd
 import yaml
 
 
-def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel_x_min=0.0, cmd_vel_x_max=2.0):
+def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel_x_windows=((0.0, 2.0),)):
     """
     Load data from CSV files and concatenate into single numpy arrays.
     
@@ -100,11 +100,11 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
                 # print(f"  Skipping run {run_idx} (only {len(df_run)} sample)")
                 continue
             
-            # Skip runs with cmd_vel_x outside the configured range
+            # Keep runs whose maximum cmd_vel_x belongs to any configured window.
             if 'command_twist_linear_x' in df_run.columns:
                 max_cmd_vel = df_run['command_twist_linear_x'].max()
-                if max_cmd_vel < cmd_vel_x_min or max_cmd_vel > cmd_vel_x_max:
-                    # print(f"  Skipping run {run_idx} (max cmd_vel_x={max_cmd_vel:.2f} not in [{cmd_vel_x_min}, {cmd_vel_x_max}])")
+                if not any(low <= max_cmd_vel <= high for low, high in cmd_vel_x_windows):
+                    # print(f"  Skipping run {run_idx} (max cmd_vel_x={max_cmd_vel:.2f} outside {cmd_vel_x_windows})")
                     continue
             
             # Extract IMU data in body frame
@@ -239,16 +239,21 @@ def main():
     config.setdefault('save_path', config['data_folder'])  # Use data_folder if save_path not set
     config.setdefault('train_ratio', 0.7)
     config.setdefault('val_ratio', 0.15)
+    cmd_vel_x_windows = config.get('cmd_vel_x_windows', [[0.0, 2.0]])
+    if not cmd_vel_x_windows or not all(isinstance(window, (list, tuple)) and len(window) == 2 and window[0] <= window[1]
+               for window in cmd_vel_x_windows):
+        raise ValueError('cmd_vel_x_windows must be a non-empty list of [min, max] windows with min <= max')
     
     print("Using configuration:")
     print(f"  CSV folder: {config['csv_folder']}")
     print(f"  Save path: {config['save_path']}")
     print(f"  Train ratio: {config['train_ratio']}")
     print(f"  Val ratio: {config['val_ratio']}")
+    print(f"  Command-velocity windows: {cmd_vel_x_windows}")
     
     csv2numpy_split(config['csv_folder'], config['save_path'],
                     config['train_ratio'], config['val_ratio'],
-                    config.get('cmd_vel_x_min', 0.0), config.get('cmd_vel_x_max', 2.0))
+                    cmd_vel_x_windows)
 
 
 if __name__ == '__main__':
