@@ -47,7 +47,7 @@ def compute_jaccard(bin_pred_arr, bin_gt_arr):
 
 def compute_accuracy(dataloader, model, device=torch.device('cpu')):
     """
-    Compute left-foot contact and signed-velocity metrics.
+    Compute left-foot contact and body-velocity metrics.
     """
     velocity_abs_error_sum = torch.zeros((1, 3), device=device)
     velocity_sq_error_sum = torch.zeros((1, 3), device=device)
@@ -124,7 +124,7 @@ def compute_accuracy(dataloader, model, device=torch.device('cpu')):
 
 
 def save_velocity_plots(dataloader, model, output_dir):
-    """Save a three-component left-foot predicted-vs-ground-truth velocity plot."""
+    """Save a three-component body-velocity predicted-vs-ground-truth plot."""
     predicted, ground_truth, contact = [], [], []
     with torch.no_grad():
         for sample in dataloader:
@@ -139,7 +139,7 @@ def save_velocity_plots(dataloader, model, output_dir):
     sample_index = np.arange(len(contact))
     os.makedirs(output_dir, exist_ok=True)
 
-    for leg_index, leg_name in enumerate(('left',)):
+    for leg_index, leg_name in enumerate(('body',)):
         fig, axes = plt.subplots(3, 1, figsize=(14, 9), sharex=True)
         contact_changes = np.diff(np.concatenate(([0], contact[:, leg_index] > 0.5, [0])))
         contact_starts = np.where(contact_changes == 1)[0]
@@ -154,13 +154,13 @@ def save_velocity_plots(dataloader, model, output_dir):
             ax.grid(True, alpha=0.3)
             ax.legend(loc='upper right')
 
-        axes[0].set_title(f'{leg_name.capitalize()} Foot Velocity: prediction vs ground truth')
+        axes[0].set_title('Body-frame body velocity: prediction vs ground truth')
         axes[-1].set_xlabel('Time step in sampled window')
         fig.tight_layout()
-        output_path = os.path.join(output_dir, f'{leg_name}_leg_velocity_comparison.png')
+        output_path = os.path.join(output_dir, 'body_velocity_comparison.png')
         fig.savefig(output_path, dpi=150, bbox_inches='tight')
         plt.close(fig)
-        print(f'Saved {leg_name}-leg velocity plot: {output_path}')
+        print(f'Saved body-velocity plot: {output_path}')
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -327,7 +327,7 @@ def main():
     save_velocity_plots(plot_dataloader, model, os.path.dirname(latest_pt))
 
     print("\n" + "="*60)
-    print("LEFT-LEG TEST RESULTS")
+    print("BODY-VELOCITY TEST RESULTS")
     print("="*60)
     
     print("\nContact Classification Metrics (combined):")
@@ -336,12 +336,12 @@ def main():
     print("  Recall:    %.4f" % metrics['contact_recall'])
     print("  F1 Score:  %.4f" % metrics['contact_f1'])
     
-    print("\nVelocity Regression Metrics (on contact samples, last timestep only):")
+    print("\nBody-Velocity Regression Metrics (on contact samples, last timestep only):")
     print("  Velocity MAE: %.6f" % metrics['velocity_mae'])
     print("  Velocity MSE: %.6f" % metrics['velocity_mse'])
     print("  Velocity RMSE: %.6f" % np.sqrt(metrics['velocity_mse']))
     for leg, leg_metrics in metrics['per_leg'].items():
-        print(f"\n{leg.capitalize()} leg:")
+        print(f"\n{leg.capitalize()}:")
         print("  Contact Accuracy:  %.4f" % leg_metrics['contact_accuracy'])
         print("  Contact Precision: %.4f" % leg_metrics['contact_precision'])
         print("  Contact Recall:    %.4f" % leg_metrics['contact_recall'])

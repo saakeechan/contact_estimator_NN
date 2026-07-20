@@ -11,7 +11,7 @@ MIN_VELOCITY_VARIANCE = 1e-6
 
 
 def make_velocity_heads(num_features):
-    """Predict left-foot mean and diagonal variance for [vx, vy, vz]."""
+    """Predict body-velocity mean and diagonal variance for [vx, vy, vz]."""
     return nn.ModuleDict({
         leg: nn.Sequential(
             nn.Linear(num_features, 512),
@@ -86,7 +86,7 @@ Three network architectures are available:
 
 All architectures:
 - Support causal convolutions (no future information leakage)
-- Output signed velocity predictions for all timesteps (dense supervision)
+- Output body-velocity predictions for all timesteps (dense supervision)
 - Extract last timestep for inference
 """
 
@@ -204,10 +204,10 @@ class AttentionTCN(nn.Module):
             x: (batch_size, window_size, num_features) - RAW features
         
         Returns:
-            velocity_seq: (batch_size, 1, 3, window_size) - signed left-foot velocities
-            velocity_out: (batch_size, 1, 3) - signed last-timestep velocity
-            covariance_seq: (batch_size, 1, 3, window_size) - diagonal velocity variances
-            covariance_out: (batch_size, 1, 3) - diagonal last-timestep velocity variances
+            velocity_seq: (batch_size, 1, 3, window_size) - body-frame body velocities
+            velocity_out: (batch_size, 1, 3) - body-frame last-timestep velocity
+            covariance_seq: (batch_size, 1, 3, window_size) - diagonal body-velocity variances
+            covariance_out: (batch_size, 1, 3) - diagonal last-timestep body-velocity variances
             contact_out: (batch_size, 1) - left-foot contact logit at last timestep
         """
         # x: [B, T, F]
@@ -306,10 +306,10 @@ class TCN(nn.Module):
             x: (batch_size, window_size, num_features) - RAW features
         
         Returns:
-            velocity_seq: (batch_size, 1, 3, window_size) - signed left-foot velocities
-            velocity_out: (batch_size, 1, 3) - signed last-timestep velocity
-            covariance_seq: (batch_size, 1, 3, window_size) - diagonal velocity variances
-            covariance_out: (batch_size, 1, 3) - diagonal last-timestep velocity variances
+            velocity_seq: (batch_size, 1, 3, window_size) - body-frame body velocities
+            velocity_out: (batch_size, 1, 3) - body-frame last-timestep velocity
+            covariance_seq: (batch_size, 1, 3, window_size) - diagonal body-velocity variances
+            covariance_out: (batch_size, 1, 3) - diagonal last-timestep body-velocity variances
             contact_out: (batch_size, 1) - left-foot contact logit at last timestep
         """
         # x: [B, T, F]
@@ -442,10 +442,10 @@ class ContactCNNWithNormalization(nn.Module):
     
     Input shape: (batch_size, window_size, num_features) - RAW left-leg features from csv2numpy.py
     Output shapes:
-        - velocity_seq: (batch_size, 1, 3, window_size) - signed left-foot velocities
-        - velocity_out: (batch_size, 1, 3) - signed last-timestep velocity
-        - covariance_seq: (batch_size, 1, 3, window_size) - diagonal velocity variances
-        - covariance_out: (batch_size, 1, 3) - diagonal last-timestep velocity variances
+        - velocity_seq: (batch_size, 1, 3, window_size) - body-frame body velocities
+        - velocity_out: (batch_size, 1, 3) - body-frame last-timestep velocity
+        - covariance_seq: (batch_size, 1, 3, window_size) - diagonal body-velocity variances
+        - covariance_out: (batch_size, 1, 3) - diagonal last-timestep body-velocity variances
         - contact_out: (batch_size, 1) - left-foot contact logit at last timestep
     
     Feature layout:
@@ -488,10 +488,10 @@ class ContactCNNWithNormalization(nn.Module):
             x: Raw input data (batch_size, window_size, num_features) - NOT z-score normalized
         
         Returns:
-            velocity_seq: (batch_size, 1, 3, window_size) - left-foot velocity predictions
-            velocity_out: (batch_size, 1, 3) - last-timestep velocity prediction
-            covariance_seq: (batch_size, 1, 3, window_size) - diagonal velocity variances
-            covariance_out: (batch_size, 1, 3) - diagonal last-timestep velocity variances
+            velocity_seq: (batch_size, 1, 3, window_size) - body-velocity predictions
+            velocity_out: (batch_size, 1, 3) - last-timestep body-velocity prediction
+            covariance_seq: (batch_size, 1, 3, window_size) - diagonal body-velocity variances
+            covariance_out: (batch_size, 1, 3) - diagonal last-timestep body-velocity variances
             contact_out: (batch_size, 1) - left-foot contact logit at last timestep
         """
         # Apply global z-score normalization to all input features

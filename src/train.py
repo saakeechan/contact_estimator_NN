@@ -34,7 +34,7 @@ def mse_loss(mean, target, variance):
 
 
 def save_tcn_last_timestep_umap(dataloader, model, output_path, random_seed=42, max_samples=5000):
-    """Save final-timestep TCN UMAPs colored by contact and ground-truth velocity norm."""
+    """Save final-timestep TCN UMAPs colored by contact and ground-truth body-velocity norm."""
     base_model = getattr(model, 'base_model', model)
     if not hasattr(base_model, 'tcn_backbone'):
         print("Skipping TCN UMAP: selected model has no TCN backbone.")
@@ -72,7 +72,9 @@ def save_tcn_last_timestep_umap(dataloader, model, output_path, random_seed=42, 
         print("Skipping TCN UMAP: need at least 3 validation samples.")
         return
 
-    embedding = UMAP(n_components=2, random_state=random_seed).fit_transform(latent_array)
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', message='n_jobs value .* overridden.*')
+        embedding = UMAP(n_components=2, random_state=random_seed).fit_transform(latent_array)
     figure, axis = plt.subplots(figsize=(8, 6))
     for contact_state, color, label in ((0, 'tab:blue', 'No contact'), (1, 'tab:orange', 'Contact')):
         mask = contact_array == contact_state
@@ -89,7 +91,7 @@ def save_tcn_last_timestep_umap(dataloader, model, output_path, random_seed=42, 
     points = axis.scatter(
         embedding[:, 0], embedding[:, 1], c=velocity_norm_array, cmap='viridis', s=8, alpha=0.7
     )
-    figure.colorbar(points, ax=axis, label='Ground-truth ||dv|| (m/s)')
+    figure.colorbar(points, ax=axis, label='Ground-truth body-velocity norm (m/s)')
     axis.set(title='Final-timestep TCN latent UMAP', xlabel='UMAP 1', ylabel='UMAP 2')
     figure.tight_layout()
     figure.savefig(velocity_norm_output_path, dpi=150)
@@ -99,7 +101,7 @@ def save_tcn_last_timestep_umap(dataloader, model, output_path, random_seed=42, 
 
 def compute_accuracy(dataloader, model, contact_criterion=None, velocity_loss_fn=None):
     """
-    Compute left-foot contact and signed-velocity metrics at the last timestep.
+    Compute left-foot contact and body-velocity metrics at the last timestep.
     
     Args:
         dataloader: DataLoader to evaluate
@@ -200,10 +202,10 @@ def save_onnx_model(model, checkpoint_path, window_size):
     """
     Save ONNX version of the model for C++ deployment.
     The model has five outputs:
-        - velocity_seq: (batch, 1, 3, window_size) - left-foot [vx/vy/vz] predictions
-        - velocity_output: (batch, 1, 3) - last-timestep velocity prediction
-        - covariance_seq: (batch, 1, 3, window_size) - diagonal velocity variances
-        - covariance_output: (batch, 1, 3) - diagonal last-timestep velocity variances
+        - velocity_seq: (batch, 1, 3, window_size) - body-velocity predictions
+        - velocity_output: (batch, 1, 3) - last-timestep body-velocity prediction
+        - covariance_seq: (batch, 1, 3, window_size) - diagonal body-velocity variances
+        - covariance_output: (batch, 1, 3) - diagonal last-timestep body-velocity variances
         - contact_output: (batch, 1) - left-foot contact logit
     """
     try:
@@ -278,7 +280,7 @@ def train(model, train_dataloader, val_dataloader, config):
     # Contact: BCEWithLogitsLoss (binary classification)
     contact_criterion = nn.BCEWithLogitsLoss()
     
-    # Velocity: diagonal Gaussian NLL, learning one variance per axis and leg.
+    # Velocity: diagonal Gaussian NLL, learning one variance per body-velocity axis.
     velocity_loss_fn = gaussian_nll
     optimizer = optim.Adam(model.parameters(), lr=config['init_lr'])
     
@@ -550,14 +552,14 @@ def train(model, train_dataloader, val_dataloader, config):
         val_left_mae = val_metrics['velocity_mae_components'][0]
         print("Finished epoch %d / %d" % (epoch + 1, config['num_epoch']))
         print(
-            "  Train - Contact Acc: %.4f, Velocity MAE: %.4f [left vx/vy/vz: %.4f/%.4f/%.4f]" % (
+                "  Train - Contact Acc: %.4f, Body Velocity MAE: %.4f [vx/vy/vz: %.4f/%.4f/%.4f]" % (
                 train_metrics['contact_acc'],
                 train_metrics['velocity_mae'],
                 *train_left_mae
             )
         )
         print(
-            "  Val   - Contact Acc: %.4f, Velocity MAE: %.4f [left vx/vy/vz: %.4f/%.4f/%.4f]" % (
+                "  Val   - Contact Acc: %.4f, Body Velocity MAE: %.4f [vx/vy/vz: %.4f/%.4f/%.4f]" % (
                 val_metrics['contact_acc'],
                 val_metrics['velocity_mae'],
                 *val_left_mae

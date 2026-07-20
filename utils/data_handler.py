@@ -14,10 +14,10 @@ class contact_dataset(Dataset):
 
     def __init__(self, data_path, label_path, window_size, device='cuda'):
         """
-        At initialization we load .npy files for data, labels, and foot velocities.
+        At initialization we load .npy files for data, labels, and body velocities.
         self.data: a 2D array of all data points. rows are time axis, columns are features. (num_data, num_features)
         self.label: left-foot contact state. Shape: (num_data, 1)
-        self.foot_velocity: left-foot signed velocity. Shape: (num_data, 1, 3)
+        self.body_velocity: body-frame body velocity. Shape: (num_data, 1, 3)
         """
         data = np.load(data_path)
         label = np.load(label_path)
@@ -26,26 +26,26 @@ class contact_dataset(Dataset):
         self.window_size = window_size
         self.data = torch.from_numpy(data).type('torch.FloatTensor').to(device)
         
-        # Load signed [left, vx/vy/vz] foot velocities.
-        velocity_path = data_path.replace('all_data.npy', 'all_foot_velocities.npy')
+        velocity_path = data_path.replace('all_data.npy', 'all_body_velocities.npy')
         if os.path.exists(velocity_path):
-            foot_velocity = np.load(velocity_path)
-            print(f"Loaded foot velocities from {velocity_path}")
+            body_velocity = np.load(velocity_path)
+            print(f"Loaded body velocities from {velocity_path}")
         else:
-            print(f"Warning: No foot velocity file found at {velocity_path}. Creating zero velocities.")
-            foot_velocity = np.zeros((len(data), 1, 3), dtype=np.float32)
+            raise FileNotFoundError(
+                f"Missing body-velocity targets: {velocity_path}. Run utils/csv2numpyV1.py first."
+            )
 
         if label.shape != (len(data), 1):
             raise ValueError(
                 f"Expected left-foot labels with shape ({len(data)}, 1), got {label.shape}."
             )
-        if foot_velocity.shape != (len(data), 1, 3):
+        if body_velocity.shape != (len(data), 1, 3):
             raise ValueError(
-                "Expected left-foot velocities with shape (N, 1, 3) ordered [left, vx/vy/vz]. "
-                f"Got {foot_velocity.shape}. Regenerate the numpy dataset."
+                "Expected body-frame body velocities with shape (N, 1, 3). "
+                f"Got {body_velocity.shape}. Regenerate the numpy dataset."
             )
         
-        self.foot_velocity = torch.from_numpy(foot_velocity).type('torch.FloatTensor').to(device)
+        self.body_velocity = torch.from_numpy(body_velocity).type('torch.FloatTensor').to(device)
         
         # Labels are left-foot contacts with shape (num_data, 1).
         label_binary = label.astype(np.float32)
@@ -134,7 +134,7 @@ class contact_dataset(Dataset):
         - data: (batch_size, window_size, num_features)
         - label: (batch_size, 1) - left-foot contact at the last timestep
         - label_seq: (batch_size, window_size, 1) - full contact sequence
-        - velocity: (batch_size, window_size, 1, 3) - signed [left, vx/vy/vz] sequence
+        - velocity: (batch_size, window_size, 1, 3) - body-frame body-velocity sequence
         """
         if torch.is_tensor(idx):
             idx = idx.tolist()
@@ -152,7 +152,7 @@ class contact_dataset(Dataset):
         this_label_seq = self.label[real_idx:real_idx+self.window_size, :]  # Shape: (window_size, 1)
         
         # Velocity: full sequence
-        this_velocity = self.foot_velocity[real_idx:real_idx+self.window_size, :]  # Shape: (window_size, 1, 3)
+        this_velocity = self.body_velocity[real_idx:real_idx+self.window_size, :]  # Shape: (window_size, 1, 3)
             
         sample = {'data': this_data, 'label': this_label, 'label_seq': this_label_seq, 'velocity': this_velocity}
 

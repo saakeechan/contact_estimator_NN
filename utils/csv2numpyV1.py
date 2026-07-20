@@ -9,6 +9,21 @@ import pandas as pd
 import yaml
 
 
+def quaternion_to_rotation_matrix(quaternions):
+    """Return body-to-world rotation matrices for `[w, x, y, z]` quaternions."""
+    quaternions = np.asarray(quaternions, dtype=np.float64)
+    norms = np.linalg.norm(quaternions, axis=1, keepdims=True)
+    if np.any(norms == 0):
+        raise ValueError('Body quaternion contains a zero-norm sample.')
+    quaternions = quaternions / norms
+    w, x, y, z = quaternions.T
+    return np.stack((
+        1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w),
+        2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w),
+        2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y),
+    ), axis=1).reshape(-1, 3, 3)
+
+
 def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel_x_windows=((0.0, 2.0),)):
     """
     Load data from CSV files and concatenate into single numpy arrays.
@@ -37,7 +52,7 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
     - all_labels.npy: left-foot contact labels (shape: N x 1, binary 0/1)
     - all_data_boundaries.npy: indices marking end of each run (CRITICAL for preventing data leakage)
     - all_data_metadata.npy: metadata dict with num_features (SOURCE OF TRUTH for network architecture)
-    - all_foot_velocities.npy: signed world-frame left-foot velocities (shape: N x 1 x 3)
+    - all_body_velocities.npy: body-frame body velocities (shape: N x 1 x 3)
     """
     
     # Ensure save directory exists
@@ -52,7 +67,7 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
     # num_features will be determined automatically from the actual data shape
     all_data = None  # Will be initialized after first sample
     all_labels = np.zeros((0, 1))
-    all_foot_velocities = np.zeros((0, 1, 3))
+    all_body_velocities = np.zeros((0, 1, 3))
     num_features = None  # Will be set from cur_data.shape[1] after first run
     
     # Track boundaries between different runs to prevent window bleeding
@@ -150,11 +165,12 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
             
             contacts = df_run[['lfoot-contact']].values.astype(int)
             
-            lfoot_position_world = ['lfoot_pos_x', 'lfoot_pos_y', 'lfoot_pos_z']
-            dt = np.diff(df_run['timestamp'].values.reshape(-1, 1), axis=0)
-            lfoot_velocity_world = np.diff(df_run[lfoot_position_world].values, axis=0) / dt
-            lfoot_velocity_world = np.vstack((lfoot_velocity_world, lfoot_velocity_world[-1, :]))
-            foot_velocities = lfoot_velocity_world[:, np.newaxis, :]
+            body_velocity_world = df_run[['vel_x', 'vel_y', 'vel_z']].values
+            body_quaternion = df_run[['quat_w', 'quat_i', 'quat_j', 'quat_k']].values
+            rotation_body_to_world = quaternion_to_rotation_matrix(body_quaternion)
+            body_velocities = np.einsum(
+                'nij,nj->ni', rotation_body_to_world.transpose(0, 2, 1), body_velocity_world
+            )[:, np.newaxis, :]
 
 
             cur_label = contacts
@@ -162,7 +178,7 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
             # Append to full dataset
             all_data = np.vstack((all_data, cur_data))
             all_labels = np.vstack((all_labels, cur_label))
-            all_foot_velocities = np.vstack((all_foot_velocities, foot_velocities))
+            all_body_velocities = np.vstack((all_body_velocities, body_velocities))
             
             # Record boundary index (end of this run in the full dataset)
             all_boundaries.append(all_data.shape[0])
@@ -195,13 +211,13 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
     # Save all data as single files - splitting will happen in train.py after windowing
     np.save(save_pth + "all_data.npy", all_data)
     np.save(save_pth + "all_labels.npy", all_labels)
-    np.save(save_pth + "all_foot_velocities.npy", all_foot_velocities)
+    np.save(save_pth + "all_body_velocities.npy", all_body_velocities)
     np.save(save_pth + "all_data_boundaries.npy", np.array(all_boundaries))
     
     # Save metadata including num_features (source of truth for network architecture)
     metadata = {
         'num_features': num_features,
-        'num_velocity_targets': all_foot_velocities.shape[1],
+        'num_velocity_targets': all_body_velocities.shape[1],
         'num_samples': all_data.shape[0],
         'num_runs': len(all_boundaries)
     }
@@ -209,7 +225,7 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
     
     print(f"Saved {all_data.shape[0]} samples to all_data.npy")
     print(f"Saved {all_labels.shape[0]} left-foot contact labels to all_labels.npy")
-    print(f"Saved {all_foot_velocities.shape[0]} signed [left, vx/vy/vz] velocity samples to all_foot_velocities.npy")
+    print(f"Saved {all_body_velocities.shape[0]} body-frame [vx/vy/vz] targets to all_body_velocities.npy")
     print(f"Saved {len(all_boundaries)} run boundaries to all_data_boundaries.npy")
     print(f"Saved metadata (num_features={num_features}) to all_data_metadata.npy")
     print("Done!")

@@ -2,6 +2,7 @@ import argparse
 import glob
 import os
 import sys
+import warnings
 
 sys.path.append('.')
 
@@ -14,11 +15,17 @@ import torch
 import yaml
 
 from contact_cnn import AttentionTCN, ContactCNNWithNormalization, TCN, contact_cnn
+from utils.csv2numpyV1 import quaternion_to_rotation_matrix
 
 
 # Select one trajectory whose first cmd_vel_x is in this inclusive range.
-TEST_CMD_VEL_X_WINDOW = (2.1, 2.2)  # [min, max] in m/s
-RANDOM_SEED = 21
+TEST_CMD_VEL_X_WINDOW = (2.9, 3.0)  # [min, max] in m/s
+RANDOM_SEED = 2
+
+RUN_KNN_UMAP = True
+KNN_K = 10
+OOD_ID_PERCENTILE = 0.97
+UMAP_TRAIN_MAX = 5000
 
 
 def find_random_trajectory(csv_folder, window_size, cmd_vel_x_window, rng):
@@ -63,11 +70,10 @@ def make_features(trajectory):
     return np.concatenate((imu_acc, imu_omega, q, qd, foot_position, foot_velocity, torque, torque_mse), axis=1)
 
 
-def make_foot_velocity(trajectory):
-    position = trajectory[['lfoot_pos_x', 'lfoot_pos_y', 'lfoot_pos_z']].to_numpy()
-    dt = np.diff(trajectory['timestamp'].to_numpy())[:, None]
-    velocity = np.diff(position, axis=0) / dt
-    return np.vstack((velocity, velocity[-1]))
+def make_body_velocity(trajectory):
+    velocity_world = trajectory[['vel_x', 'vel_y', 'vel_z']].to_numpy()
+    quaternion = trajectory[['quat_w', 'quat_i', 'quat_j', 'quat_k']].to_numpy()
+    return np.einsum('nij,nj->ni', quaternion_to_rotation_matrix(quaternion).transpose(0, 2, 1), velocity_world)
 
 
 def make_model(config, num_features):
@@ -123,8 +129,81 @@ def run_trajectory(model, trajectory, window_size, batch_size, device):
         np.concatenate(predicted_variance),
         np.concatenate(contact_probability),
         trajectory['lfoot-contact'].to_numpy()[final_indices],
-        make_foot_velocity(trajectory)[final_indices],
+        make_body_velocity(trajectory)[final_indices],
     )
+
+
+def get_training_window_starts(data_folder, window_size, config):
+    """Recreate train.py's run-level split and return its valid window starts."""
+    boundaries = np.load(os.path.join(data_folder, 'all_data_boundaries.npy'))
+    run_starts = np.concatenate(([0], boundaries[:-1]))
+    valid_run_ids = np.flatnonzero(boundaries - run_starts >= window_size)
+    if len(valid_run_ids) < 3:
+        raise ValueError(f'Need at least 3 runs with {window_size} samples for the training split.')
+
+    run_ids = valid_run_ids.copy()
+    if config.get('shuffle', True):
+        np.random.RandomState(config.get('random_seed', 42)).shuffle(run_ids)
+    train_count = int(config.get('train_ratio', 0.7) * len(run_ids))
+    if train_count == 0:
+        train_count = 1
+
+    return np.concatenate([
+        np.arange(run_starts[run_id], boundaries[run_id] - window_size + 1)
+        for run_id in run_ids[:train_count]
+    ])
+
+
+def collect_final_tcn_latents(model, raw_data, window_starts, window_size, batch_size, device):
+    """Run raw windows through the wrapper and return their final TCN latents."""
+    backbone = model.base_model.tcn_backbone
+    latents = []
+    hook = backbone.register_forward_hook(lambda _, __, output: latents.append(output[:, :, -1].detach().cpu()))
+    offsets = np.arange(window_size)
+    try:
+        with torch.no_grad():
+            for first in range(0, len(window_starts), batch_size):
+                starts = window_starts[first:first + batch_size]
+                windows = raw_data[starts[:, None] + offsets]
+                model(torch.from_numpy(windows).float().to(device), return_sequence=False)
+    finally:
+        hook.remove()
+    return torch.cat(latents).numpy()
+
+
+def l2_normalize(features):
+    return features / np.maximum(np.linalg.norm(features, axis=1, keepdims=True), 1e-12)
+
+
+def save_knn_umap(training_latents, trajectory_latents, knn_distances, ood_mask, knn_k, threshold, output_path):
+    """Plot sampled training latents and every selected trajectory window in one UMAP."""
+    from umap import UMAP
+
+    rng = np.random.default_rng(RANDOM_SEED)
+    train_indices = rng.choice(len(training_latents), size=min(UMAP_TRAIN_MAX, len(training_latents)), replace=False)
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', message='n_jobs value .* overridden.*')
+        reducer = UMAP(n_components=2, random_state=RANDOM_SEED)
+        train_embedding = reducer.fit_transform(training_latents[train_indices])
+        trajectory_embedding = reducer.transform(trajectory_latents)
+
+    figure, axis = plt.subplots(figsize=(10, 8))
+    axis.scatter(train_embedding[:, 0], train_embedding[:, 1], s=4, color='lightgray', alpha=0.45, label='Training windows')
+    points = axis.scatter(
+        trajectory_embedding[:, 0], trajectory_embedding[:, 1], c=knn_distances,
+        cmap='viridis', s=18, edgecolors='black', linewidths=0.2, label='Selected trajectory windows'
+    )
+    if ood_mask.any():
+        axis.scatter(
+            trajectory_embedding[ood_mask, 0], trajectory_embedding[ood_mask, 1],
+            s=44, facecolors='none', edgecolors='red', linewidths=1.2, label='OOD window'
+        )
+    figure.colorbar(points, ax=axis, label=f'Mean {knn_k}-NN latent distance')
+    axis.set(title=f'Training-window UMAP (OOD threshold: {threshold:.4f})', xlabel='UMAP 1', ylabel='UMAP 2')
+    axis.legend()
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close(figure)
 
 
 def save_velocity_plot(time, predicted, ground_truth, contact, output_path):
@@ -138,7 +217,7 @@ def save_velocity_plot(time, predicted, ground_truth, contact, output_path):
         axis.set_ylabel(f'v{"xyz"[axis_index]} (m/s)')
         axis.grid(True, alpha=0.3)
         axis.legend(loc='upper right')
-    axes[0].set_title('Whole-trajectory left-foot velocity: prediction vs ground truth')
+    axes[0].set_title('Whole-trajectory body-frame body velocity: prediction vs ground truth')
     axes[-1].set_xlabel('Trajectory time (s)')
     figure.tight_layout()
     figure.savefig(output_path, dpi=150, bbox_inches='tight')
@@ -177,6 +256,31 @@ def main():
     output_path = os.path.join(os.path.dirname(checkpoint_path), f'trajectory_velocity_comparison_seed{RANDOM_SEED}.png')
     save_velocity_plot(trajectory['timestamp'].to_numpy()[indices], predicted, ground_truth, contact, output_path)
 
+    if RUN_KNN_UMAP:
+        data_folder = config['data_folder'] if os.path.isabs(config['data_folder']) else os.path.join(project_root, config['data_folder'])
+        training_data = np.load(os.path.join(data_folder, 'all_data.npy'))
+        training_starts = get_training_window_starts(data_folder, config['window_size'], config)
+        training_latents = l2_normalize(collect_final_tcn_latents(
+            model, training_data, training_starts, config['window_size'], config['batch_size'], device
+        ))
+        trajectory_starts = np.arange(len(trajectory) - config['window_size'] + 1)
+        trajectory_latents = l2_normalize(collect_final_tcn_latents(
+            model, make_features(trajectory), trajectory_starts, config['window_size'], config['batch_size'], device
+        ))
+        from sklearn.neighbors import NearestNeighbors
+        if len(training_latents) < 2:
+            raise ValueError('Need at least two training windows for KNN OOD detection.')
+        knn_k = min(KNN_K, len(training_latents) - 1)
+        neighbors = NearestNeighbors(n_neighbors=knn_k).fit(training_latents)
+        knn_distances = neighbors.kneighbors(trajectory_latents, return_distance=True)[0].mean(axis=1)
+        train_distances = NearestNeighbors(n_neighbors=knn_k + 1).fit(training_latents).kneighbors(
+            training_latents, return_distance=True
+        )[0][:, 1:].mean(axis=1)
+        ood_threshold = np.quantile(train_distances, OOD_ID_PERCENTILE)
+        ood_mask = knn_distances > ood_threshold
+        umap_output_path = os.path.join(os.path.dirname(checkpoint_path), f'trajectory_knn_umap_seed{RANDOM_SEED}.png')
+        save_knn_umap(training_latents, trajectory_latents, knn_distances, ood_mask, knn_k, ood_threshold, umap_output_path)
+
     print(f'CSV: {csv_path}')
     print(f'Trajectory: {run_index}, start cmd_vel_x: {start_cmd_vel:.3f} m/s, selected range: [{low}, {high}]')
     print(f'Random seed: {RANDOM_SEED}, trajectory samples: {len(trajectory)}, evaluated windows: {len(indices)}')
@@ -185,6 +289,12 @@ def main():
     print(f'Contact-masked velocity MAE: {mae:.6f}')
     print(f'Mean predicted variance on contact [vx, vy, vz]: {mean_variance}')
     print(f'Whole-trajectory velocity plot: {output_path}')
+    if RUN_KNN_UMAP:
+        print(f'KNN reference windows: {len(training_latents)}, K: {knn_k}')
+        print(f'Mean {knn_k}-NN latent distance: {knn_distances.mean():.6f}, max: {knn_distances.max():.6f}')
+        print(f'ID threshold ({OOD_ID_PERCENTILE:.0%} training quantile): {ood_threshold:.6f}')
+        print(f'OOD trajectory windows: {ood_mask.sum()} / {len(ood_mask)}')
+        print(f'Training/trajectory KNN UMAP: {umap_output_path}')
 
 
 if __name__ == '__main__':
