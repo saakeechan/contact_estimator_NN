@@ -335,6 +335,41 @@ class TCN(nn.Module):
         return velocity_seq, velocity_out, covariance_seq, covariance_out, contact_out
 
 
+class DenoisingTCNAutoencoder(nn.Module):
+    """Reconstruct raw input windows from noisy versions using the TCN backbone."""
+    def __init__(self, window_size, num_features, tcn_num_channels=64,
+                 tcn_kernel_size=3, tcn_num_blocks=3, tcn_dropout=0.2,
+                 global_mean=None, global_std=None, eps=1e-8):
+        super().__init__()
+        self.num_features = num_features
+        self.window_size = window_size
+        self.eps = eps
+        self.register_buffer(
+            'global_mean', torch.zeros(1, 1, num_features) if global_mean is None else global_mean
+        )
+        self.register_buffer(
+            'global_std', torch.ones(1, 1, num_features) if global_std is None else global_std
+        )
+        self.input_proj = nn.Conv1d(num_features, tcn_num_channels, kernel_size=1)
+        self.tcn_backbone = nn.Sequential(*[
+            TCNResidualBlock(tcn_num_channels, tcn_num_channels, tcn_kernel_size, 2 ** i, tcn_dropout)
+            for i in range(tcn_num_blocks)
+        ])
+        self.decoder = nn.Sequential(
+            nn.Linear(tcn_num_channels, tcn_num_channels),
+            nn.SiLU(),
+            nn.Linear(tcn_num_channels, tcn_num_channels),
+            nn.SiLU(),
+            nn.Linear(tcn_num_channels, num_features)
+        )
+
+    def forward(self, noisy_x):
+        x = (noisy_x - self.global_mean) / (self.global_std + self.eps)
+        features = self.tcn_backbone(self.input_proj(x.permute(0, 2, 1)))
+        reconstruction_normalized = self.decoder(features.permute(0, 2, 1))
+        return reconstruction_normalized * (self.global_std + self.eps) + self.global_mean
+
+
 class CausalConv1d(nn.Module):
     """Causal convolution with weight normalization."""
     def __init__(self, in_ch, out_ch, kernel_size=3, dilation=1):

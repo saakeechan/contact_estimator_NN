@@ -151,7 +151,7 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
             tau_mse = np.sum(tau_est ** 2, axis=1, keepdims=True)
 
             # Concatenate features - num_features is auto-detected from shape
-            cur_data = (np.concatenate([q, qd, p, v, tau_est, tau_mse], axis=1))  # Shape: (num_samples, num_features)
+            cur_data = (np.concatenate([q, qd, p, v, tau_est, tau_mse, cmd_vel], axis=1))  # Shape: (num_samples, num_features))
             
             # Initialize all_data and capture num_features from actual data shape
             if num_features is None:

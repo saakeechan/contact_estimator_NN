@@ -14,17 +14,17 @@ import pandas as pd
 import torch
 import yaml
 
-from contact_cnn import AttentionTCN, ContactCNNWithNormalization, TCN, contact_cnn
-from utils.csv2numpyV1 import quaternion_to_rotation_matrix
+from contact_cnn import DenoisingTCNAutoencoder
+from trainEncoder import VariationalTCNAutoencoder
 
 
 # Select one trajectory whose first cmd_vel_x is in this inclusive range.
-TEST_CMD_VEL_X_WINDOW = (1.0, 3.0)  # [min, max] in m/s
-RANDOM_SEED = 10
+TEST_CMD_VEL_X_WINDOW = (0.0, 0.5)  # [min, max] in m/s
+RANDOM_SEED = 0
 
 RUN_KNN_UMAP = True
-KNN_K = 10
-OOD_ID_PERCENTILE = 0.97
+KNN_K = 50
+OOD_ID_PERCENTILE = 0.95
 UMAP_TRAIN_MAX = 5000
 
 
@@ -71,67 +71,43 @@ def make_features(trajectory):
     return np.concatenate((q, qd, foot_position, foot_velocity, torque, torque_mse, cmd_vel_x), axis=1)
 
 
-def make_body_velocity(trajectory):
-    velocity_world = trajectory[['vel_x', 'vel_y', 'vel_z']].to_numpy()
-    quaternion = trajectory[['quat_w', 'quat_i', 'quat_j', 'quat_k']].to_numpy()
-    return np.einsum('nij,nj->ni', quaternion_to_rotation_matrix(quaternion).transpose(0, 2, 1), velocity_world)
-
-
 def make_model(config, num_features):
-    architecture = config.get('model_architecture', 'vanilla_cnn').lower()
-    if architecture == 'attention_tcn':
-        base_model = AttentionTCN(
-            window_size=config['window_size'], num_features=num_features,
-            d_model=config.get('attention_d_model', 64), num_heads=config.get('attention_num_heads', 4),
-            tcn_num_channels=config.get('tcn_num_channels', 64), tcn_kernel_size=config.get('tcn_kernel_size', 3),
-            tcn_num_blocks=config.get('tcn_num_blocks', 5), tcn_dropout=config.get('tcn_dropout', 0.2),
-        )
-    elif architecture == 'tcn':
-        base_model = TCN(
-            window_size=config['window_size'], num_features=num_features,
-            tcn_num_channels=config.get('tcn_num_channels', 64), tcn_kernel_size=config.get('tcn_kernel_size', 3),
-            tcn_num_blocks=config.get('tcn_num_blocks', 5), tcn_dropout=config.get('tcn_dropout', 0.2),
-        )
-    elif architecture == 'vanilla_cnn':
-        base_model = contact_cnn(window_size=config['window_size'], num_features=num_features)
-    else:
-        raise ValueError(f'Unknown model_architecture: {architecture}')
-    return ContactCNNWithNormalization(base_model)
+    model_class = DenoisingTCNAutoencoder if config['encoder_type'] == 'DAE' else VariationalTCNAutoencoder
+    return model_class(
+        window_size=config['window_size'], num_features=num_features,
+        tcn_num_channels=config.get('tcn_num_channels', 64),
+        tcn_kernel_size=config.get('tcn_kernel_size', 3),
+        tcn_num_blocks=config.get('tcn_num_blocks', 3),
+        tcn_dropout=config.get('tcn_dropout', 0.2),
+    )
 
 
-def latest_checkpoint():
-    logs_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'logs')
+def latest_checkpoint(encoder_type):
+    logs_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'logsEncoder')
+    checkpoint_name = 'dae_best_val_mse.pt' if encoder_type == 'DAE' else 'vae_best_val_loss.pt'
     for run_dir in sorted(glob.glob(os.path.join(logs_root, '*')), key=os.path.getmtime, reverse=True):
-        checkpoint = os.path.join(run_dir, 'model_best_val_velocity.pt')
+        checkpoint = os.path.join(run_dir, checkpoint_name)
         if os.path.isfile(checkpoint):
             return checkpoint
-    raise FileNotFoundError(f'No model_best_val_velocity.pt found in {logs_root}')
+    raise FileNotFoundError(f'No {checkpoint_name} found in {logs_root}')
 
 
 def run_trajectory(model, trajectory, window_size, batch_size, device):
-    """Infer every valid sliding window in one trajectory and align final-timestep targets."""
+    """Reconstruct every valid sliding window and return its raw-window MSE."""
     features = make_features(trajectory)
     num_windows = len(features) - window_size + 1
-    predicted_velocity, predicted_variance, contact_probability = [], [], []
+    reconstruction_mse = []
 
     with torch.no_grad():
         for first in range(0, num_windows, batch_size):
             last = min(first + batch_size, num_windows)
             windows = np.stack([features[index:index + window_size] for index in range(first, last)])
-            _, velocity, _, variance, contact_logit = model(torch.from_numpy(windows).float().to(device), return_sequence=False)
-            predicted_velocity.append(velocity[:, 0].cpu().numpy())
-            predicted_variance.append(variance[:, 0].cpu().numpy())
-            contact_probability.append(torch.sigmoid(contact_logit[:, 0]).cpu().numpy())
-
-    final_indices = np.arange(window_size - 1, len(trajectory))
-    return (
-        final_indices,
-        np.concatenate(predicted_velocity),
-        np.concatenate(predicted_variance),
-        np.concatenate(contact_probability),
-        trajectory['lfoot-contact'].to_numpy()[final_indices],
-        make_body_velocity(trajectory)[final_indices],
-    )
+            raw_windows = torch.from_numpy(windows).float().to(device)
+            reconstruction = model(raw_windows)
+            if isinstance(reconstruction, tuple):
+                reconstruction = reconstruction[0]
+            reconstruction_mse.append((reconstruction - raw_windows).square().mean(dim=(1, 2)).cpu().numpy())
+    return np.concatenate(reconstruction_mse)
 
 
 def get_training_window_starts(data_folder, window_size, config):
@@ -139,8 +115,8 @@ def get_training_window_starts(data_folder, window_size, config):
     boundaries = np.load(os.path.join(data_folder, 'all_data_boundaries.npy'))
     run_starts = np.concatenate(([0], boundaries[:-1]))
     valid_run_ids = np.flatnonzero(boundaries - run_starts >= window_size)
-    if len(valid_run_ids) < 3:
-        raise ValueError(f'Need at least 3 runs with {window_size} samples for the training split.')
+    if len(valid_run_ids) < 2:
+        raise ValueError(f'Need at least 2 runs with {window_size} samples for the training split.')
 
     run_ids = valid_run_ids.copy()
     if config.get('shuffle', True):
@@ -156,8 +132,8 @@ def get_training_window_starts(data_folder, window_size, config):
 
 
 def collect_final_tcn_latents(model, raw_data, window_starts, window_size, batch_size, device):
-    """Run raw windows through the wrapper and return their final TCN latents."""
-    backbone = model.base_model.tcn_backbone
+    """Run raw windows through the DAE and return their final TCN latents."""
+    backbone = model.tcn_backbone
     latents = []
     hook = backbone.register_forward_hook(lambda _, __, output: latents.append(output[:, :, -1].detach().cpu()))
     offsets = np.arange(window_size)
@@ -166,7 +142,7 @@ def collect_final_tcn_latents(model, raw_data, window_starts, window_size, batch
             for first in range(0, len(window_starts), batch_size):
                 starts = window_starts[first:first + batch_size]
                 windows = raw_data[starts[:, None] + offsets]
-                model(torch.from_numpy(windows).float().to(device), return_sequence=False)
+                model(torch.from_numpy(windows).float().to(device))
     finally:
         hook.remove()
     return torch.cat(latents).numpy()
@@ -207,31 +183,16 @@ def save_knn_umap(training_latents, trajectory_latents, knn_distances, ood_mask,
     plt.close(figure)
 
 
-def save_velocity_plot(time, predicted, ground_truth, contact, output_path):
-    figure, axes = plt.subplots(3, 1, figsize=(14, 9), sharex=True)
-    contact_changes = np.diff(np.concatenate(([0], contact == 1, [0])))
-    for axis_index, axis in enumerate(axes):
-        for start, end in zip(np.where(contact_changes == 1)[0], np.where(contact_changes == -1)[0]):
-            axis.axvspan(time[start], time[end - 1], color='red', alpha=0.2)
-        axis.plot(time, ground_truth[:, axis_index], color='black', label='Ground truth')
-        axis.plot(time, predicted[:, axis_index], color='tab:blue', linestyle='--', label='Predicted')
-        axis.set_ylabel(f'v{"xyz"[axis_index]} (m/s)')
-        axis.grid(True, alpha=0.3)
-        axis.legend(loc='upper right')
-    axes[0].set_title('Whole-trajectory body-frame body velocity: prediction vs ground truth')
-    axes[-1].set_xlabel('Trajectory time (s)')
-    figure.tight_layout()
-    figure.savefig(output_path, dpi=150, bbox_inches='tight')
-    plt.close(figure)
-
-
 def main():
-    parser = argparse.ArgumentParser(description='Run one selected CSV trajectory through the contact network.')
+    parser = argparse.ArgumentParser(description='Run one selected CSV trajectory through the configured autoencoder.')
     parser.add_argument('--config_name', default=os.path.join(os.path.dirname(__file__), '../config/network_params.yaml'))
     args = parser.parse_args()
 
     with open(args.config_name) as config_file:
         config = yaml.safe_load(config_file)
+    config['encoder_type'] = config.get('encoder_type', 'DAE').upper()
+    if config['encoder_type'] not in {'DAE', 'VAE'}:
+        raise ValueError("encoder_type must be 'DAE' or 'VAE'.")
     low, high = TEST_CMD_VEL_X_WINDOW
     if low > high:
         raise ValueError('TEST_CMD_VEL_X_WINDOW must be (min, max) with min <= max')
@@ -244,18 +205,13 @@ def main():
     )
 
     model = make_model(config, make_features(trajectory).shape[1])
-    checkpoint_path = latest_checkpoint()
+    checkpoint_path = latest_checkpoint(config['encoder_type'])
     model.load_state_dict(torch.load(checkpoint_path, map_location=device)['model_state_dict'])
     model.eval().to(device)
 
-    indices, predicted, variance, contact_probability, contact, ground_truth = run_trajectory(
+    reconstruction_mse = run_trajectory(
         model, trajectory, config['window_size'], config.get('test_batch_size', config['batch_size']), device
     )
-    contact_mask = contact == 1
-    mae = np.abs(predicted[contact_mask] - ground_truth[contact_mask]).mean() if contact_mask.any() else float('nan')
-    mean_variance = variance[contact_mask].mean(axis=0) if contact_mask.any() else np.full(3, np.nan)
-    output_path = os.path.join(os.path.dirname(checkpoint_path), f'trajectory_velocity_comparison_seed{RANDOM_SEED}.png')
-    save_velocity_plot(trajectory['timestamp'].to_numpy()[indices], predicted, ground_truth, contact, output_path)
 
     if RUN_KNN_UMAP:
         data_folder = config['data_folder'] if os.path.isabs(config['data_folder']) else os.path.join(project_root, config['data_folder'])
@@ -284,12 +240,9 @@ def main():
 
     print(f'CSV: {csv_path}')
     print(f'Trajectory: {run_index}, start cmd_vel_x: {start_cmd_vel:.3f} m/s, selected range: [{low}, {high}]')
-    print(f'Random seed: {RANDOM_SEED}, trajectory samples: {len(trajectory)}, evaluated windows: {len(indices)}')
+    print(f'Random seed: {RANDOM_SEED}, trajectory samples: {len(trajectory)}, evaluated windows: {len(reconstruction_mse)}')
     print(f'Checkpoint: {checkpoint_path}')
-    print(f'Contact-final windows: {contact_mask.sum()} / {len(contact)}')
-    print(f'Contact-masked velocity MAE: {mae:.6f}')
-    print(f'Mean predicted variance on contact [vx, vy, vz]: {mean_variance}')
-    print(f'Whole-trajectory velocity plot: {output_path}')
+    print(f'Reconstruction MSE: mean {reconstruction_mse.mean():.8f}, max {reconstruction_mse.max():.8f}')
     if RUN_KNN_UMAP:
         print(f'KNN reference windows: {len(training_latents)}, K: {knn_k}')
         print(f'{knn_k}-th nearest-neighbor latent distance: mean {knn_distances.mean():.6f}, max {knn_distances.max():.6f}')

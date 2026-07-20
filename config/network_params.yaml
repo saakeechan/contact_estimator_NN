@@ -23,6 +23,13 @@ batch_size: 60  # Used for both training and testing
 init_lr: 0.001
 num_epoch: 30 # Reduced for quick training with small dataset
 
+# trainEncoder.py: choose the encoder objective.
+encoder_type: "VAE"  # Options: "DAE" (denoising autoencoder), "VAE" (variational autoencoder)
+# DAE only: add Gaussian noise in raw units, scaled by each feature's training std.
+dae_noise_std: 0.01
+# VAE only: weight for the KL divergence to N(0, I).
+vae_beta: 0.001
+
 
 
 # Multi-task Learning: Contact Classification + Velocity Regression
