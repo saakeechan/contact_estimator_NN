@@ -59,15 +59,15 @@ def make_features(trajectory):
         'left_hip_pitch_joint', 'left_hip_roll_joint', 'left_hip_yaw_joint',
         'left_knee_joint', 'left_ankle_pitch_joint', 'left_ankle_roll_joint',
     )
-    imu_acc = trajectory[['acc_body_x', 'acc_body_y', 'acc_body_z']].to_numpy()
-    imu_omega = trajectory[['gyro_body_x', 'gyro_body_y', 'gyro_body_z']].to_numpy()
+    # imu_acc = trajectory[['acc_body_x', 'acc_body_y', 'acc_body_z']].to_numpy()
+    # imu_omega = trajectory[['gyro_body_x', 'gyro_body_y', 'gyro_body_z']].to_numpy()
     q = trajectory[['joint_pos_' + name for name in joint_names]].to_numpy()
     qd = trajectory[['joint_vel_' + name for name in joint_names]].to_numpy()
     foot_position = trajectory[['fk_left_foot_pos_x', 'fk_left_foot_pos_y', 'fk_left_foot_pos_z']].to_numpy()
     foot_velocity = trajectory[['fk_left_foot_vel_x', 'fk_left_foot_vel_y', 'fk_left_foot_vel_z']].to_numpy()
     torque = trajectory[['joint_torque_' + name for name in joint_names]].to_numpy()
     torque_mse = np.sum(torque ** 2, axis=1, keepdims=True)
-    return np.concatenate((imu_acc, imu_omega, q, qd, foot_position, foot_velocity, torque, torque_mse), axis=1)
+    return np.concatenate((q, qd, foot_position, foot_velocity, torque, torque_mse), axis=1)
 
 
 def make_body_velocity(trajectory):
@@ -198,7 +198,7 @@ def save_knn_umap(training_latents, trajectory_latents, knn_distances, ood_mask,
             trajectory_embedding[ood_mask, 0], trajectory_embedding[ood_mask, 1],
             s=44, facecolors='none', edgecolors='red', linewidths=1.2, label='OOD window'
         )
-    figure.colorbar(points, ax=axis, label=f'Mean {knn_k}-NN latent distance')
+    figure.colorbar(points, ax=axis, label=f'{knn_k}-th nearest-neighbor latent distance')
     axis.set(title=f'Training-window UMAP (OOD threshold: {threshold:.4f})', xlabel='UMAP 1', ylabel='UMAP 2')
     axis.legend()
     figure.tight_layout()
@@ -272,10 +272,10 @@ def main():
             raise ValueError('Need at least two training windows for KNN OOD detection.')
         knn_k = min(KNN_K, len(training_latents) - 1)
         neighbors = NearestNeighbors(n_neighbors=knn_k).fit(training_latents)
-        knn_distances = neighbors.kneighbors(trajectory_latents, return_distance=True)[0].mean(axis=1)
+        knn_distances = neighbors.kneighbors(trajectory_latents, return_distance=True)[0][:, -1]
         train_distances = NearestNeighbors(n_neighbors=knn_k + 1).fit(training_latents).kneighbors(
             training_latents, return_distance=True
-        )[0][:, 1:].mean(axis=1)
+        )[0][:, -1]
         ood_threshold = np.quantile(train_distances, OOD_ID_PERCENTILE)
         ood_mask = knn_distances > ood_threshold
         umap_output_path = os.path.join(os.path.dirname(checkpoint_path), f'trajectory_knn_umap_seed{RANDOM_SEED}.png')
@@ -291,7 +291,7 @@ def main():
     print(f'Whole-trajectory velocity plot: {output_path}')
     if RUN_KNN_UMAP:
         print(f'KNN reference windows: {len(training_latents)}, K: {knn_k}')
-        print(f'Mean {knn_k}-NN latent distance: {knn_distances.mean():.6f}, max: {knn_distances.max():.6f}')
+        print(f'{knn_k}-th nearest-neighbor latent distance: mean {knn_distances.mean():.6f}, max {knn_distances.max():.6f}')
         print(f'ID threshold ({OOD_ID_PERCENTILE:.0%} training quantile): {ood_threshold:.6f}')
         print(f'OOD trajectory windows: {ood_mask.sum()} / {len(ood_mask)}')
         print(f'Training/trajectory KNN UMAP: {umap_output_path}')
