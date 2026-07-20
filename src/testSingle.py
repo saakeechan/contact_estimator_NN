@@ -17,8 +17,8 @@ from contact_cnn import AttentionTCN, ContactCNNWithNormalization, TCN, contact_
 
 
 # Select one trajectory whose first cmd_vel_x is in this inclusive range.
-TEST_CMD_VEL_X_WINDOW = (2.5, 3.0)  # [min, max] in m/s
-RANDOM_SEED = 3
+TEST_CMD_VEL_X_WINDOW = (2.1, 2.2)  # [min, max] in m/s
+RANDOM_SEED = 21
 
 
 def find_random_trajectory(csv_folder, window_size, cmd_vel_x_window, rng):
@@ -173,6 +173,7 @@ def main():
     )
     contact_mask = contact == 1
     mae = np.abs(predicted[contact_mask] - ground_truth[contact_mask]).mean() if contact_mask.any() else float('nan')
+    mean_variance = variance[contact_mask].mean(axis=0) if contact_mask.any() else np.full(3, np.nan)
     output_path = os.path.join(os.path.dirname(checkpoint_path), f'trajectory_velocity_comparison_seed{RANDOM_SEED}.png')
     save_velocity_plot(trajectory['timestamp'].to_numpy()[indices], predicted, ground_truth, contact, output_path)
 
@@ -182,7 +183,7 @@ def main():
     print(f'Checkpoint: {checkpoint_path}')
     print(f'Contact-final windows: {contact_mask.sum()} / {len(contact)}')
     print(f'Contact-masked velocity MAE: {mae:.6f}')
-    print(f'Mean predicted variance [vx, vy, vz]: {variance.mean(axis=0)}')
+    print(f'Mean predicted variance on contact [vx, vy, vz]: {mean_variance}')
     print(f'Whole-trajectory velocity plot: {output_path}')
 
 
