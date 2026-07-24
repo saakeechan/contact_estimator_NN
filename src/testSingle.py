@@ -19,12 +19,12 @@ from utils.csv2numpyV1 import quaternion_to_rotation_matrix
 
 
 # Select one trajectory whose first cmd_vel_x is in this inclusive range.
-TEST_CMD_VEL_X_WINDOW = (1.0, 3.0)  # [min, max] in m/s
-RANDOM_SEED = 10
+TEST_CMD_VEL_X_WINDOW = (2.0, 3.0)  # [min, max] in m/s
+RANDOM_SEED = 90
 
 RUN_KNN_UMAP = True
-KNN_K = 10
-OOD_ID_PERCENTILE = 0.97
+KNN_K = 50
+OOD_ID_PERCENTILE = 0.95
 UMAP_TRAIN_MAX = 5000
 
 

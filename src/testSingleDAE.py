@@ -19,8 +19,8 @@ from trainEncoder import VariationalTCNAutoencoder
 
 
 # Select one trajectory whose first cmd_vel_x is in this inclusive range.
-TEST_CMD_VEL_X_WINDOW = (0.0, 0.5)  # [min, max] in m/s
-RANDOM_SEED = 0
+TEST_CMD_VEL_X_WINDOW = (1.3, 1.8)  # [min, max] in m/s
+RANDOM_SEED = 28
 
 RUN_KNN_UMAP = True
 KNN_K = 50
