@@ -19,8 +19,8 @@ from utils.csv2numpyV1 import quaternion_to_rotation_matrix
 
 
 # Select one trajectory whose first cmd_vel_x is in this inclusive range.
-TEST_CMD_VEL_X_WINDOW = (2.0, 3.0)  # [min, max] in m/s
-RANDOM_SEED = 90
+TEST_CMD_VEL_X_WINDOW = (2.8, 3.0)  # [min, max] in m/s
+RANDOM_SEED = 900
 
 RUN_KNN_UMAP = True
 KNN_K = 50
@@ -91,6 +91,8 @@ def make_model(config, num_features):
             window_size=config['window_size'], num_features=num_features,
             tcn_num_channels=config.get('tcn_num_channels', 64), tcn_kernel_size=config.get('tcn_kernel_size', 3),
             tcn_num_blocks=config.get('tcn_num_blocks', 5), tcn_dropout=config.get('tcn_dropout', 0.2),
+            natpn_flow_layers=config.get('natpn_flow_layers', 8),
+            natpn_certainty_budget=config.get('natpn_certainty_budget', 'normal'),
         )
     elif architecture == 'vanilla_cnn':
         base_model = contact_cnn(window_size=config['window_size'], num_features=num_features)
@@ -102,10 +104,11 @@ def make_model(config, num_features):
 def latest_checkpoint():
     logs_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'logs')
     for run_dir in sorted(glob.glob(os.path.join(logs_root, '*')), key=os.path.getmtime, reverse=True):
-        checkpoint = os.path.join(run_dir, 'model_best_val_velocity.pt')
-        if os.path.isfile(checkpoint):
-            return checkpoint
-    raise FileNotFoundError(f'No model_best_val_velocity.pt found in {logs_root}')
+        for filename in ('model_natpn_finetuned.pt', 'model_best_val_velocity.pt'):
+            checkpoint = os.path.join(run_dir, filename)
+            if os.path.isfile(checkpoint):
+                return checkpoint
+    raise FileNotFoundError(f'No NatPN-finetuned or best-velocity checkpoint found in {logs_root}')
 
 
 def run_trajectory(model, trajectory, window_size, batch_size, device):
@@ -132,6 +135,22 @@ def run_trajectory(model, trajectory, window_size, batch_size, device):
         trajectory['lfoot-contact'].to_numpy()[final_indices],
         make_body_velocity(trajectory)[final_indices],
     )
+
+
+@torch.no_grad()
+def natpn_uncertainty_for_window(model, features, window_start, window_size, device):
+    """Return NatPN aleatoric and epistemic variance for one final-timestep window."""
+    window = torch.from_numpy(features[window_start:window_start + window_size]).float().unsqueeze(0).to(device)
+    *_, posteriors = model(window, return_sequence=False, return_posteriors=True)
+    aleatoric = np.array([
+        (posterior.beta / (posterior.alpha - 1.0).clamp_min(1e-6)).item()
+        for posterior in posteriors
+    ])
+    epistemic = np.array([
+        (posterior.beta / ((posterior.alpha - 1.0).clamp_min(1e-6) * posterior.lambd)).item()
+        for posterior in posteriors
+    ])
+    return aleatoric, epistemic
 
 
 def get_training_window_starts(data_folder, window_size, config):
@@ -177,7 +196,7 @@ def l2_normalize(features):
 
 
 def save_knn_umap(training_latents, trajectory_latents, knn_distances, ood_mask, knn_k, threshold, output_path):
-    """Plot sampled training latents and every selected trajectory window in one UMAP."""
+    """Plot sampled training latents and the selected contact trajectory windows in one UMAP."""
     from umap import UMAP
 
     rng = np.random.default_rng(RANDOM_SEED)
@@ -199,7 +218,7 @@ def save_knn_umap(training_latents, trajectory_latents, knn_distances, ood_mask,
             trajectory_embedding[ood_mask, 0], trajectory_embedding[ood_mask, 1],
             s=44, facecolors='none', edgecolors='red', linewidths=1.2, label='OOD window'
         )
-    figure.colorbar(points, ax=axis, label=f'{knn_k}-th nearest-neighbor latent distance')
+    figure.colorbar(points, ax=axis, label=f'Mean distance to {knn_k} nearest latent neighbors')
     axis.set(title=f'Training-window UMAP (OOD threshold: {threshold:.4f})', xlabel='UMAP 1', ylabel='UMAP 2')
     axis.legend()
     figure.tight_layout()
@@ -243,7 +262,8 @@ def main():
         csv_folder, config['window_size'], TEST_CMD_VEL_X_WINDOW, np.random.default_rng(RANDOM_SEED)
     )
 
-    model = make_model(config, make_features(trajectory).shape[1])
+    trajectory_features = make_features(trajectory)
+    model = make_model(config, trajectory_features.shape[1])
     checkpoint_path = latest_checkpoint()
     model.load_state_dict(torch.load(checkpoint_path, map_location=device)['model_state_dict'])
     model.eval().to(device)
@@ -252,6 +272,14 @@ def main():
         model, trajectory, config['window_size'], config.get('test_batch_size', config['batch_size']), device
     )
     contact_mask = contact == 1
+    candidate_positions = np.flatnonzero(contact_mask)
+    random_contact_window = len(candidate_positions) > 0
+    if not random_contact_window:
+        candidate_positions = np.arange(len(contact_mask))
+    random_position = int(np.random.default_rng(RANDOM_SEED).choice(candidate_positions))
+    random_aleatoric, random_epistemic = natpn_uncertainty_for_window(
+        model, trajectory_features, random_position, config['window_size'], device
+    )
     mae = np.abs(predicted[contact_mask] - ground_truth[contact_mask]).mean() if contact_mask.any() else float('nan')
     mean_variance = variance[contact_mask].mean(axis=0) if contact_mask.any() else np.full(3, np.nan)
     output_path = os.path.join(os.path.dirname(checkpoint_path), f'trajectory_velocity_comparison_seed{RANDOM_SEED}.png')
@@ -266,20 +294,25 @@ def main():
         ))
         trajectory_starts = np.arange(len(trajectory) - config['window_size'] + 1)
         trajectory_latents = l2_normalize(collect_final_tcn_latents(
-            model, make_features(trajectory), trajectory_starts, config['window_size'], config['batch_size'], device
+            model, trajectory_features, trajectory_starts, config['window_size'], config['batch_size'], device
         ))
+        if len(trajectory_latents) != len(contact_mask):
+            raise RuntimeError('Trajectory latent/contact-window alignment failed.')
+        trajectory_latents = trajectory_latents[contact_mask]
+        if len(trajectory_latents) == 0:
+            raise ValueError('Selected trajectory has no contact-final windows for KNN evaluation.')
         from sklearn.neighbors import NearestNeighbors
         if len(training_latents) < 2:
             raise ValueError('Need at least two training windows for KNN OOD detection.')
         knn_k = min(KNN_K, len(training_latents) - 1)
         neighbors = NearestNeighbors(n_neighbors=knn_k).fit(training_latents)
-        knn_distances = neighbors.kneighbors(trajectory_latents, return_distance=True)[0][:, -1]
+        knn_distances = neighbors.kneighbors(trajectory_latents, return_distance=True)[0].mean(axis=1)
         train_distances = NearestNeighbors(n_neighbors=knn_k + 1).fit(training_latents).kneighbors(
             training_latents, return_distance=True
-        )[0][:, -1]
+        )[0][:, 1:].mean(axis=1)
         ood_threshold = np.quantile(train_distances, OOD_ID_PERCENTILE)
         ood_mask = knn_distances > ood_threshold
-        umap_output_path = os.path.join(os.path.dirname(checkpoint_path), f'trajectory_knn_umap_seed{RANDOM_SEED}.png')
+        umap_output_path = os.path.join(os.path.dirname(checkpoint_path), f'contact_trajectory_knn_umap_seed{RANDOM_SEED}.png')
         save_knn_umap(training_latents, trajectory_latents, knn_distances, ood_mask, knn_k, ood_threshold, umap_output_path)
 
     print(f'CSV: {csv_path}')
@@ -289,13 +322,18 @@ def main():
     print(f'Contact-final windows: {contact_mask.sum()} / {len(contact)}')
     print(f'Contact-masked velocity MAE: {mae:.6f}')
     print(f'Mean predicted variance on contact [vx, vy, vz]: {mean_variance}')
+    print(
+        f'Random {"contact " if random_contact_window else ""}window: final sample {indices[random_position]} | '
+        f'aleatoric variance [vx, vy, vz]: {random_aleatoric} | '
+        f'epistemic variance [vx, vy, vz]: {random_epistemic}'
+    )
     print(f'Whole-trajectory velocity plot: {output_path}')
     if RUN_KNN_UMAP:
         print(f'KNN reference windows: {len(training_latents)}, K: {knn_k}')
-        print(f'{knn_k}-th nearest-neighbor latent distance: mean {knn_distances.mean():.6f}, max {knn_distances.max():.6f}')
+        print(f'Mean distance to {knn_k} nearest latent neighbors: mean {knn_distances.mean():.6f}, max {knn_distances.max():.6f}')
         print(f'ID threshold ({OOD_ID_PERCENTILE:.0%} training quantile): {ood_threshold:.6f}')
-        print(f'OOD trajectory windows: {ood_mask.sum()} / {len(ood_mask)}')
-        print(f'Training/trajectory KNN UMAP: {umap_output_path}')
+        print(f'OOD contact trajectory windows: {ood_mask.sum()} / {len(ood_mask)}')
+        print(f'Training/contact-trajectory KNN UMAP: {umap_output_path}')
 
 
 if __name__ == '__main__':

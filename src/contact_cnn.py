@@ -2,12 +2,24 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
+from pathlib import Path
+import sys
 
 import numpy as np
 
 VELOCITY_COMPONENTS = ("x", "y", "z")
 LEGS = ("left",)
 MIN_VELOCITY_VARIANCE = 1e-6
+
+NATPN_ROOT = Path(__file__).resolve().parents[1] / "NATPN" / "natural-posterior-network"
+if not NATPN_ROOT.is_dir():
+    raise RuntimeError(f"Bundled NatPN source is missing: {NATPN_ROOT}")
+if str(NATPN_ROOT) not in sys.path:
+    sys.path.insert(0, str(NATPN_ROOT))
+
+from natpn.nn import NaturalPosteriorNetworkModel
+from natpn.nn.flow import RadialFlow
+from natpn.nn.output import NormalOutput
 
 
 def make_velocity_heads(num_features):
@@ -57,6 +69,67 @@ def make_contact_heads(num_features):
         )
         for leg in LEGS
     })
+
+
+class NatPNVelocityHeads(nn.Module):
+    """One scalar NatPN regression head per body-velocity component."""
+    def __init__(self, latent_dim, flow_layers=8, certainty_budget="normal"):
+        super().__init__()
+        self.models = nn.ModuleList([
+            NaturalPosteriorNetworkModel(
+                latent_dim=latent_dim,
+                encoder=nn.Identity(),
+                flow=RadialFlow(latent_dim, flow_layers),
+                output=NormalOutput(latent_dim),
+                certainty_budget=certainty_budget,
+            )
+            for _ in VELOCITY_COMPONENTS
+        ])
+
+    @staticmethod
+    def predictive_variance(posterior):
+        aleatoric = posterior.beta / (posterior.alpha - 1.0).clamp_min(MIN_VELOCITY_VARIANCE)
+        return aleatoric + aleatoric / posterior.lambd
+
+    def flow_nll(self, features, return_sequence):
+        """Fit only the radial flows to detached TCN latents."""
+        if return_sequence:
+            inputs = features.permute(0, 2, 1).reshape(-1, features.shape[1])
+        else:
+            inputs = features[:, :, -1]
+        inputs = inputs.detach()
+        return -torch.stack([
+            model.log_prob(inputs, track_encoder_gradients=False).mean()
+            for model in self.models
+        ]).mean()
+
+    def forward(self, features, return_sequence):
+        if return_sequence:
+            batch_size, _, num_steps = features.shape
+            inputs = features.permute(0, 2, 1).reshape(-1, features.shape[1])
+        else:
+            batch_size, _, num_steps = features.shape
+            inputs = features[:, :, -1]
+
+        posteriors = [model(inputs)[0] for model in self.models]
+        means = torch.stack([posterior.maximum_a_posteriori().mean() for posterior in posteriors], dim=-1)
+        variances = torch.stack([self.predictive_variance(posterior) for posterior in posteriors], dim=-1)
+
+        if return_sequence:
+            means = means.view(batch_size, num_steps, len(VELOCITY_COMPONENTS)).permute(0, 2, 1).unsqueeze(1)
+            variances = variances.view(batch_size, num_steps, len(VELOCITY_COMPONENTS)).permute(0, 2, 1).unsqueeze(1)
+            posteriors = [
+                type(posterior)(
+                    posterior.mu.view(batch_size, num_steps),
+                    posterior.lambd.view(batch_size, num_steps),
+                    posterior.alpha.view(batch_size, num_steps),
+                    posterior.beta.view(batch_size, num_steps),
+                )
+                for posterior in posteriors
+            ]
+            return means, means[:, :, :, -1], variances, variances[:, :, :, -1], posteriors
+
+        return None, means.unsqueeze(1), None, variances.unsqueeze(1), posteriors
 
 """
 Three network architectures are available:
@@ -273,8 +346,9 @@ class TCN(nn.Module):
     - Weight normalization: stabilizes training without batch statistics
     - Causal convolutions: no future information leakage
     """
-    def __init__(self, window_size=10, num_features=12, tcn_num_channels=64, 
-                 tcn_kernel_size=3, tcn_num_blocks=5, tcn_dropout=0.2):
+    def __init__(self, window_size=10, num_features=12, tcn_num_channels=64,
+                 tcn_kernel_size=3, tcn_num_blocks=5, tcn_dropout=0.2,
+                 natpn_flow_layers=8, natpn_certainty_budget="normal"):
         super(TCN, self).__init__()
         self.num_features = num_features
         self.window_size = window_size
@@ -294,13 +368,15 @@ class TCN(nn.Module):
         
         self.tcn_backbone = nn.Sequential(*tcn_layers)
         
-        # 3. Velocity prediction heads
-        self.velocity_heads = make_velocity_heads(tcn_num_channels)
+        # 3. NatPN velocity heads; contact prediction remains the existing MLP.
+        self.velocity_heads = NatPNVelocityHeads(
+            tcn_num_channels, natpn_flow_layers, natpn_certainty_budget
+        )
         
         # 4. Left-foot contact logit.
         self.contact_heads = make_contact_heads(tcn_num_channels)
     
-    def forward(self, x, return_sequence=True):
+    def forward(self, x, return_sequence=True, return_posteriors=False, return_flow_nll=False):
         """
         Args:
             x: (batch_size, window_size, num_features) - RAW features
@@ -322,17 +398,20 @@ class TCN(nn.Module):
         
         # 3. TCN backbone
         features = self.tcn_backbone(z)  # [B, tcn_num_channels, T]
+        if return_flow_nll:
+            return self.velocity_heads.flow_nll(features, return_sequence)
         
         # 4. Velocity prediction
-        velocity_seq, velocity_out, covariance_seq, covariance_out = predict_velocity(
-            self.velocity_heads, features, return_sequence
+        velocity_seq, velocity_out, covariance_seq, covariance_out, posteriors = self.velocity_heads(
+            features, return_sequence
         )
         
         # 5. Contact prediction (MLP on last timestep features)
         features_last = features[:, :, -1]  # [B, tcn_num_channels]
         contact_out = torch.cat([self.contact_heads[leg](features_last) for leg in LEGS], dim=1)
         
-        return velocity_seq, velocity_out, covariance_seq, covariance_out, contact_out
+        outputs = velocity_seq, velocity_out, covariance_seq, covariance_out, contact_out
+        return (*outputs, posteriors) if return_posteriors else outputs
 
 
 class DenoisingTCNAutoencoder(nn.Module):
@@ -515,7 +594,7 @@ class ContactCNNWithNormalization(nn.Module):
             # Fallback: no normalization if stats not provided
             self.register_buffer('global_std', torch.ones(1, 1, num_features))
         
-    def forward(self, x, return_sequence=True):
+    def forward(self, x, return_sequence=True, return_posteriors=False, return_flow_nll=False):
         """
         Apply z-score normalization, then pass through base model.
         
@@ -534,4 +613,8 @@ class ContactCNNWithNormalization(nn.Module):
         x_normalized = (x - self.global_mean) / (self.global_std + self.eps)
         
         # Pass normalized data through the base model
+        if return_flow_nll:
+            return self.base_model(x_normalized, return_sequence=return_sequence, return_flow_nll=True)
+        if return_posteriors:
+            return self.base_model(x_normalized, return_sequence=return_sequence, return_posteriors=True)
         return self.base_model(x_normalized, return_sequence=return_sequence)

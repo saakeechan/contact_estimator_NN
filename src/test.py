@@ -274,7 +274,9 @@ def main():
             tcn_num_channels=config.get('tcn_num_channels', 64),
             tcn_kernel_size=config.get('tcn_kernel_size', 3),
             tcn_num_blocks=config.get('tcn_num_blocks', 5),
-            tcn_dropout=config.get('tcn_dropout', 0.2)
+            tcn_dropout=config.get('tcn_dropout', 0.2),
+            natpn_flow_layers=config.get('natpn_flow_layers', 8),
+            natpn_certainty_budget=config.get('natpn_certainty_budget', 'normal'),
         )
     elif model_arch == 'vanilla_cnn':
         base_model = contact_cnn(window_size=config['window_size'], num_features=num_features)

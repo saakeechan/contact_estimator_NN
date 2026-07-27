@@ -2,7 +2,7 @@
 csv_folder: "Data/CSVFiles/"
 # Keep runs whose maximum cmd_vel_x falls in any listed inclusive window.
 # Add as many [min, max] windows as needed, e.g. [[0.0, 0.5], [1.0, 2.0]].
-cmd_vel_x_windows: [[0.0, 1.0]]
+cmd_vel_x_windows: [[0.0, 2.0]]
 # Path to the data folder. Data should be separated into train.npy, train_label.npy, val.npy, val_label.npy.
 data_folder: "Data/NumpyFiles/"
 # # Test-specific params
@@ -21,7 +21,7 @@ val_ratio: 0.1
 # Network params
 batch_size: 60  # Used for both training and testing
 init_lr: 0.001
-num_epoch: 30 # Reduced for quick training with small dataset
+num_epoch: 6 # Reduced for quick training with small dataset
 
 # trainEncoder.py: choose the encoder objective.
 encoder_type: "DAE"  # Options: "DAE" (denoising autoencoder), "VAE" (variational autoencoder)
@@ -82,9 +82,13 @@ l2_lambda: 0     # L2 (Ridge): encourages small weights, prevents large values
 # Typical values: 1e-5 to 1e-3 for each
 
 
-# Velocity uncertainty is learned as diagonal covariance via Gaussian NLL; no covariance labels are used.
-# When enabled, train mean velocity with MSE for the first half of epochs, then Gaussian NLL.
-use_mse_warmup_then_nll: true
+# TCN velocity uncertainty is modeled by a separate NatPN per [vx, vy, vz].
+natpn_flow_layers: 8
+natpn_certainty_budget: "normal"
+natpn_entropy_weight: 1.0e-5
+# Match NATPN/test1.py: fit radial-flow density before and after supervised training.
+natpn_warmup_epochs: 3
+natpn_finetune_epochs: null  # null means use num_epoch
 
 # Model Architecture Selection
 # Choose which neural network architecture to use
@@ -101,4 +105,4 @@ attention_num_heads: 4      # Number of attention heads (must divide d_model eve
 tcn_num_channels: 64        # Number of channels in TCN layers
 tcn_kernel_size: 3          # Kernel size for temporal convolutions
 tcn_num_blocks: 3           # Number of TCN residual blocks (dilation: 1,2,4,8,16,...)
-tcn_dropout: 0.2            # Dropout rate in TCN blocks (0.0-0.5)
+tcn_dropout: 0            # Dropout rate in TCN blocks (0.0-0.5)

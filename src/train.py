@@ -14,6 +14,7 @@ import torch.optim as optim
 from contact_cnn import *
 from utils.data_handler import *
 from utils.plot_loss import generate_training_summary
+from natpn.nn import BayesianLoss
 
 from torch.utils.tensorboard import SummaryWriter
 
@@ -25,12 +26,35 @@ warnings.filterwarnings(
 )
 
 
-def gaussian_nll(mean, target, variance):
-    return 0.5 * (variance.log() + (mean - target).square() / variance)
+def natpn_loss(posteriors, target, loss_fn):
+    """Return per-axis NatPN Bayesian losses in the existing velocity tensor layout."""
+    losses = [loss_fn(posterior, target[..., 0, axis]) for axis, posterior in enumerate(posteriors)]
+    return torch.stack(losses, dim=-1).unsqueeze(-2)
 
 
-def mse_loss(mean, target, variance):
-    return (mean - target).square()
+def optimize_natpn_flows(model, dataloader, config, epochs, label):
+    """Mirror NATPN/test1.py's flow-only density fitting on TCN latents."""
+    if epochs <= 0:
+        return
+    flows = model.base_model.velocity_heads.models
+    optimizer = optim.Adam(
+        (parameter for natpn_model in flows for parameter in natpn_model.flow.parameters()),
+        lr=config['init_lr'],
+    )
+    use_dense_supervision = config.get('use_dense_supervision', False)
+    for epoch in range(1, epochs + 1):
+        model.train()
+        loss_sum = 0.0
+        for samples in tqdm(dataloader, desc=f'{label} flow {epoch}/{epochs}'):
+            optimizer.zero_grad(set_to_none=True)
+            flow_nll = model(
+                samples['data'], return_sequence=use_dense_supervision, return_flow_nll=True
+            )
+            flow_nll.backward()
+            optimizer.step()
+            loss_sum += flow_nll.item()
+        if epoch == 1 or epoch % 10 == 0 or epoch == epochs:
+            print(f'{label} {epoch:03d} | flow_nll={loss_sum / len(dataloader):.4f}')
 
 
 def save_tcn_last_timestep_umap(dataloader, model, output_path, random_seed=42, max_samples=5000):
@@ -132,8 +156,8 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_loss_fn
             gt_velocity_seq = sample['velocity']  # [B, T, 1, 3]
             gt_velocity = gt_velocity_seq[:, -1, :, :]  # [B, 1, 3]
 
-            velocity_seq, velocity_output, covariance_seq, covariance_output, contact_output = model(
-                input_data, return_sequence=False
+            velocity_seq, velocity_output, covariance_seq, covariance_output, contact_output, posteriors = model(
+                input_data, return_sequence=False, return_posteriors=True
             )
             contact_prediction = (contact_output > 0).float()  # Binary predictions
 
@@ -147,7 +171,7 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_loss_fn
             
             if velocity_loss_fn is not None:
                 # Velocity loss on last timestep only, masked to contact samples only
-                velocity_loss_each = velocity_loss_fn(velocity_output, gt_velocity, covariance_output)
+                velocity_loss_each = natpn_loss(posteriors, gt_velocity, velocity_loss_fn)
                 
                 velocity_loss_masked = (
                     velocity_loss_each * contact_mask
@@ -280,8 +304,8 @@ def train(model, train_dataloader, val_dataloader, config):
     # Contact: BCEWithLogitsLoss (binary classification)
     contact_criterion = nn.BCEWithLogitsLoss()
     
-    # Velocity: diagonal Gaussian NLL, learning one variance per body-velocity axis.
-    velocity_loss_fn = gaussian_nll
+    # Velocity: NatPN Bayesian loss over the three body-velocity components.
+    velocity_loss_fn = BayesianLoss(float(config.get('natpn_entropy_weight', 1e-5)), reduction='none')
     optimizer = optim.Adam(model.parameters(), lr=config['init_lr'])
     
     # Get loss weighting parameters
@@ -290,8 +314,6 @@ def train(model, train_dataloader, val_dataloader, config):
     derivative_weight = float(config.get('derivative_weight', 0.0))  # Weight for derivative matching loss
     temporal_weight_power = float(config.get('temporal_weight_power', 0.0))  # Temporal weighting exponent
     use_dense_supervision = config.get('use_dense_supervision', False)
-    use_mse_warmup_then_nll = config.get('use_mse_warmup_then_nll', False)
-    mse_warmup_epochs = config['num_epoch'] // 2
     
     # Print supervision mode
     print(f"\n{'='*60}")
@@ -300,8 +322,11 @@ def train(model, train_dataloader, val_dataloader, config):
 
     else:
         print(f"LAST TIMESTEP ONLY MODE: Loss on final output only")
-    if use_mse_warmup_then_nll:
-        print(f"VELOCITY LOSS: MSE for first {mse_warmup_epochs} epochs, then Gaussian NLL")
+    print(f"VELOCITY LOSS: NatPN Bayesian loss (entropy weight={velocity_loss_fn.entropy_weight:g})")
+    natpn_warmup_epochs = int(config.get('natpn_warmup_epochs', 3))
+    natpn_finetune_epochs = config.get('natpn_finetune_epochs')
+    natpn_finetune_epochs = config['num_epoch'] if natpn_finetune_epochs is None else int(natpn_finetune_epochs)
+    optimize_natpn_flows(model, train_dataloader, config, natpn_warmup_epochs, 'NatPN warmup')
 
 
     # best_acc = 0
@@ -330,9 +355,7 @@ def train(model, train_dataloader, val_dataloader, config):
         temporal_weights = 1.0  # Uniform weighting
     
     for epoch in range(config['num_epoch']):
-        training_velocity_loss_fn = mse_loss if use_mse_warmup_then_nll and epoch < mse_warmup_epochs else gaussian_nll
-        velocity_loss_name = "MSE" if training_velocity_loss_fn is mse_loss else "Gaussian NLL"
-        print(f"Velocity loss: {velocity_loss_name}")
+        print("Velocity loss: NatPN Bayesian")
         if device.type == 'cuda':
             allocated = torch.cuda.memory_allocated(device) / 1024**2
             reserved  = torch.cuda.memory_reserved(device)  / 1024**2
@@ -354,8 +377,8 @@ def train(model, train_dataloader, val_dataloader, config):
 
             optimizer.zero_grad()
             
-            velocity_seq, velocity_output, covariance_seq, covariance_output, contact_output = model(
-                input_data, return_sequence=use_dense_supervision
+            velocity_seq, velocity_output, covariance_seq, covariance_output, contact_output, posteriors = model(
+                input_data, return_sequence=use_dense_supervision, return_posteriors=True
             )
             
             # Contact loss (binary classification at last timestep)
@@ -366,11 +389,7 @@ def train(model, train_dataloader, val_dataloader, config):
                 velocity_seq_permuted = velocity_seq.permute(0, 3, 1, 2)  # [B, T, 1, 3]
                 
                 covariance_seq_permuted = covariance_seq.permute(0, 3, 1, 2)  # [B, T, 1, 3]
-                velocity_loss_elementwise = training_velocity_loss_fn(
-                    velocity_seq_permuted,
-                    velocity_label_seq,
-                    covariance_seq_permuted,
-                )  # [B, T, 1, 3]
+                velocity_loss_elementwise = natpn_loss(posteriors, velocity_label_seq, velocity_loss_fn)
                 
                 # Use full contact sequence for masking (dense supervision only at contact timesteps)
                 contact_mask_seq = (contact_label_seq == 1).float().unsqueeze(-1)  # [B, T, 1, 1]
@@ -405,11 +424,7 @@ def train(model, train_dataloader, val_dataloader, config):
                     ).sum() / (contact_mask_derivative.sum() * velocity_label_seq.shape[-1] + 1e-8)
             else:
                 # LAST TIMESTEP ONLY: Compute velocity loss only on final output (simpler, faster)
-                velocity_loss_elementwise = training_velocity_loss_fn(
-                    velocity_output,
-                    velocity_label,
-                    covariance_output,
-                )  # [B, 1, 3]
+                velocity_loss_elementwise = natpn_loss(posteriors, velocity_label, velocity_loss_fn)
                 
                 # Mask to contact samples only (last timestep)
                 contact_mask = (contact_label == 1).float().unsqueeze(-1)  # [B, 1, 1]
@@ -566,7 +581,9 @@ def train(model, train_dataloader, val_dataloader, config):
             )
         )
     
-    # save final model     
+    optimize_natpn_flows(model, train_dataloader, config, natpn_finetune_epochs, 'NatPN fine-tune')
+
+    # save final model
     state = {'epoch': epoch,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
@@ -579,6 +596,7 @@ def train(model, train_dataloader, val_dataloader, config):
 
     checkpoint_path = config['model_save_path']+'_final_epoch.pt'
     torch.save(state, checkpoint_path)
+    torch.save(state, config['model_save_path']+'_natpn_finetuned.pt')
     # Also save ONNX version for faster C++ deployment
     save_onnx_model(model, checkpoint_path, config['window_size'])
 
@@ -602,7 +620,7 @@ def train(model, train_dataloader, val_dataloader, config):
         os.path.join(run_dir, "tcn_last_timestep_umap.png"),
         config.get('random_seed', 42),
     )
-    
+
     # Generate comprehensive training summary with plots
     generate_training_summary(
         run_dir=run_dir,
@@ -753,6 +771,8 @@ def main():
     # num_features loaded from metadata at the start of main()
     # Select model architecture based on config
     model_arch = config.get('model_architecture', 'vanilla_cnn').lower()
+    if model_arch != 'tcn':
+        raise ValueError("NatPN velocity training is currently implemented only for model_architecture: 'tcn'.")
     
     if model_arch == 'attention_tcn':
 
@@ -776,7 +796,9 @@ def main():
             tcn_num_channels=config.get('tcn_num_channels', 64),
             tcn_kernel_size=config.get('tcn_kernel_size', 3),
             tcn_num_blocks=config.get('tcn_num_blocks', 5),
-            tcn_dropout=config.get('tcn_dropout', 0.2)
+            tcn_dropout=config.get('tcn_dropout', 0.2),
+            natpn_flow_layers=config.get('natpn_flow_layers', 8),
+            natpn_certainty_budget=config.get('natpn_certainty_budget', 'normal'),
         )
 
     elif model_arch == 'vanilla_cnn':
