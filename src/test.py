@@ -277,6 +277,8 @@ def main():
             tcn_dropout=config.get('tcn_dropout', 0.2),
             natpn_flow_layers=config.get('natpn_flow_layers', 8),
             natpn_certainty_budget=config.get('natpn_certainty_budget', 'normal'),
+            natpn_evidence_source=config.get('natpn_evidence_source', 'task'),
+            input_natpn_checkpoint=config.get('input_natpn_checkpoint'),
         )
     elif model_arch == 'vanilla_cnn':
         base_model = contact_cnn(window_size=config['window_size'], num_features=num_features)

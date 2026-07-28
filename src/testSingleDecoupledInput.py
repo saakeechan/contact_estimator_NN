@@ -20,7 +20,7 @@ from utils.csv2numpyV1 import quaternion_to_rotation_matrix
 
 
 # Select one trajectory whose first cmd_vel_x is in this inclusive range.
-TEST_CMD_VEL_X_WINDOW = (2.0, 3.0)  # [min, max] in m/s
+TEST_CMD_VEL_X_WINDOW = (1.0, 2.0)  # [min, max] in m/s
 RANDOM_SEED = 203
 
 RUN_KNN_UMAP = True
@@ -293,6 +293,9 @@ def main():
 
     with open(args.config_name) as config_file:
         config = yaml.safe_load(config_file)
+    # This evaluator is specifically for the frozen input-latent evidence path.
+    # The checkpoint is resolved below when the base YAML leaves its path empty.
+    config['natpn_evidence_source'] = 'input'
     low, high = TEST_CMD_VEL_X_WINDOW
     if low > high:
         raise ValueError('TEST_CMD_VEL_X_WINDOW must be (min, max) with min <= max')

@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import os
 from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
 import sys
@@ -20,6 +21,8 @@ if str(NATPN_ROOT) not in sys.path:
 from natpn.nn import NaturalPosteriorNetworkModel
 from natpn.nn.flow import RadialFlow
 from natpn.nn.output import NormalOutput
+from natpn.nn.scaler import EvidenceScaler
+from natpn.distributions import PosteriorUpdate
 
 
 def make_velocity_heads(num_features):
@@ -72,19 +75,20 @@ def make_contact_heads(num_features):
 
 
 class NatPNVelocityHeads(nn.Module):
-    """One scalar NatPN regression head per body-velocity component."""
-    def __init__(self, latent_dim, flow_layers=8, certainty_budget="normal"):
+    """NatPN regression with task- or input-latent evidence."""
+    def __init__(self, latent_dim, evidence_source="task", flow_layers=8, certainty_budget="normal"):
         super().__init__()
-        self.models = nn.ModuleList([
-            NaturalPosteriorNetworkModel(
-                latent_dim=latent_dim,
-                encoder=nn.Identity(),
-                flow=RadialFlow(latent_dim, flow_layers),
-                output=NormalOutput(latent_dim),
-                certainty_budget=certainty_budget,
-            )
-            for _ in VELOCITY_COMPONENTS
-        ])
+        self.evidence_source = evidence_source
+        if evidence_source == "task":
+            self.models = nn.ModuleList([
+                NaturalPosteriorNetworkModel(
+                    latent_dim=latent_dim, encoder=nn.Identity(),
+                    flow=RadialFlow(latent_dim, flow_layers), output=NormalOutput(latent_dim),
+                    certainty_budget=certainty_budget,
+                ) for _ in VELOCITY_COMPONENTS
+            ])
+        else:
+            self.outputs = nn.ModuleList([NormalOutput(latent_dim) for _ in VELOCITY_COMPONENTS])
 
     @staticmethod
     def predictive_variance(posterior):
@@ -92,26 +96,30 @@ class NatPNVelocityHeads(nn.Module):
         return aleatoric + aleatoric / posterior.lambd
 
     def flow_nll(self, features, return_sequence):
-        """Fit only the radial flows to detached TCN latents."""
-        if return_sequence:
-            inputs = features.permute(0, 2, 1).reshape(-1, features.shape[1])
-        else:
-            inputs = features[:, :, -1]
-        inputs = inputs.detach()
+        """Fit the original task-latent flows only in task-evidence mode."""
+        if self.evidence_source != "task":
+            raise RuntimeError('The input-latent flow is pretrained by trainEncoder.py.')
+        inputs = features.permute(0, 2, 1).reshape(-1, features.shape[1]) if return_sequence else features[:, :, -1]
         return -torch.stack([
-            model.log_prob(inputs, track_encoder_gradients=False).mean()
-            for model in self.models
+            model.log_prob(inputs.detach(), track_encoder_gradients=False).mean() for model in self.models
         ]).mean()
 
-    def forward(self, features, return_sequence):
+    def forward(self, features, log_evidence, return_sequence):
         if return_sequence:
             batch_size, _, num_steps = features.shape
             inputs = features.permute(0, 2, 1).reshape(-1, features.shape[1])
+            log_evidence = log_evidence.reshape(-1)
         else:
             batch_size, _, num_steps = features.shape
             inputs = features[:, :, -1]
 
-        posteriors = [model(inputs)[0] for model in self.models]
+        if self.evidence_source == "task":
+            posteriors = [model(inputs)[0] for model in self.models]
+        else:
+            posteriors = [
+                output.prior.update(PosteriorUpdate(output(inputs).expected_sufficient_statistics(), log_evidence))
+                for output in self.outputs
+            ]
         means = torch.stack([posterior.maximum_a_posteriori().mean() for posterior in posteriors], dim=-1)
         variances = torch.stack([self.predictive_variance(posterior) for posterior in posteriors], dim=-1)
 
@@ -348,7 +356,8 @@ class TCN(nn.Module):
     """
     def __init__(self, window_size=10, num_features=12, tcn_num_channels=64,
                  tcn_kernel_size=3, tcn_num_blocks=5, tcn_dropout=0.2,
-                 natpn_flow_layers=8, natpn_certainty_budget="normal"):
+                 natpn_flow_layers=8, natpn_certainty_budget="normal", natpn_evidence_source="task",
+                 input_natpn_checkpoint=None):
         super(TCN, self).__init__()
         self.num_features = num_features
         self.window_size = window_size
@@ -368,15 +377,26 @@ class TCN(nn.Module):
         
         self.tcn_backbone = nn.Sequential(*tcn_layers)
         
-        # 3. NatPN velocity heads; contact prediction remains the existing MLP.
+        if natpn_evidence_source not in {"task", "input"}:
+            raise ValueError("natpn_evidence_source must be 'task' or 'input'.")
+        self.natpn_evidence_source = natpn_evidence_source
+        if natpn_evidence_source == "input":
+            if not input_natpn_checkpoint:
+                raise ValueError('input_natpn_checkpoint is required when natpn_evidence_source is input.')
+            input_natpn_checkpoint = (
+                input_natpn_checkpoint if os.path.isabs(input_natpn_checkpoint)
+                else str(Path(__file__).resolve().parents[1] / input_natpn_checkpoint)
+            )
+            self.input_density = FrozenInputLatentDensity(input_natpn_checkpoint)
         self.velocity_heads = NatPNVelocityHeads(
-            tcn_num_channels, natpn_flow_layers, natpn_certainty_budget
+            tcn_num_channels, natpn_evidence_source, natpn_flow_layers, natpn_certainty_budget
         )
         
         # 4. Left-foot contact logit.
         self.contact_heads = make_contact_heads(tcn_num_channels)
     
-    def forward(self, x, return_sequence=True, return_posteriors=False, return_flow_nll=False):
+    def forward(self, x, return_sequence=True, return_posteriors=False, return_flow_nll=False,
+                input_density_x=None):
         """
         Args:
             x: (batch_size, window_size, num_features) - RAW features
@@ -388,7 +408,10 @@ class TCN(nn.Module):
             covariance_out: (batch_size, 1, 3) - diagonal last-timestep body-velocity variances
             contact_out: (batch_size, 1) - left-foot contact logit at last timestep
         """
-        # x: [B, T, F]
+        if self.natpn_evidence_source == "input" and input_density_x is None:
+            raise ValueError('input_density_x must be the raw window used by the frozen input encoder.')
+        if self.natpn_evidence_source == "input" and return_sequence:
+            raise ValueError('Input-latent NatPN evidence is trained only for final-timestep supervision.')
         
         # 1. Convert to Conv1d format
         x = x.permute(0, 2, 1)  # [B, T, F] → [B, F, T]
@@ -399,11 +422,12 @@ class TCN(nn.Module):
         # 3. TCN backbone
         features = self.tcn_backbone(z)  # [B, tcn_num_channels, T]
         if return_flow_nll:
-            return self.velocity_heads.flow_nll(features, return_sequence)
+            return self.input_density.nll(input_density_x) if self.natpn_evidence_source == "input" else self.velocity_heads.flow_nll(features, return_sequence)
+        log_evidence = self.input_density.log_evidence(input_density_x) if self.natpn_evidence_source == "input" else None
         
         # 4. Velocity prediction
         velocity_seq, velocity_out, covariance_seq, covariance_out, posteriors = self.velocity_heads(
-            features, return_sequence
+            features, log_evidence, return_sequence
         )
         
         # 5. Contact prediction (MLP on last timestep features)
@@ -447,6 +471,58 @@ class DenoisingTCNAutoencoder(nn.Module):
         features = self.tcn_backbone(self.input_proj(x.permute(0, 2, 1)))
         reconstruction_normalized = self.decoder(features.permute(0, 2, 1))
         return reconstruction_normalized * (self.global_std + self.eps) + self.global_mean
+
+
+class FrozenInputLatentDensity(nn.Module):
+    """Load the reconstruction encoder and NatPN flow produced by trainEncoder.py."""
+    def __init__(self, checkpoint_path):
+        super().__init__()
+        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        encoder_type = checkpoint['encoder_type']
+        encoder_config = checkpoint.get('encoder_config', {})
+        self.encoder = DenoisingTCNAutoencoder(
+            window_size=encoder_config.get('window_size', 1),
+            num_features=checkpoint['num_features'],
+            tcn_num_channels=checkpoint['latent_dim'],
+            tcn_kernel_size=encoder_config.get('tcn_kernel_size', 3),
+            tcn_num_blocks=encoder_config.get('tcn_num_blocks', len({
+                key.split('.')[1] for key in checkpoint['encoder_state_dict']
+                if key.startswith('tcn_backbone.') and key.endswith('conv1.conv.bias')
+            })),
+            tcn_dropout=encoder_config.get('tcn_dropout', 0.2),
+        )
+        self.is_vae = encoder_type == 'VAE'
+        if self.is_vae:
+            self.mu = nn.Conv1d(checkpoint['latent_dim'], checkpoint['latent_dim'], kernel_size=1)
+        self.encoder.load_state_dict(checkpoint['encoder_state_dict'], strict=not self.is_vae)
+        if self.is_vae:
+            self.mu.load_state_dict({
+                key.removeprefix('mu.'): value
+                for key, value in checkpoint['encoder_state_dict'].items() if key.startswith('mu.')
+            })
+        self.flow = RadialFlow(checkpoint['latent_dim'], checkpoint['input_natpn_flow_layers'])
+        self.scaler = EvidenceScaler(checkpoint['latent_dim'], checkpoint['input_natpn_certainty_budget'])
+        self.flow.load_state_dict({
+            key.removeprefix('flow.'): value
+            for key, value in checkpoint['input_natpn_state_dict'].items() if key.startswith('flow.')
+        })
+        for parameter in self.parameters():
+            parameter.requires_grad_(False)
+
+    def _latent(self, raw_window):
+        normalized = (raw_window - self.encoder.global_mean) / (self.encoder.global_std + self.encoder.eps)
+        features = self.encoder.tcn_backbone(self.encoder.input_proj(normalized.permute(0, 2, 1)))
+        return self.mu(features) if self.is_vae else features
+
+    def log_evidence(self, raw_window):
+        self.eval()
+        with torch.no_grad():
+            return self.scaler(self.flow(self._latent(raw_window)[:, :, -1]))
+
+    def nll(self, raw_window):
+        self.eval()
+        with torch.no_grad():
+            return -self.flow(self._latent(raw_window)[:, :, -1]).mean()
 
 
 class CausalConv1d(nn.Module):
@@ -594,7 +670,7 @@ class ContactCNNWithNormalization(nn.Module):
             # Fallback: no normalization if stats not provided
             self.register_buffer('global_std', torch.ones(1, 1, num_features))
         
-    def forward(self, x, return_sequence=True, return_posteriors=False, return_flow_nll=False):
+    def forward(self, x, return_sequence=False, return_posteriors=False, return_flow_nll=False):
         """
         Apply z-score normalization, then pass through base model.
         
@@ -614,7 +690,11 @@ class ContactCNNWithNormalization(nn.Module):
         
         # Pass normalized data through the base model
         if return_flow_nll:
-            return self.base_model(x_normalized, return_sequence=return_sequence, return_flow_nll=True)
+            return self.base_model(
+                x_normalized, return_sequence=return_sequence, return_flow_nll=True, input_density_x=x
+            )
         if return_posteriors:
-            return self.base_model(x_normalized, return_sequence=return_sequence, return_posteriors=True)
-        return self.base_model(x_normalized, return_sequence=return_sequence)
+            return self.base_model(
+                x_normalized, return_sequence=return_sequence, return_posteriors=True, input_density_x=x
+            )
+        return self.base_model(x_normalized, return_sequence=return_sequence, input_density_x=x)

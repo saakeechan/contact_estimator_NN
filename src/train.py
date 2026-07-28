@@ -33,8 +33,10 @@ def natpn_loss(posteriors, target, loss_fn):
 
 
 def optimize_natpn_flows(model, dataloader, config, epochs, label):
-    """Mirror NATPN/test1.py's flow-only density fitting on TCN latents."""
-    if epochs <= 0:
+    """The input-density flow is pretrained and frozen by trainEncoder.py."""
+    if epochs <= 0 or model.base_model.natpn_evidence_source == 'input':
+        if epochs > 0:
+            print(f'{label}: using frozen input-latent NatPN flow.')
         return
     flows = model.base_model.velocity_heads.models
     optimizer = optim.Adam(
@@ -222,13 +224,22 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_loss_fn
     return metrics
 
 
+class ONNXInferenceWrapper(nn.Module):
+    """Expose only tensor-valued inference outputs to the ONNX exporter."""
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, x):
+        _, velocity, _, covariance, contact = self.model(x)
+        return velocity, covariance, contact
+
+
 def save_onnx_model(model, checkpoint_path, window_size):
     """
     Save ONNX version of the model for C++ deployment.
-    The model has five outputs:
-        - velocity_seq: (batch, 1, 3, window_size) - body-velocity predictions
+    The inference model has three outputs:
         - velocity_output: (batch, 1, 3) - last-timestep body-velocity prediction
-        - covariance_seq: (batch, 1, 3, window_size) - diagonal body-velocity variances
         - covariance_output: (batch, 1, 3) - diagonal last-timestep body-velocity variances
         - contact_output: (batch, 1) - left-foot contact logit
     """
@@ -251,25 +262,23 @@ def save_onnx_model(model, checkpoint_path, window_size):
             warnings.filterwarnings("ignore", category=UserWarning)
             
             torch.onnx.export(
-                model,
+                ONNXInferenceWrapper(model),
                 example_input,
                 onnx_path,
                 export_params=True,
                 opset_version=18,
                 input_names=['input'],
-                output_names=['velocity_seq', 'velocity_output', 'covariance_seq', 'covariance_output', 'contact_output'],
+                output_names=['velocity_output', 'covariance_output', 'contact_output'],
                 dynamic_axes={
                     'input': {0: 'batch_size'},
-                    'velocity_seq': {0: 'batch_size', 3: 'window_size'},
                     'velocity_output': {0: 'batch_size'},
-                    'covariance_seq': {0: 'batch_size', 3: 'window_size'},
                     'covariance_output': {0: 'batch_size'},
                     'contact_output': {0: 'batch_size'}
                 },
                 verbose=False
             )
         
-        print(f"  ✓ ONNX model saved (velocity sequence + last timestep): {onnx_path}")
+        print(f"  ✓ ONNX inference model saved: {onnx_path}")
         
     except Exception as e:
         print(f"  ⚠ Warning: Failed to save ONNX model: {e}")
@@ -662,6 +671,13 @@ def main():
     args = parser.parse_args()
 
     config = yaml.load(open(args.config_name), Loader=yaml.FullLoader)
+    evidence_source = config.get('natpn_evidence_source', 'task')
+    if evidence_source not in {'task', 'input'}:
+        raise ValueError("natpn_evidence_source must be 'task' or 'input'.")
+    if evidence_source == 'input' and config.get('use_dense_supervision', False):
+        raise ValueError('Input-latent NatPN evidence currently supports only use_dense_supervision: false.')
+    if evidence_source == 'input' and not config.get('input_natpn_checkpoint'):
+        raise ValueError('Set input_natpn_checkpoint to the encoder_input_natpn.pt made by trainEncoder.py.')
 
 
     # Load num_features from data metadata (source of truth)
@@ -799,6 +815,8 @@ def main():
             tcn_dropout=config.get('tcn_dropout', 0.2),
             natpn_flow_layers=config.get('natpn_flow_layers', 8),
             natpn_certainty_budget=config.get('natpn_certainty_budget', 'normal'),
+            natpn_evidence_source=evidence_source,
+            input_natpn_checkpoint=config['input_natpn_checkpoint'],
         )
 
     elif model_arch == 'vanilla_cnn':

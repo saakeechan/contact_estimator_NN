@@ -1,5 +1,6 @@
 import argparse
 import os
+import subprocess
 import sys
 from datetime import datetime
 
@@ -16,6 +17,8 @@ from tqdm import tqdm
 sys.path.append('.')
 
 from contact_cnn import DenoisingTCNAutoencoder
+from natpn.nn.flow import RadialFlow
+from natpn.nn.scaler import EvidenceScaler
 from utils.data_handler import contact_dataset
 
 
@@ -34,6 +37,99 @@ class VariationalTCNAutoencoder(DenoisingTCNAutoencoder):
         latent = mu + torch.randn_like(mu) * torch.exp(0.5 * logvar) if self.training else mu
         reconstruction = self.decoder(latent.permute(0, 2, 1))
         return reconstruction * (self.global_std + self.eps) + self.global_mean, mu, logvar
+
+
+class InputLatentNatPNDensity(nn.Module):
+    """NatPN's density/evidence component over a frozen DAE/VAE latent."""
+    def __init__(self, latent_dim, flow_layers, certainty_budget):
+        super().__init__()
+        self.flow = RadialFlow(latent_dim, flow_layers)
+        self.scaler = EvidenceScaler(latent_dim, certainty_budget)
+
+    def forward(self, latent):
+        log_prob = self.flow(latent)
+        return log_prob, self.scaler(log_prob)
+
+
+def encoder_latent(model, window):
+    """Return the deterministic TCN latent used by the DAE/VAE density model."""
+    normalized = (window - model.global_mean) / (model.global_std + model.eps)
+    features = model.tcn_backbone(model.input_proj(normalized.permute(0, 2, 1)))
+    return model.mu(features) if isinstance(model, VariationalTCNAutoencoder) else features
+
+
+def input_natpn_nll(encoder, density, windows):
+    """Negative log-density of final input latents; encoder remains frozen."""
+    with torch.no_grad():
+        latent = encoder_latent(encoder, windows)[:, :, -1]
+    log_prob, _ = density(latent)
+    return -log_prob.mean()
+
+
+def fit_input_natpn_density(encoder, train_dataloader, val_dataloader, config, run_dir):
+    """Fit a radial-flow input density after reconstruction training has finished."""
+    epochs = int(config['input_natpn_epochs'])
+    latent_dim = encoder.input_proj.out_channels
+    density = InputLatentNatPNDensity(
+        latent_dim, config['input_natpn_flow_layers'], config['input_natpn_certainty_budget']
+    ).to(next(encoder.parameters()).device)
+    optimizer = optim.Adam(density.flow.parameters(), lr=config['input_natpn_lr'])
+    encoder.eval()
+    for parameter in encoder.parameters():
+        parameter.requires_grad_(False)
+
+    for epoch in range(1, epochs + 1):
+        density.train()
+        train_nll_sum = 0.0
+        for sample in tqdm(train_dataloader, desc=f'Input NatPN flow {epoch}/{epochs}'):
+            optimizer.zero_grad(set_to_none=True)
+            loss = input_natpn_nll(encoder, density, sample['data'])
+            loss.backward()
+            optimizer.step()
+            train_nll_sum += loss.item()
+
+        density.eval()
+        with torch.no_grad():
+            val_nll = sum(
+                input_natpn_nll(encoder, density, sample['data']).item() for sample in val_dataloader
+            ) / len(val_dataloader)
+        print(f'Input NatPN flow {epoch:03d} | train_nll={train_nll_sum / len(train_dataloader):.4f} | val_nll={val_nll:.4f}')
+
+    checkpoint_path = os.path.join(run_dir, 'encoder_input_natpn.pt')
+    torch.save({
+        'encoder_state_dict': encoder.state_dict(),
+        'input_natpn_state_dict': density.state_dict(),
+        'encoder_type': config['encoder_type'],
+        'num_features': encoder.num_features,
+        'latent_dim': latent_dim,
+        'input_natpn_flow_layers': config['input_natpn_flow_layers'],
+        'input_natpn_certainty_budget': config['input_natpn_certainty_budget'],
+        'encoder_config': {
+            key: config.get(key) for key in ('window_size', 'tcn_kernel_size', 'tcn_num_blocks', 'tcn_dropout')
+        },
+    }, checkpoint_path)
+    print(f'Frozen encoder and input-latent NatPN flow saved to: {checkpoint_path}')
+    return checkpoint_path
+
+
+def train_task_from_input_density(config, run_dir, input_natpn_checkpoint):
+    """Start task training with the encoder-flow artifact from this run."""
+    task_config = dict(config)
+    task_config.update(
+        natpn_evidence_source='input',
+        input_natpn_checkpoint=os.path.abspath(input_natpn_checkpoint),
+        use_dense_supervision=False,
+    )
+    task_config_path = os.path.join(run_dir, 'task_network_params.yaml')
+    with open(task_config_path, 'w') as config_file:
+        yaml.safe_dump(task_config, config_file, default_flow_style=False, sort_keys=False)
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    print(f'Starting task training with input-latent NatPN: {task_config_path}')
+    subprocess.run(
+        [sys.executable, os.path.join(project_root, 'src', 'train.py'), '--config_name', task_config_path],
+        cwd=project_root,
+        check=True,
+    )
 
 
 def reconstruction_loss(model, clean_window, config):
@@ -167,11 +263,16 @@ def train(model, train_dataloader, val_dataloader, config):
         'optimizer_state_dict': optimizer.state_dict(),
         'val_mse': val_loss,
     }, os.path.join(run_dir, final_checkpoint))
+    # Density must be fitted on the best reconstruction encoder, not on the final epoch by default.
+    model.load_state_dict(torch.load(os.path.join(run_dir, best_checkpoint), map_location=next(model.parameters()).device)['model_state_dict'])
+    input_natpn_checkpoint = fit_input_natpn_density(model, train_dataloader, val_dataloader, config, run_dir)
     writer.close()
     save_tcn_last_timestep_umap(
         val_dataloader, model, os.path.join(run_dir, 'tcn_last_timestep_umap.png'), config.get('random_seed', 42)
     )
     print(f"Best validation reconstruction {'MSE' if config['encoder_type'] == 'DAE' else 'loss'}: {best_val_loss:.8f}")
+    if config['train_task_after_encoder']:
+        train_task_from_input_density(config, run_dir, input_natpn_checkpoint)
 
 
 def main():
@@ -184,6 +285,11 @@ def main():
         raise ValueError("encoder_type must be 'DAE' or 'VAE'.")
     config['dae_noise_std'] = float(config.get('dae_noise_std', 0.05))
     config['vae_beta'] = float(config.get('vae_beta', 0.001))
+    config['input_natpn_flow_layers'] = int(config.get('input_natpn_flow_layers', 8))
+    config['input_natpn_certainty_budget'] = config.get('input_natpn_certainty_budget', 'normal')
+    config['input_natpn_epochs'] = int(config.get('input_natpn_epochs', 3))
+    config['input_natpn_lr'] = float(config.get('input_natpn_lr', config['init_lr']))
+    config['train_task_after_encoder'] = bool(config.get('train_task_after_encoder', True))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f'Using {device}')

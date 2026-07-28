@@ -1,5 +1,6 @@
 import argparse
 import glob
+import json
 import os
 import sys
 import warnings
@@ -15,15 +16,15 @@ import torch
 import yaml
 
 from contact_cnn import DenoisingTCNAutoencoder
-from trainEncoder import VariationalTCNAutoencoder
+from trainEncoder import VariationalTCNAutoencoder, encoder_latent
 
 
 # Select one trajectory whose first cmd_vel_x is in this inclusive range.
-TEST_CMD_VEL_X_WINDOW = (1.3, 1.8)  # [min, max] in m/s
+TEST_CMD_VEL_X_WINDOW = (2.0, 3.0)  # [min, max] in m/s
 RANDOM_SEED = 28
 
 RUN_KNN_UMAP = True
-KNN_K = 50
+KNN_K = 20
 OOD_ID_PERCENTILE = 0.95
 UMAP_TRAIN_MAX = 5000
 
@@ -131,25 +132,24 @@ def get_training_window_starts(data_folder, window_size, config):
     ])
 
 
-def collect_final_tcn_latents(model, raw_data, window_starts, window_size, batch_size, device):
-    """Run raw windows through the DAE and return their final TCN latents."""
-    backbone = model.tcn_backbone
+def collect_final_input_latents(model, raw_data, window_starts, window_size, batch_size, device):
+    """Return the exact final DAE/VAE latent used by the input-density flow."""
     latents = []
-    hook = backbone.register_forward_hook(lambda _, __, output: latents.append(output[:, :, -1].detach().cpu()))
     offsets = np.arange(window_size)
-    try:
-        with torch.no_grad():
-            for first in range(0, len(window_starts), batch_size):
-                starts = window_starts[first:first + batch_size]
-                windows = raw_data[starts[:, None] + offsets]
-                model(torch.from_numpy(windows).float().to(device))
-    finally:
-        hook.remove()
+    with torch.no_grad():
+        for first in range(0, len(window_starts), batch_size):
+            starts = window_starts[first:first + batch_size]
+            windows = torch.from_numpy(raw_data[starts[:, None] + offsets]).float().to(device)
+            latents.append(encoder_latent(model, windows)[:, :, -1].cpu())
     return torch.cat(latents).numpy()
 
 
 def l2_normalize(features):
     return features / np.maximum(np.linalg.norm(features, axis=1, keepdims=True), 1e-12)
+
+
+def format_scalar(value):
+    return f'{float(value):.4e}'
 
 
 def save_knn_umap(training_latents, trajectory_latents, knn_distances, ood_mask, knn_k, threshold, output_path):
@@ -176,7 +176,7 @@ def save_knn_umap(training_latents, trajectory_latents, knn_distances, ood_mask,
             s=44, facecolors='none', edgecolors='red', linewidths=1.2, label='OOD window'
         )
     figure.colorbar(points, ax=axis, label=f'{knn_k}-th nearest-neighbor latent distance')
-    axis.set(title=f'Training-window UMAP (OOD threshold: {threshold:.4f})', xlabel='UMAP 1', ylabel='UMAP 2')
+    axis.set(title=f'Input-latent UMAP (OOD threshold: {threshold:.4f})', xlabel='UMAP 1', ylabel='UMAP 2')
     axis.legend()
     figure.tight_layout()
     figure.savefig(output_path, dpi=150, bbox_inches='tight')
@@ -184,9 +184,17 @@ def save_knn_umap(training_latents, trajectory_latents, knn_distances, ood_mask,
 
 
 def main():
+    global RANDOM_SEED, TEST_CMD_VEL_X_WINDOW
     parser = argparse.ArgumentParser(description='Run one selected CSV trajectory through the configured autoencoder.')
     parser.add_argument('--config_name', default=os.path.join(os.path.dirname(__file__), '../config/network_params.yaml'))
+    parser.add_argument('--seed', type=int, default=RANDOM_SEED)
+    parser.add_argument('--cmd-vel-x-window', type=float, nargs=2, metavar=('MIN', 'MAX'), default=TEST_CMD_VEL_X_WINDOW)
+    parser.add_argument('--metrics-json', help='Optional path for machine-readable evaluation metrics.')
+    parser.add_argument('--skip-umap', action='store_true', help='Compute kNN/OOD metrics without saving a UMAP figure.')
+    parser.add_argument('--save-umap', action='store_true', help='Save the kNN UMAP figure (disabled by default).')
     args = parser.parse_args()
+    RANDOM_SEED = args.seed
+    TEST_CMD_VEL_X_WINDOW = tuple(args.cmd_vel_x_window)
 
     with open(args.config_name) as config_file:
         config = yaml.safe_load(config_file)
@@ -217,11 +225,11 @@ def main():
         data_folder = config['data_folder'] if os.path.isabs(config['data_folder']) else os.path.join(project_root, config['data_folder'])
         training_data = np.load(os.path.join(data_folder, 'all_data.npy'))
         training_starts = get_training_window_starts(data_folder, config['window_size'], config)
-        training_latents = l2_normalize(collect_final_tcn_latents(
+        training_latents = l2_normalize(collect_final_input_latents(
             model, training_data, training_starts, config['window_size'], config['batch_size'], device
         ))
         trajectory_starts = np.arange(len(trajectory) - config['window_size'] + 1)
-        trajectory_latents = l2_normalize(collect_final_tcn_latents(
+        trajectory_latents = l2_normalize(collect_final_input_latents(
             model, make_features(trajectory), trajectory_starts, config['window_size'], config['batch_size'], device
         ))
         from sklearn.neighbors import NearestNeighbors
@@ -229,26 +237,41 @@ def main():
             raise ValueError('Need at least two training windows for KNN OOD detection.')
         knn_k = min(KNN_K, len(training_latents) - 1)
         neighbors = NearestNeighbors(n_neighbors=knn_k).fit(training_latents)
-        knn_distances = neighbors.kneighbors(trajectory_latents, return_distance=True)[0][:, -1]
+        knn_distances = neighbors.kneighbors(trajectory_latents, return_distance=True)[0].mean(axis=1)
         train_distances = NearestNeighbors(n_neighbors=knn_k + 1).fit(training_latents).kneighbors(
             training_latents, return_distance=True
-        )[0][:, -1]
+        )[0][:, 1:].mean(axis=1)
         ood_threshold = np.quantile(train_distances, OOD_ID_PERCENTILE)
         ood_mask = knn_distances > ood_threshold
-        umap_output_path = os.path.join(os.path.dirname(checkpoint_path), f'trajectory_knn_umap_seed{RANDOM_SEED}.png')
-        save_knn_umap(training_latents, trajectory_latents, knn_distances, ood_mask, knn_k, ood_threshold, umap_output_path)
+        umap_output_path = None
+        if args.save_umap and not args.skip_umap:
+            umap_output_path = os.path.join(os.path.dirname(checkpoint_path), f'trajectory_knn_umap_seed{RANDOM_SEED}.png')
+            save_knn_umap(training_latents, trajectory_latents, knn_distances, ood_mask, knn_k, ood_threshold, umap_output_path)
 
     print(f'CSV: {csv_path}')
-    print(f'Trajectory: {run_index}, start cmd_vel_x: {start_cmd_vel:.3f} m/s, selected range: [{low}, {high}]')
+    print(f'Trajectory: {run_index}, start cmd_vel_x: {start_cmd_vel:.4e} m/s, selected range: [{low:.4e}, {high:.4e}]')
     print(f'Random seed: {RANDOM_SEED}, trajectory samples: {len(trajectory)}, evaluated windows: {len(reconstruction_mse)}')
-    print(f'Checkpoint: {checkpoint_path}')
-    print(f'Reconstruction MSE: mean {reconstruction_mse.mean():.8f}, max {reconstruction_mse.max():.8f}')
+    print(f'Reconstruction MSE: mean {format_scalar(reconstruction_mse.mean())}, max {format_scalar(reconstruction_mse.max())}')
     if RUN_KNN_UMAP:
         print(f'KNN reference windows: {len(training_latents)}, K: {knn_k}')
-        print(f'{knn_k}-th nearest-neighbor latent distance: mean {knn_distances.mean():.6f}, max {knn_distances.max():.6f}')
-        print(f'ID threshold ({OOD_ID_PERCENTILE:.0%} training quantile): {ood_threshold:.6f}')
-        print(f'OOD trajectory windows: {ood_mask.sum()} / {len(ood_mask)}')
-        print(f'Training/trajectory KNN UMAP: {umap_output_path}')
+        print(f'Mean distance to {knn_k} nearest latent neighbors: mean {format_scalar(knn_distances.mean())}, max {format_scalar(knn_distances.max())}')
+        print(f'ID threshold ({OOD_ID_PERCENTILE:.0%} training quantile): {format_scalar(ood_threshold)}')
+        print(f'OOD evaluated windows / all evaluated windows: {ood_mask.sum()} / {len(ood_mask)} ({100.0 * ood_mask.sum() / len(ood_mask):.4e}%)')
+        if umap_output_path:
+            print(f'Training/trajectory KNN UMAP: {umap_output_path}')
+
+    if args.metrics_json:
+        metrics = {
+            'seed': RANDOM_SEED,
+            'cmd_vel_x': float(start_cmd_vel),
+            'reconstruction_mse_mean': float(reconstruction_mse.mean()),
+            'reconstruction_mse_max': float(reconstruction_mse.max()),
+            'knn_ood_windows': int(ood_mask.sum()) if RUN_KNN_UMAP else None,
+            'knn_total_windows': len(ood_mask) if RUN_KNN_UMAP else None,
+            'knn_ood_percentage_total_windows': float(ood_mask.mean()) if RUN_KNN_UMAP else None,
+        }
+        with open(args.metrics_json, 'w') as metrics_file:
+            json.dump(metrics, metrics_file)
 
 
 if __name__ == '__main__':
