@@ -22,7 +22,7 @@ from natpn.nn import NaturalPosteriorNetworkModel
 from natpn.nn.flow import RadialFlow
 from natpn.nn.output import NormalOutput
 from natpn.nn.scaler import EvidenceScaler
-from natpn.distributions import PosteriorUpdate
+from natpn.distributions.normal import NormalGamma
 
 
 def make_velocity_heads(num_features):
@@ -75,10 +75,13 @@ def make_contact_heads(num_features):
 
 
 class NatPNVelocityHeads(nn.Module):
-    """NatPN regression with task- or input-latent evidence."""
-    def __init__(self, latent_dim, evidence_source="task", flow_layers=8, certainty_budget="normal"):
+    """Task NatPN or decoupled task likelihood plus input-latent epistemic evidence."""
+    def __init__(self, latent_dim, evidence_source="task", flow_layers=8, certainty_budget="normal", input_epistemic_scale=1.0):
         super().__init__()
         self.evidence_source = evidence_source
+        self.input_epistemic_scale = input_epistemic_scale
+        if evidence_source == "input" and input_epistemic_scale <= 0:
+            raise ValueError('input_epistemic_scale must be positive.')
         if evidence_source == "task":
             self.models = nn.ModuleList([
                 NaturalPosteriorNetworkModel(
@@ -115,13 +118,30 @@ class NatPNVelocityHeads(nn.Module):
 
         if self.evidence_source == "task":
             posteriors = [model(inputs)[0] for model in self.models]
+            means = torch.stack([posterior.maximum_a_posteriori().mean() for posterior in posteriors], dim=-1)
         else:
-            posteriors = [
-                output.prior.update(PosteriorUpdate(output(inputs).expected_sufficient_statistics(), log_evidence))
+            likelihoods = [output(inputs) for output in self.outputs]
+            evidence = log_evidence.exp()
+            aleatoric_variances = [likelihood.precision.reciprocal() for likelihood in likelihoods]
+            epistemic_variances = [
+                torch.full_like(evidence, self.input_epistemic_scale) / (output.prior.evidence + evidence)
                 for output in self.outputs
             ]
-        means = torch.stack([posterior.maximum_a_posteriori().mean() for posterior in posteriors], dim=-1)
-        variances = torch.stack([self.predictive_variance(posterior) for posterior in posteriors], dim=-1)
+            posteriors = [
+                NormalGamma(
+                    likelihood.mean(),
+                    output.prior.evidence + evidence,
+                    torch.ones_like(evidence) * output.prior.alpha,
+                    aleatoric * (output.prior.alpha - 1.0),
+                )
+                for output, likelihood, aleatoric in zip(self.outputs, likelihoods, aleatoric_variances)
+            ]
+            for posterior, epistemic in zip(posteriors, epistemic_variances):
+                posterior.epistemic_variance = epistemic
+            means = torch.stack([likelihood.mean() for likelihood in likelihoods], dim=-1)
+            variances = torch.stack([aleatoric + epistemic for aleatoric, epistemic in zip(aleatoric_variances, epistemic_variances)], dim=-1)
+        if self.evidence_source == "task":
+            variances = torch.stack([self.predictive_variance(posterior) for posterior in posteriors], dim=-1)
 
         if return_sequence:
             means = means.view(batch_size, num_steps, len(VELOCITY_COMPONENTS)).permute(0, 2, 1).unsqueeze(1)
@@ -357,7 +377,7 @@ class TCN(nn.Module):
     def __init__(self, window_size=10, num_features=12, tcn_num_channels=64,
                  tcn_kernel_size=3, tcn_num_blocks=5, tcn_dropout=0.2,
                  natpn_flow_layers=8, natpn_certainty_budget="normal", natpn_evidence_source="task",
-                 input_natpn_checkpoint=None):
+                 input_natpn_checkpoint=None, input_epistemic_scale=1.0):
         super(TCN, self).__init__()
         self.num_features = num_features
         self.window_size = window_size
@@ -389,7 +409,7 @@ class TCN(nn.Module):
             )
             self.input_density = FrozenInputLatentDensity(input_natpn_checkpoint)
         self.velocity_heads = NatPNVelocityHeads(
-            tcn_num_channels, natpn_evidence_source, natpn_flow_layers, natpn_certainty_budget
+            tcn_num_channels, natpn_evidence_source, natpn_flow_layers, natpn_certainty_budget, input_epistemic_scale
         )
         
         # 4. Left-foot contact logit.

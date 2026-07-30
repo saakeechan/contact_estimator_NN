@@ -13,9 +13,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config-name', default=root / 'config/network_params.yaml', type=Path)
     parser.add_argument('--cmd-vel-x-window', type=float, nargs=2, metavar=('MIN', 'MAX'), default=(0.0, 3.0))
-    parser.add_argument('--first-seed', type=int, default=2001)
-    parser.add_argument('--last-seed', type=int, default=2100)
-    parser.add_argument('--output-csv', default=root / 'logs/testsingle_decoupled_input_seed_sweep_2001_2100.csv', type=Path)
+    parser.add_argument('--first-seed', type=int, default=2800)
+    parser.add_argument('--last-seed', type=int, default=2851)
+    parser.add_argument('--output-csv', default=root / 'logs/testsingle_decoupled_input_seed_sweep_2800_2851.csv', type=Path)
     parser.add_argument('--with-umap', action='store_true', help='Also save one UMAP figure per seed.')
     args = parser.parse_args()
     if args.first_seed > args.last_seed:

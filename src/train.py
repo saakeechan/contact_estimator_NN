@@ -32,6 +32,18 @@ def natpn_loss(posteriors, target, loss_fn):
     return torch.stack(losses, dim=-1).unsqueeze(-2)
 
 
+def supervised_velocity_loss(posteriors, mean, variance, target, loss_type, bayesian_loss, use_aleatoric_variance=False):
+    if loss_type == 'mse':
+        return torch.nn.functional.mse_loss(mean, target, reduction='none')
+    if loss_type == 'gaussian_nll':
+        if use_aleatoric_variance:
+            variance = torch.stack([
+                posterior.beta / (posterior.alpha - 1.0).clamp_min(1e-6) for posterior in posteriors
+            ], dim=-1).unsqueeze(-2)
+        return torch.nn.functional.gaussian_nll_loss(mean, target, variance, reduction='none')
+    return natpn_loss(posteriors, target, bayesian_loss)
+
+
 def optimize_natpn_flows(model, dataloader, config, epochs, label):
     """The input-density flow is pretrained and frozen by trainEncoder.py."""
     if epochs <= 0 or model.base_model.natpn_evidence_source == 'input':
@@ -125,7 +137,7 @@ def save_tcn_last_timestep_umap(dataloader, model, output_path, random_seed=42, 
     print(f"TCN velocity-norm UMAP saved to: {velocity_norm_output_path}")
 
 
-def compute_accuracy(dataloader, model, contact_criterion=None, velocity_loss_fn=None):
+def compute_accuracy(dataloader, model, contact_criterion=None, velocity_loss_fn=None, velocity_loss_type='bayesian'):
     """
     Compute left-foot contact and body-velocity metrics at the last timestep.
     
@@ -144,6 +156,8 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_loss_fn
     velocity_loss_sum = 0
     velocity_abs_error_sum = None
     velocity_contact_count = None
+    total_variance_sum = 0.0
+    squared_error_sum = 0.0
     
     # Track prediction distribution to detect bias
     num_pred_contact = 0
@@ -173,7 +187,10 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_loss_fn
             
             if velocity_loss_fn is not None:
                 # Velocity loss on last timestep only, masked to contact samples only
-                velocity_loss_each = natpn_loss(posteriors, gt_velocity, velocity_loss_fn)
+                velocity_loss_each = supervised_velocity_loss(
+                    posteriors, velocity_output, covariance_output, gt_velocity, velocity_loss_type, velocity_loss_fn,
+                    model.base_model.natpn_evidence_source == 'input'
+                )
                 
                 velocity_loss_masked = (
                     velocity_loss_each * contact_mask
@@ -184,6 +201,8 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_loss_fn
             # MAE for velocity (only on contact samples, last timestep)
             if contact_mask.sum() > 0:
                 velocity_errors = torch.abs(velocity_output - gt_velocity)  # [B, 1, 3]
+                squared_error_sum += ((velocity_output - gt_velocity).square() * contact_mask).sum().item()
+                total_variance_sum += (covariance_output * contact_mask).sum().item()
                 if velocity_abs_error_sum is None:
                     velocity_abs_error_sum = torch.zeros_like(velocity_errors[0])
                     velocity_contact_count = torch.zeros_like(gt_contact[0])
@@ -218,7 +237,11 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_loss_fn
         'velocity_loss': velocity_loss_sum / num_batches if velocity_loss_fn else 0,
         'velocity_mae_components': velocity_mae_components,
         'num_pred_contact': num_pred_contact,
-        'num_gt_contact': num_gt_contact
+        'num_gt_contact': num_gt_contact,
+        'total_variance_calibration_ratio': (
+            squared_error_sum / (total_variance_sum + 1e-8)
+            if model.base_model.natpn_evidence_source == 'input' else None
+        ),
     }
     
     return metrics
@@ -313,7 +336,12 @@ def train(model, train_dataloader, val_dataloader, config):
     # Contact: BCEWithLogitsLoss (binary classification)
     contact_criterion = nn.BCEWithLogitsLoss()
     
-    # Velocity: NatPN Bayesian loss over the three body-velocity components.
+    velocity_loss_type = config.get('velocity_loss', 'bayesian')
+    if velocity_loss_type not in {'bayesian', 'gaussian_nll'}:
+        raise ValueError("velocity_loss must be 'bayesian' or 'gaussian_nll'.")
+    mse_warmup_epochs = int(config.get('mse_warmup_epochs', 0))
+
+    # Used only when velocity_loss is bayesian; input-evidence Gaussian NLL uses task aleatoric variance.
     velocity_loss_fn = BayesianLoss(float(config.get('natpn_entropy_weight', 1e-5)), reduction='none')
     optimizer = optim.Adam(model.parameters(), lr=config['init_lr'])
     
@@ -331,7 +359,13 @@ def train(model, train_dataloader, val_dataloader, config):
 
     else:
         print(f"LAST TIMESTEP ONLY MODE: Loss on final output only")
-    print(f"VELOCITY LOSS: NatPN Bayesian loss (entropy weight={velocity_loss_fn.entropy_weight:g})")
+    loss_description = (
+        f'NatPN Bayesian loss (entropy weight={velocity_loss_fn.entropy_weight:g})'
+        if velocity_loss_type == 'bayesian' else 'Gaussian NLL on NatPN predictive mean and variance'
+    )
+    print(f'VELOCITY LOSS: {loss_description}')
+    if mse_warmup_epochs:
+        print(f'VELOCITY LOSS WARMUP: MSE for the first {mse_warmup_epochs} epochs')
     natpn_warmup_epochs = int(config.get('natpn_warmup_epochs', 3))
     natpn_finetune_epochs = config.get('natpn_finetune_epochs')
     natpn_finetune_epochs = config['num_epoch'] if natpn_finetune_epochs is None else int(natpn_finetune_epochs)
@@ -364,7 +398,8 @@ def train(model, train_dataloader, val_dataloader, config):
         temporal_weights = 1.0  # Uniform weighting
     
     for epoch in range(config['num_epoch']):
-        print("Velocity loss: NatPN Bayesian")
+        epoch_loss_type = 'mse' if velocity_loss_type == 'gaussian_nll' and epoch < mse_warmup_epochs else velocity_loss_type
+        print(f"Velocity loss: {'MSE warmup' if epoch_loss_type == 'mse' else loss_description}")
         if device.type == 'cuda':
             allocated = torch.cuda.memory_allocated(device) / 1024**2
             reserved  = torch.cuda.memory_reserved(device)  / 1024**2
@@ -398,7 +433,11 @@ def train(model, train_dataloader, val_dataloader, config):
                 velocity_seq_permuted = velocity_seq.permute(0, 3, 1, 2)  # [B, T, 1, 3]
                 
                 covariance_seq_permuted = covariance_seq.permute(0, 3, 1, 2)  # [B, T, 1, 3]
-                velocity_loss_elementwise = natpn_loss(posteriors, velocity_label_seq, velocity_loss_fn)
+                velocity_loss_elementwise = supervised_velocity_loss(
+                    posteriors, velocity_seq_permuted, covariance_seq_permuted,
+                    velocity_label_seq, epoch_loss_type, velocity_loss_fn,
+                    model.base_model.natpn_evidence_source == 'input'
+                )
                 
                 # Use full contact sequence for masking (dense supervision only at contact timesteps)
                 contact_mask_seq = (contact_label_seq == 1).float().unsqueeze(-1)  # [B, T, 1, 1]
@@ -433,7 +472,11 @@ def train(model, train_dataloader, val_dataloader, config):
                     ).sum() / (contact_mask_derivative.sum() * velocity_label_seq.shape[-1] + 1e-8)
             else:
                 # LAST TIMESTEP ONLY: Compute velocity loss only on final output (simpler, faster)
-                velocity_loss_elementwise = natpn_loss(posteriors, velocity_label, velocity_loss_fn)
+                velocity_loss_elementwise = supervised_velocity_loss(
+                    posteriors, velocity_output, covariance_output,
+                    velocity_label, epoch_loss_type, velocity_loss_fn,
+                    model.base_model.natpn_evidence_source == 'input'
+                )
                 
                 # Mask to contact samples only (last timestep)
                 contact_mask = (contact_label == 1).float().unsqueeze(-1)  # [B, 1, 1]
@@ -490,8 +533,14 @@ def train(model, train_dataloader, val_dataloader, config):
 
         # calculate training and validation metrics
         model.eval()
-        train_metrics = compute_accuracy(train_dataloader, model, contact_criterion=contact_criterion, velocity_loss_fn=velocity_loss_fn)
-        val_metrics = compute_accuracy(val_dataloader, model, contact_criterion=contact_criterion, velocity_loss_fn=velocity_loss_fn)
+        train_metrics = compute_accuracy(
+            train_dataloader, model, contact_criterion=contact_criterion,
+            velocity_loss_fn=velocity_loss_fn, velocity_loss_type=velocity_loss_type
+        )
+        val_metrics = compute_accuracy(
+            val_dataloader, model, contact_criterion=contact_criterion,
+            velocity_loss_fn=velocity_loss_fn, velocity_loss_type=velocity_loss_type
+        )
         
         train_loss_avg = loss_sum / len(train_dataloader)
         contact_loss_avg = contact_loss_sum / len(train_dataloader)
@@ -512,6 +561,8 @@ def train(model, train_dataloader, val_dataloader, config):
         writer.add_scalar('validation/velocity_loss', val_metrics['velocity_loss'], epoch)
         writer.add_scalar('validation/contact_accuracy', val_metrics['contact_acc'], epoch)
         writer.add_scalar('validation/velocity_mae', val_metrics['velocity_mae'], epoch)
+        if val_metrics['total_variance_calibration_ratio'] is not None:
+            writer.add_scalar('validation/total_variance_calibration_ratio', val_metrics['total_variance_calibration_ratio'], epoch)
 
         # if we achieve best contact accuracy, save the model
         if val_metrics['contact_acc'] > best_contact_acc:
@@ -589,6 +640,8 @@ def train(model, train_dataloader, val_dataloader, config):
                 *val_left_mae
             )
         )
+        if val_metrics['total_variance_calibration_ratio'] is not None:
+            print(f"  Val   - Total variance calibration ratio: {val_metrics['total_variance_calibration_ratio']:.4f} (target: 1.0)")
     
     optimize_natpn_flows(model, train_dataloader, config, natpn_finetune_epochs, 'NatPN fine-tune')
 
@@ -817,6 +870,7 @@ def main():
             natpn_certainty_budget=config.get('natpn_certainty_budget', 'normal'),
             natpn_evidence_source=evidence_source,
             input_natpn_checkpoint=config['input_natpn_checkpoint'],
+            input_epistemic_scale=config.get('input_epistemic_scale', 1.0),
         )
 
     elif model_arch == 'vanilla_cnn':

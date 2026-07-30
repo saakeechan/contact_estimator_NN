@@ -96,6 +96,7 @@ def make_model(config, num_features):
             natpn_certainty_budget=config.get('natpn_certainty_budget', 'normal'),
             natpn_evidence_source=config.get('natpn_evidence_source', 'task'),
             input_natpn_checkpoint=config.get('input_natpn_checkpoint'),
+            input_epistemic_scale=config.get('input_epistemic_scale', 1.0),
         )
     elif architecture == 'vanilla_cnn':
         base_model = contact_cnn(window_size=config['window_size'], num_features=num_features)
@@ -175,7 +176,10 @@ def natpn_uncertainty_for_window(model, features, window_start, window_size, dev
         for posterior in posteriors
     ])
     epistemic = np.array([
-        (posterior.beta / ((posterior.alpha - 1.0).clamp_min(1e-6) * posterior.lambd)).item()
+        getattr(
+            posterior, 'epistemic_variance',
+            posterior.beta / ((posterior.alpha - 1.0).clamp_min(1e-6) * posterior.lambd)
+        ).item()
         for posterior in posteriors
     ])
     return aleatoric, epistemic

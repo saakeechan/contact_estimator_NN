@@ -119,6 +119,9 @@ def train_task_from_input_density(config, run_dir, input_natpn_checkpoint):
         natpn_evidence_source='input',
         input_natpn_checkpoint=os.path.abspath(input_natpn_checkpoint),
         use_dense_supervision=False,
+        velocity_loss='gaussian_nll',
+        mse_warmup_epochs=int(config['num_epoch']) // 2,
+        input_epistemic_scale=float(config.get('input_epistemic_scale', 1.0)),
     )
     task_config_path = os.path.join(run_dir, 'task_network_params.yaml')
     with open(task_config_path, 'w') as config_file:
