@@ -15,7 +15,7 @@ import pandas as pd
 import torch
 import yaml
 
-from contact_cnn import ContactCNNWithNormalization, TCN, contact_cnn
+from contact_cnn import ContactCNNWithNormalization, DERTCN
 from utils.csv2numpyV1 import quaternion_to_rotation_matrix
 
 
@@ -81,55 +81,31 @@ def make_body_velocity(trajectory):
 def make_model(config, num_features):
     architecture = config.get('model_architecture', 'vanilla_cnn').lower()
     if architecture == 'tcn':
-        base_model = TCN(
+        base_model = DERTCN(
             window_size=config['window_size'], num_features=num_features,
             tcn_num_channels=config.get('tcn_num_channels', 64), tcn_kernel_size=config.get('tcn_kernel_size', 3),
             tcn_num_blocks=config.get('tcn_num_blocks', 5), tcn_dropout=config.get('tcn_dropout', 0.2),
-            natpn_flow_layers=config.get('natpn_flow_layers', 8),
-            natpn_certainty_budget=config.get('natpn_certainty_budget', 'normal'),
-            natpn_evidence_source=config.get('natpn_evidence_source', 'task'),
-            input_natpn_checkpoint=config.get('input_natpn_checkpoint'),
-            input_epistemic_scale=config.get('input_epistemic_scale', 1.0),
         )
-    elif architecture == 'vanilla_cnn':
-        base_model = contact_cnn(window_size=config['window_size'], num_features=num_features)
     else:
-        raise ValueError(f'Unknown model_architecture: {architecture}')
+        raise ValueError("DER inference is implemented only for model_architecture: 'tcn'.")
     return ContactCNNWithNormalization(base_model)
 
 
-def latest_checkpoint(num_features, evidence_source):
-    """Select the newest task checkpoint matching the active input contract and NatPN mode."""
-    logs_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'logsNatPN')
+def latest_checkpoint(num_features):
+    """Select the newest DER checkpoint matching the active input contract."""
+    logs_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'logsDER')
     for run_dir in sorted(glob.glob(os.path.join(logs_root, '*')), key=os.path.getmtime, reverse=True):
-        for filename in ('model_natpn_finetuned.pt', 'model_best_val_velocity.pt'):
+        for filename in ('model_best_val_velocity.pt', 'model_final_epoch.pt'):
             checkpoint = os.path.join(run_dir, filename)
             if not os.path.isfile(checkpoint):
                 continue
             state = torch.load(checkpoint, map_location='cpu')['model_state_dict']
             checkpoint_features = state['base_model.input_proj.weight'].shape[1]
-            checkpoint_uses_input_evidence = any(key.startswith('base_model.input_density.') for key in state)
-            if checkpoint_features == num_features and checkpoint_uses_input_evidence == (evidence_source == 'input'):
+            if checkpoint_features == num_features:
                 return checkpoint
     raise FileNotFoundError(
-        f'No {evidence_source}-evidence checkpoint with {num_features} input features found in {logs_root}. '
+        f'No DER checkpoint with {num_features} input features found in {logs_root}. '
         'Train that configuration first.'
-    )
-
-
-def latest_input_natpn_checkpoint(num_features):
-    """Select the newest input-density artifact compatible with the current CSV features."""
-    logs_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'logsEncoder')
-    for checkpoint_path in sorted(
-        glob.glob(os.path.join(logs_root, '*', 'encoder_input_natpn.pt')),
-        key=os.path.getmtime,
-        reverse=True,
-    ):
-        if torch.load(checkpoint_path, map_location='cpu')['num_features'] == num_features:
-            return checkpoint_path
-    raise FileNotFoundError(
-        f'No encoder_input_natpn.pt with {num_features} input features found in {logs_root}. '
-        'Run trainEncoder.py first.'
     )
 
 
@@ -160,21 +136,13 @@ def run_trajectory(model, trajectory, window_size, batch_size, device):
 
 
 @torch.no_grad()
-def natpn_uncertainty_for_window(model, features, window_start, window_size, device):
-    """Return NatPN aleatoric and epistemic variance for one final-timestep window."""
+def der_uncertainty_for_window(model, features, window_start, window_size, device):
+    """Return DER NIG aleatoric and epistemic variance for one final-timestep window."""
     window = torch.from_numpy(features[window_start:window_start + window_size]).float().unsqueeze(0).to(device)
-    *_, posteriors = model(window, return_sequence=False, return_posteriors=True)
-    aleatoric = np.array([
-        (posterior.beta / (posterior.alpha - 1.0).clamp_min(1e-6)).item()
-        for posterior in posteriors
-    ])
-    epistemic = np.array([
-        getattr(
-            posterior, 'epistemic_variance',
-            posterior.beta / ((posterior.alpha - 1.0).clamp_min(1e-6) * posterior.lambd)
-        ).item()
-        for posterior in posteriors
-    ])
+    *_, nig_params = model(window, return_sequence=False, return_posteriors=True)
+    _, nu, alpha, beta = nig_params
+    aleatoric = (beta / (alpha - 1.0).clamp_min(1e-6)).squeeze().cpu().numpy()
+    epistemic = (aleatoric / nu.squeeze().cpu().numpy())
     return aleatoric, epistemic
 
 
@@ -288,11 +256,11 @@ def main():
     RANDOM_SEED = args.seed
     TEST_CMD_VEL_X_WINDOW = tuple(args.cmd_vel_x_window)
 
-    natpn_config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config', 'NatPN_params.yaml')
-    with open(natpn_config_path) as config_file:
-        natpn_config = yaml.safe_load(config_file) or {}
+    der_config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config', 'DER_params.yaml')
+    with open(der_config_path) as config_file:
+        der_config = yaml.safe_load(config_file) or {}
     with open(args.config_name) as config_file:
-        config = {**natpn_config, **(yaml.safe_load(config_file) or {})}
+        config = {**der_config, **(yaml.safe_load(config_file) or {})}
     low, high = TEST_CMD_VEL_X_WINDOW
     if low > high:
         raise ValueError('TEST_CMD_VEL_X_WINDOW must be (min, max) with min <= max')
@@ -305,13 +273,8 @@ def main():
     )
 
     trajectory_features = make_features(trajectory)
-    if config.get('natpn_evidence_source', 'task') == 'input' and not config.get('input_natpn_checkpoint'):
-        config['input_natpn_checkpoint'] = latest_input_natpn_checkpoint(trajectory_features.shape[1])
-        print(f"Input NatPN checkpoint: {config['input_natpn_checkpoint']}")
     model = make_model(config, trajectory_features.shape[1])
-    checkpoint_path = latest_checkpoint(
-        trajectory_features.shape[1], config.get('natpn_evidence_source', 'task')
-    )
+    checkpoint_path = latest_checkpoint(trajectory_features.shape[1])
     model.load_state_dict(torch.load(checkpoint_path, map_location=device)['model_state_dict'])
     model.eval().to(device)
 
@@ -325,7 +288,7 @@ def main():
         candidate_positions = np.arange(len(contact_mask))
     random_position = int(np.random.default_rng(RANDOM_SEED).choice(candidate_positions))
     uncertainty_final_timestep_gt_contact = bool(contact[random_position] == 1)
-    random_aleatoric, random_epistemic = natpn_uncertainty_for_window(
+    random_aleatoric, random_epistemic = der_uncertainty_for_window(
         model, trajectory_features, random_position, config['window_size'], device
     )
     mae = np.abs(predicted[contact_mask] - ground_truth[contact_mask]).mean() if contact_mask.any() else float('nan')

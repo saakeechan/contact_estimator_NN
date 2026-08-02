@@ -2,10 +2,15 @@ __pycache__/
 results/
 logs/
 logsEncoder/
+logsDER/
+logsNatPN/
 inference_results/
 .vscode
 *.txt
 Data/
-
+testResults/
+*.csv
+*.png
+*.pdf
 
 *footVelocitiesPlots*

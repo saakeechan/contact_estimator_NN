@@ -1,0 +1,4 @@
+# Deep evidential regression (Normal-Inverse-Gamma) settings.
+# Per velocity component, the network predicts gamma, nu, alpha, beta.
+# The DER loss is NIG NLL + der_regularizer_weight * |target-gamma| * (2*nu+alpha).
+der_regularizer_weight: 5.0e-2

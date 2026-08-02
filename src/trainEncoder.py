@@ -119,7 +119,7 @@ def train_task_from_input_density(config, run_dir, input_natpn_checkpoint):
         natpn_evidence_source='input',
         input_natpn_checkpoint=os.path.abspath(input_natpn_checkpoint),
         use_dense_supervision=False,
-        velocity_loss='gaussian_nll',
+        velocity_loss=config['input_velocity_loss'],
         mse_warmup_epochs=int(config['num_epoch']) // 2,
         input_epistemic_scale=float(config.get('input_epistemic_scale', 1.0)),
     )
@@ -129,7 +129,7 @@ def train_task_from_input_density(config, run_dir, input_natpn_checkpoint):
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     print(f'Starting task training with input-latent NatPN: {task_config_path}')
     subprocess.run(
-        [sys.executable, os.path.join(project_root, 'src', 'train.py'), '--config_name', task_config_path],
+        [sys.executable, os.path.join(project_root, 'src', 'trainNatPN.py'), '--config_name', task_config_path],
         cwd=project_root,
         check=True,
     )

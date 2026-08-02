@@ -1,10 +1,10 @@
 # Task-latent NatPN settings.
 natpn_flow_layers: 8
-natpn_certainty_budget: "exp"
+natpn_certainty_budget: "constant"
 natpn_entropy_weight: 1.0e-5
 natpn_warmup_epochs: 8
-natpn_finetune_epochs: null  # null means use num_epoch
-natpn_evidence_source: "task"  # "task" or "input"
+natpn_finetune_epochs: 10
+# Supervised velocity objective for task-latent training: "bayesian" or "gaussian_nll".
 velocity_loss: "bayesian"
 
 # Input-latent NatPN settings used by trainEncoder.py.
@@ -13,5 +13,5 @@ input_natpn_flow_layers: 8
 input_natpn_lr: 0.001
 input_natpn_certainty_budget: "constant"
 input_epistemic_scale: 1
-input_natpn_checkpoint: null
+input_velocity_loss: "gaussian_nll"  # "bayesian" or "gaussian_nll"
 train_task_after_encoder: true

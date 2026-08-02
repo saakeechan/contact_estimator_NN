@@ -13,42 +13,61 @@ python3 utils/csv2numpyV1.py
 ```
 
 ### 3. Train Encoder
-Train the configured DAE or VAE encoder:
+Train the configured DAE or VAE encoder. When `train_task_after_encoder: true`, this automatically starts NatPN task training with `src/trainNatPN.py`.
 ```bash
 python3 src/trainEncoder.py
 ```
 
-### 4. Train Model
-Train the contact estimation network:
+### 4. Train NatPN Model
+Train the NatPN contact-estimation network manually:
+```bash
+python3 src/trainNatPN.py
+```
+
+### 5. Train DER Model
+Train the deep evidential-regression version:
+```bash
+python3 src/trainDER.py
+```
+
+### 6. Train Standard Model
+Train the non-evidential baseline:
 ```bash
 python3 src/train.py
 ```
 
-### 5. Test Model
+### 7. Test Model
 Evaluate on test set:
 ```bash
 python3 src/test.py
 ```
 
-### 6. Test One Trajectory
+### 8. Test One Trajectory
 Run the single-trajectory evaluation:
 ```bash
 python3 src/testSingle.py
 ```
 
-### 7. Run the Seed Sweep
-Evaluate `testSingle.py` across the default seed range and write its CSV report:
+### 9. Run NatPN Seed Sweep
 ```bash
-python3 utils/run_testsingle_seeds.py
+python3 utils/testSeriesNatPN.py
 ```
 
-### 8. Run the Seed Sweep for Encoder
-Evaluate `testSingleDecoupledInput.py` across the default seed range and write its CSV report:
+### 10. Run DER Seed Sweep
 ```bash
-python3 utils/run_testsingle_seedsDecoupled.py
+python3 utils/testSeriesDER.py
 ```
 
-Each training run creates a timestamped directory in `logs/run_YYYY-MM-DD_HH-MM-SS/` containing:
+### 11. Run Encoder Seed Sweep
+```bash
+python3 utils/testSeriesEncoder.py
+```
+
+Each seed sweep writes a CSV, PDF table, and aggregate plot under `testResults/`.
+The default CSV names include the network and inclusive seed range, such as
+`natpn_seeds_500-600.csv`, `der_seeds_500-600.csv`, and `encoder_seeds_2800-2851.csv`.
+
+Training runs create timestamped directories in `logs/`, `logsNatPN/`, `logsDER/`, or `logsEncoder/`, containing:
 - **network_params.yaml** - Copy of configuration used
 - **training_summary.txt/json** - Final metrics, training time, best results
 - **training_validation_loss.png** - Loss curves (auto-generated)

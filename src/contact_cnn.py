@@ -159,6 +159,39 @@ class NatPNVelocityHeads(nn.Module):
 
         return None, means.unsqueeze(1), None, variances.unsqueeze(1), posteriors
 
+
+class DERVelocityHeads(nn.Module):
+    """Normal-Inverse-Gamma velocity head for deep evidential regression."""
+    def __init__(self, latent_dim):
+        super().__init__()
+        self.heads = nn.ModuleDict({
+            leg: nn.Sequential(
+                nn.Linear(latent_dim, 128), nn.SiLU(), nn.Linear(128, 4 * len(VELOCITY_COMPONENTS))
+            ) for leg in LEGS
+        })
+
+    @staticmethod
+    def _nig_parameters(output):
+        gamma, raw_nu, raw_alpha, raw_beta = output.chunk(4, dim=-1)
+        return gamma, F.softplus(raw_nu) + MIN_VELOCITY_VARIANCE, F.softplus(raw_alpha) + 1.0, F.softplus(raw_beta) + MIN_VELOCITY_VARIANCE
+
+    @staticmethod
+    def _variance(nu, alpha, beta):
+        return beta * (1.0 + nu) / (nu * (alpha - 1.0).clamp_min(MIN_VELOCITY_VARIANCE))
+
+    def forward(self, features, return_sequence):
+        if return_sequence:
+            outputs = [self.heads[leg](features.permute(0, 2, 1)) for leg in LEGS]
+            params = [torch.stack(values, dim=1).permute(0, 1, 3, 2) for values in zip(*[self._nig_parameters(output) for output in outputs])]
+        else:
+            outputs = [self.heads[leg](features[:, :, -1]) for leg in LEGS]
+            params = [torch.stack(values, dim=1) for values in zip(*[self._nig_parameters(output) for output in outputs])]
+        gamma, nu, alpha, beta = params
+        variance = self._variance(nu, alpha, beta)
+        if return_sequence:
+            return gamma, gamma[:, :, :, -1], variance, variance[:, :, :, -1], tuple(params)
+        return None, gamma, None, variance, tuple(params)
+
 """
 Two network architectures are available:
 
@@ -328,6 +361,31 @@ class TCN(nn.Module):
         
         outputs = velocity_seq, velocity_out, covariance_seq, covariance_out, contact_out
         return (*outputs, posteriors) if return_posteriors else outputs
+
+
+class DERTCN(nn.Module):
+    """TCN with a Normal-Inverse-Gamma body-velocity output head."""
+    def __init__(self, window_size=10, num_features=12, tcn_num_channels=64,
+                 tcn_kernel_size=3, tcn_num_blocks=5, tcn_dropout=0.2):
+        super().__init__()
+        self.num_features = num_features
+        self.window_size = window_size
+        self.input_proj = nn.Conv1d(num_features, tcn_num_channels, kernel_size=1)
+        self.tcn_backbone = nn.Sequential(*[
+            TCNResidualBlock(tcn_num_channels, tcn_num_channels, tcn_kernel_size, 2 ** i, tcn_dropout)
+            for i in range(tcn_num_blocks)
+        ])
+        self.velocity_heads = DERVelocityHeads(tcn_num_channels)
+        self.contact_heads = make_contact_heads(tcn_num_channels)
+
+    def forward(self, x, return_sequence=True, return_posteriors=False, **_):
+        features = self.tcn_backbone(self.input_proj(x.permute(0, 2, 1)))
+        velocity_seq, velocity_out, covariance_seq, covariance_out, nig_params = self.velocity_heads(
+            features, return_sequence
+        )
+        contact_out = torch.cat([self.contact_heads[leg](features[:, :, -1]) for leg in LEGS], dim=1)
+        outputs = velocity_seq, velocity_out, covariance_seq, covariance_out, contact_out
+        return (*outputs, nig_params) if return_posteriors else outputs
 
 
 class DenoisingTCNAutoencoder(nn.Module):

@@ -1,4 +1,4 @@
-"""Run testSingleDecoupledInput.py over a seed range and collect its metrics in a CSV."""
+"""Run testSingle.py over a seed range and collect its metrics in a CSV."""
 import argparse
 import csv
 import json
@@ -12,14 +12,16 @@ def main():
     root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config-name', default=root / 'config/network_params.yaml', type=Path)
-    parser.add_argument('--cmd-vel-x-window', type=float, nargs=2, metavar=('MIN', 'MAX'), default=(0.0, 3.0))
-    parser.add_argument('--first-seed', type=int, default=2800)
-    parser.add_argument('--last-seed', type=int, default=2851)
-    parser.add_argument('--output-csv', default=root / 'testResults/testsingle_decoupled_input_seed_sweep_2800_2851.csv', type=Path)
+    parser.add_argument('--cmd-vel-x-window', type=float, nargs=2, metavar=('MIN', 'MAX'), default=(1.5, 3.0))
+    parser.add_argument('--first-seed', type=int, default=101)
+    parser.add_argument('--last-seed', type=int, default=200)
+    parser.add_argument('--output-csv', type=Path)
     parser.add_argument('--with-umap', action='store_true', help='Also save one UMAP figure per seed.')
     args = parser.parse_args()
     if args.first_seed > args.last_seed:
         parser.error('--first-seed must be no greater than --last-seed')
+    if args.output_csv is None:
+        args.output_csv = root / 'testResults' / f'natpn_seeds_{args.first_seed}-{args.last_seed}.csv'
 
     args.output_csv.parent.mkdir(parents=True, exist_ok=True)
     scientific = lambda value: f'{float(value):.4e}'
@@ -29,7 +31,7 @@ def main():
         for seed in range(args.first_seed, args.last_seed + 1):
             metrics_path = Path(temp_dir) / f'{seed}.json'
             command = [
-                sys.executable, root / 'src/testSingleDecoupledInput.py',
+                sys.executable, root / 'src/testSingle.py',
                 '--config_name', args.config_name, '--seed', str(seed),
                 '--cmd-vel-x-window', *(str(value) for value in args.cmd_vel_x_window),
                 '--metrics-json', metrics_path,
