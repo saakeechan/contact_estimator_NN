@@ -282,7 +282,11 @@ def main():
     parser = argparse.ArgumentParser(description='Train a DAE or VAE TCN autoencoder')
     parser.add_argument('--config_name', default=os.path.join(os.path.dirname(__file__), '..', 'config', 'network_params.yaml'))
     args = parser.parse_args()
-    config = yaml.load(open(args.config_name), Loader=yaml.FullLoader)
+    natpn_config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config', 'NatPN_params.yaml')
+    with open(natpn_config_path) as config_file:
+        natpn_config = yaml.safe_load(config_file) or {}
+    with open(args.config_name) as config_file:
+        config = {**natpn_config, **(yaml.safe_load(config_file) or {})}
     config['encoder_type'] = config.get('encoder_type', 'DAE').upper()
     if config['encoder_type'] not in {'DAE', 'VAE'}:
         raise ValueError("encoder_type must be 'DAE' or 'VAE'.")

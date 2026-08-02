@@ -61,7 +61,7 @@ def main():
         writer.writerows(rows)
     print(f'Wrote {len(rows)} rows to {args.output_csv}')
     subprocess.run(
-        [sys.executable, root / 'src/make_testsingle_table.py', '--input-csv', args.output_csv],
+        [sys.executable, root / 'utils/make_testsingle_table.py', '--input-csv', args.output_csv],
         cwd=root, check=True,
     )
 

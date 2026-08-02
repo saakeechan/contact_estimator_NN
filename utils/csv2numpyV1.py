@@ -1,9 +1,6 @@
-import cmd
 import os
 import argparse
 import glob
-import sys
-sys.path.append('.')
 import numpy as np
 import pandas as pd
 import yaml
@@ -24,7 +21,7 @@ def quaternion_to_rotation_matrix(quaternions):
     ), axis=1).reshape(-1, 3, 3)
 
 
-def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel_x_windows=((0.0, 2.0),)):
+def csv2numpy_split(data_pth, save_pth, cmd_vel_x_windows=((0.0, 2.0),)):
     """
     Load data from CSV files and concatenate into single numpy arrays.
     
@@ -43,8 +40,6 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
     Inputs:
     - data_pth: path to CSV data folder
     - save_pth: path to numpy saving directory
-    - train_ratio: not used (kept for backward compatibility)
-    - val_ratio: not used (kept for backward compatibility)
     
     Output:
     - all_data.npy: all data concatenated with left-leg features
@@ -241,24 +236,19 @@ def main():
                         help='Path to save numpy files (overrides config file)')
     args = parser.parse_args()
     
-    # Load config if it exists
-    config = {}
-    if os.path.exists(args.config_name):
-        config = yaml.load(open(args.config_name), Loader=yaml.FullLoader)
+    with open(args.config_name) as config_file:
+        config = yaml.load(config_file, Loader=yaml.FullLoader)
     
     # Override with command line arguments if provided
     if args.csv_folder:
         config['csv_folder'] = args.csv_folder
     if args.save_path:
         config['save_path'] = args.save_path
-        config['data_folder'] = args.save_path  # Also set data_folder for consistency
     
     # Set defaults if not in config
     config.setdefault('csv_folder', '../Data/CSVFiles/')
     config.setdefault('data_folder', '../Data/NumpyFiles/')
     config.setdefault('save_path', config['data_folder'])  # Use data_folder if save_path not set
-    config.setdefault('train_ratio', 0.7)
-    config.setdefault('val_ratio', 0.15)
     cmd_vel_x_windows = config.get('cmd_vel_x_windows', [[0.0, 2.0]])
     if not cmd_vel_x_windows or not all(isinstance(window, (list, tuple)) and len(window) == 2 and window[0] <= window[1]
                for window in cmd_vel_x_windows):
@@ -267,13 +257,9 @@ def main():
     print("Using configuration:")
     print(f"  CSV folder: {config['csv_folder']}")
     print(f"  Save path: {config['save_path']}")
-    print(f"  Train ratio: {config['train_ratio']}")
-    print(f"  Val ratio: {config['val_ratio']}")
     print(f"  Command-velocity windows: {cmd_vel_x_windows}")
     
-    csv2numpy_split(config['csv_folder'], config['save_path'],
-                    config['train_ratio'], config['val_ratio'],
-                    cmd_vel_x_windows)
+    csv2numpy_split(config['csv_folder'], config['save_path'], cmd_vel_x_windows)
 
 
 if __name__ == '__main__':

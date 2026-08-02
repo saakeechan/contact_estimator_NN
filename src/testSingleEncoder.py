@@ -196,8 +196,11 @@ def main():
     RANDOM_SEED = args.seed
     TEST_CMD_VEL_X_WINDOW = tuple(args.cmd_vel_x_window)
 
+    natpn_config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config', 'NatPN_params.yaml')
+    with open(natpn_config_path) as config_file:
+        natpn_config = yaml.safe_load(config_file) or {}
     with open(args.config_name) as config_file:
-        config = yaml.safe_load(config_file)
+        config = {**natpn_config, **(yaml.safe_load(config_file) or {})}
     config['encoder_type'] = config.get('encoder_type', 'DAE').upper()
     if config['encoder_type'] not in {'DAE', 'VAE'}:
         raise ValueError("encoder_type must be 'DAE' or 'VAE'.")

@@ -15,7 +15,7 @@ def main():
     parser.add_argument('--cmd-vel-x-window', type=float, nargs=2, metavar=('MIN', 'MAX'), default=(0.0, 3.0))
     parser.add_argument('--first-seed', type=int, default=2800)
     parser.add_argument('--last-seed', type=int, default=2851)
-    parser.add_argument('--output-csv', default=root / 'logs/testsingle_decoupled_input_seed_sweep_2800_2851.csv', type=Path)
+    parser.add_argument('--output-csv', default=root / 'testResults/testsingle_decoupled_input_seed_sweep_2800_2851.csv', type=Path)
     parser.add_argument('--with-umap', action='store_true', help='Also save one UMAP figure per seed.')
     args = parser.parse_args()
     if args.first_seed > args.last_seed:
@@ -61,7 +61,7 @@ def main():
         writer.writerows(rows)
     print(f'Wrote {len(rows)} rows to {args.output_csv}')
     subprocess.run(
-        [sys.executable, root / 'src/make_testsingle_table.py', '--input-csv', args.output_csv],
+        [sys.executable, root / 'utils/make_testsingle_table.py', '--input-csv', args.output_csv],
         cwd=root, check=True,
     )
 

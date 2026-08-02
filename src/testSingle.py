@@ -15,7 +15,7 @@ import pandas as pd
 import torch
 import yaml
 
-from contact_cnn import AttentionTCN, ContactCNNWithNormalization, TCN, contact_cnn
+from contact_cnn import ContactCNNWithNormalization, TCN, contact_cnn
 from utils.csv2numpyV1 import quaternion_to_rotation_matrix
 
 
@@ -80,14 +80,7 @@ def make_body_velocity(trajectory):
 
 def make_model(config, num_features):
     architecture = config.get('model_architecture', 'vanilla_cnn').lower()
-    if architecture == 'attention_tcn':
-        base_model = AttentionTCN(
-            window_size=config['window_size'], num_features=num_features,
-            d_model=config.get('attention_d_model', 64), num_heads=config.get('attention_num_heads', 4),
-            tcn_num_channels=config.get('tcn_num_channels', 64), tcn_kernel_size=config.get('tcn_kernel_size', 3),
-            tcn_num_blocks=config.get('tcn_num_blocks', 5), tcn_dropout=config.get('tcn_dropout', 0.2),
-        )
-    elif architecture == 'tcn':
+    if architecture == 'tcn':
         base_model = TCN(
             window_size=config['window_size'], num_features=num_features,
             tcn_num_channels=config.get('tcn_num_channels', 64), tcn_kernel_size=config.get('tcn_kernel_size', 3),
@@ -295,8 +288,11 @@ def main():
     RANDOM_SEED = args.seed
     TEST_CMD_VEL_X_WINDOW = tuple(args.cmd_vel_x_window)
 
+    natpn_config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config', 'NatPN_params.yaml')
+    with open(natpn_config_path) as config_file:
+        natpn_config = yaml.safe_load(config_file) or {}
     with open(args.config_name) as config_file:
-        config = yaml.safe_load(config_file)
+        config = {**natpn_config, **(yaml.safe_load(config_file) or {})}
     low, high = TEST_CMD_VEL_X_WINDOW
     if low > high:
         raise ValueError('TEST_CMD_VEL_X_WINDOW must be (min, max) with min <= max')

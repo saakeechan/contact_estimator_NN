@@ -348,8 +348,6 @@ def train(model, train_dataloader, val_dataloader, config):
     # Get loss weighting parameters
     contact_weight = float(config.get('contact_weight', 1.0))  # Weight for contact loss
     velocity_weight = float(config.get('velocity_weight', 1.0))  # Weight for velocity loss
-    derivative_weight = float(config.get('derivative_weight', 0.0))  # Weight for derivative matching loss
-    temporal_weight_power = float(config.get('temporal_weight_power', 0.0))  # Temporal weighting exponent
     use_dense_supervision = config.get('use_dense_supervision', False)
     
     # Print supervision mode
@@ -377,25 +375,7 @@ def train(model, train_dataloader, val_dataloader, config):
     best_velocity_mae = 1000000000
     best_contact_acc = 0
     
-    # Pre-compute temporal weights ONCE (before training loop) to avoid recomputation every batch
     device = next(model.parameters()).device
-    if use_dense_supervision and temporal_weight_power > 0:
-        T = config['window_size']
-        timesteps = torch.arange(1, T + 1, dtype=torch.float32, device=device)
-        temporal_weights = ((timesteps / T) ** temporal_weight_power).view(1, T, 1, 1)  # [1, T, 1, 1]
-        
-        # Print temporal weights info
-        print(f"\n{'='*60}")
-        print(f"Temporal weighting enabled (power={temporal_weight_power})")
-        print(f"Weights for each timestep (oldest → newest):")
-        weights_1d = temporal_weights.squeeze().cpu().numpy()
-        print(f"  {weights_1d}")
-        print(f"  First timestep weight: {weights_1d[0]:.4f}")
-        print(f"  Last timestep weight: {weights_1d[-1]:.4f}")
-        print(f"  Ratio (last/first): {weights_1d[-1]/weights_1d[0]:.2f}x")
-        print(f"{'='*60}\n")
-    else:
-        temporal_weights = 1.0  # Uniform weighting
     
     for epoch in range(config['num_epoch']):
         epoch_loss_type = 'mse' if velocity_loss_type == 'gaussian_nll' and epoch < mse_warmup_epochs else velocity_loss_type
@@ -408,7 +388,6 @@ def train(model, train_dataloader, val_dataloader, config):
         loss_sum = 0.0  # For epoch average
         contact_loss_sum = 0.0
         velocity_loss_sum = 0.0
-        derivative_loss_sum = 0.0
         
         model.train()
         for i, samples in tqdm(enumerate(train_dataloader, start=0)):
@@ -442,34 +421,9 @@ def train(model, train_dataloader, val_dataloader, config):
                 # Use full contact sequence for masking (dense supervision only at contact timesteps)
                 contact_mask_seq = (contact_label_seq == 1).float().unsqueeze(-1)  # [B, T, 1, 1]
                 
-                # Apply temporal weighting (pre-computed before training loop)
                 velocity_loss = (
-                    velocity_loss_elementwise * contact_mask_seq * temporal_weights
-                ).sum() / (((contact_mask_seq * temporal_weights).sum() * velocity_label_seq.shape[-1]) + 1e-8)
-                
-                # Derivative matching loss: match temporal dynamics (slopes/changes)
-                # Only available in dense mode (requires full sequence)
-                derivative_loss = torch.tensor(0.0, device=velocity_output.device)
-                if derivative_weight > 0:
-                    # Compute derivatives: Δy_t = y_t - y_{t-1}
-                    pred_derivative = velocity_seq_permuted[:, 1:, :, :] - velocity_seq_permuted[:, :-1, :, :]
-                    gt_derivative = velocity_label_seq[:, 1:, :, :] - velocity_label_seq[:, :-1, :, :]
-                    
-                    # Compute derivative loss using Huber loss (robust to outliers)
-                    derivative_loss_elementwise = F.smooth_l1_loss(
-                        pred_derivative,
-                        gt_derivative,
-                        reduction='none',
-                        beta=0.05
-                    )  # [B, T-1, 1, 3]
-                    
-                    # Mask to contact timesteps - both t and t+1 must be in contact
-                    # (derivative spans from timestep t to t+1)
-                    contact_mask_derivative = contact_mask_seq[:, 1:, :, :] * contact_mask_seq[:, :-1, :, :]
-                    
-                    derivative_loss = (
-                        derivative_loss_elementwise * contact_mask_derivative
-                    ).sum() / (contact_mask_derivative.sum() * velocity_label_seq.shape[-1] + 1e-8)
+                    velocity_loss_elementwise * contact_mask_seq
+                ).sum() / (contact_mask_seq.sum() * velocity_label_seq.shape[-1] + 1e-8)
             else:
                 # LAST TIMESTEP ONLY: Compute velocity loss only on final output (simpler, faster)
                 velocity_loss_elementwise = supervised_velocity_loss(
@@ -485,29 +439,8 @@ def train(model, train_dataloader, val_dataloader, config):
                     velocity_loss_elementwise * contact_mask
                 ).sum() / (contact_mask.sum() * velocity_label.shape[-1] + 1e-8)
                 
-                # No derivative loss in last-timestep-only mode
-                derivative_loss = torch.tensor(0.0, device=velocity_output.device)
             
-            loss = contact_weight * contact_loss + velocity_weight * velocity_loss + derivative_weight * derivative_loss
-            
-            # Add Elastic Net regularization (L1 + L2) if specified
-            l1_lambda = float(config.get('l1_lambda', 0.0))
-            l2_lambda = float(config.get('l2_lambda', 0.0))
-            
-            if l1_lambda > 0 or l2_lambda > 0:
-                l1_norm = torch.tensor(0.0, device=velocity_output.device)
-                l2_norm = torch.tensor(0.0, device=velocity_output.device)
-                
-                for p in model.parameters():
-                    if l1_lambda > 0:
-                        l1_norm = l1_norm + p.abs().sum()
-                    if l2_lambda > 0:
-                        l2_norm = l2_norm + (p ** 2).sum()
-                
-                loss = loss + l1_lambda * l1_norm + l2_lambda * l2_norm
-            
-            # NOTE: Temporal consistency loss removed - requires sequential data, not shuffled batches
-            # If needed, implement by grouping consecutive windows from same trajectory
+            loss = contact_weight * contact_loss + velocity_weight * velocity_loss
             
             loss.backward()
             optimizer.step()
@@ -516,19 +449,15 @@ def train(model, train_dataloader, val_dataloader, config):
             loss_sum += loss.item()
             contact_loss_sum += contact_loss.item()
             velocity_loss_sum += velocity_loss.item()
-            if derivative_weight > 0 and use_dense_supervision:
-                derivative_loss_sum += derivative_loss.item()
-
             if i % config['print_every'] == 0:
-                derivative_str = f", derivative: {derivative_loss.item():.6f}" if (derivative_weight > 0 and use_dense_supervision) else ""
                 if use_dense_supervision:
                     contact_count = int(contact_mask_seq.sum().item())
                 else:
                     contact_count = int(contact_mask.sum().item())
-                print("epoch %d / %d, iteration %d / %d, loss: %.8f (contact: %.6f, velocity masked: %.6f%s, contact samples: %d)" %\
+                print("epoch %d / %d, iteration %d / %d, loss: %.8f (contact: %.6f, velocity masked: %.6f, contact samples: %d)" %\
                     (epoch, config['num_epoch'], i, len(train_dataloader), 
                      running_loss/config['print_every'],
-                     contact_loss.item(), velocity_loss.item(), derivative_str, contact_count))
+                     contact_loss.item(), velocity_loss.item(), contact_count))
                 running_loss = 0.0
 
         # calculate training and validation metrics
@@ -545,14 +474,11 @@ def train(model, train_dataloader, val_dataloader, config):
         train_loss_avg = loss_sum / len(train_dataloader)
         contact_loss_avg = contact_loss_sum / len(train_dataloader)
         velocity_loss_avg = velocity_loss_sum / len(train_dataloader)
-        derivative_loss_avg = derivative_loss_sum / len(train_dataloader) if (derivative_weight > 0 and use_dense_supervision) else 0.0
 
         # log down info in tensorboard
         writer.add_scalar('training/total_loss', train_loss_avg, epoch)
         writer.add_scalar('training/contact_loss', contact_loss_avg, epoch)
         writer.add_scalar('training/velocity_loss', velocity_loss_avg, epoch)
-        if derivative_weight > 0 and use_dense_supervision:
-            writer.add_scalar('training/derivative_loss', derivative_loss_avg, epoch)
         writer.add_scalar('training/contact_accuracy', train_metrics['contact_acc'], epoch)
         writer.add_scalar('training/velocity_mae', train_metrics['velocity_mae'], epoch)
         
@@ -723,7 +649,11 @@ def main():
     parser.add_argument('--config_name', type=str, default=os.path.dirname(os.path.abspath(__file__))+'/../config/network_params.yaml')
     args = parser.parse_args()
 
-    config = yaml.load(open(args.config_name), Loader=yaml.FullLoader)
+    natpn_config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config', 'NatPN_params.yaml')
+    with open(natpn_config_path) as config_file:
+        natpn_config = yaml.safe_load(config_file) or {}
+    with open(args.config_name) as config_file:
+        config = {**natpn_config, **(yaml.safe_load(config_file) or {})}
     evidence_source = config.get('natpn_evidence_source', 'task')
     if evidence_source not in {'task', 'input'}:
         raise ValueError("natpn_evidence_source must be 'task' or 'input'.")
@@ -843,21 +773,7 @@ def main():
     if model_arch != 'tcn':
         raise ValueError("NatPN velocity training is currently implemented only for model_architecture: 'tcn'.")
     
-    if model_arch == 'attention_tcn':
-
-        from contact_cnn import AttentionTCN
-        base_model = AttentionTCN(
-            window_size=config['window_size'],
-            num_features=num_features,
-            d_model=config.get('attention_d_model', 64),
-            num_heads=config.get('attention_num_heads', 4),
-            tcn_num_channels=config.get('tcn_num_channels', 64),
-            tcn_kernel_size=config.get('tcn_kernel_size', 3),
-            tcn_num_blocks=config.get('tcn_num_blocks', 5),
-            tcn_dropout=config.get('tcn_dropout', 0.2)
-        )
-
-    elif model_arch == 'tcn':
+    if model_arch == 'tcn':
         from contact_cnn import TCN
         base_model = TCN(
             window_size=config['window_size'],
@@ -878,8 +794,6 @@ def main():
             window_size=config['window_size'],
             num_features=num_features
         )
-    else:
-        raise ValueError(f"Unknown model_architecture: {model_arch}. Options: 'attention_tcn', 'tcn', 'vanilla_cnn'")
     
     from contact_cnn import ContactCNNWithNormalization
     model = ContactCNNWithNormalization(base_model, global_mean=global_mean, global_std=global_std)

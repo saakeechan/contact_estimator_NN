@@ -170,7 +170,11 @@ def main():
     parser.add_argument('--config_name', type=str, default=os.path.dirname(os.path.abspath(__file__))+'/../config/network_params.yaml')
     args = parser.parse_args()
 
-    config = yaml.load(open(args.config_name), Loader=yaml.FullLoader)
+    natpn_config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config', 'NatPN_params.yaml')
+    with open(natpn_config_path) as config_file:
+        natpn_config = yaml.safe_load(config_file) or {}
+    with open(args.config_name) as config_file:
+        config = {**natpn_config, **(yaml.safe_load(config_file) or {})}
     
     # Load num_features from data metadata (source of truth)
     metadata_path = config['data_folder'] + "all_data_metadata.npy"
@@ -254,19 +258,7 @@ def main():
     # Select model architecture based on config (must match training)
     model_arch = config.get('model_architecture', 'vanilla_cnn').lower()
     
-    if model_arch == 'attention_tcn':
-        from contact_cnn import AttentionTCN
-        base_model = AttentionTCN(
-            window_size=config['window_size'],
-            num_features=num_features,
-            d_model=config.get('attention_d_model', 64),
-            num_heads=config.get('attention_num_heads', 4),
-            tcn_num_channels=config.get('tcn_num_channels', 64),
-            tcn_kernel_size=config.get('tcn_kernel_size', 3),
-            tcn_num_blocks=config.get('tcn_num_blocks', 5),
-            tcn_dropout=config.get('tcn_dropout', 0.2)
-        )
-    elif model_arch == 'tcn':
+    if model_arch == 'tcn':
         from contact_cnn import TCN
         base_model = TCN(
             window_size=config['window_size'],
@@ -284,7 +276,7 @@ def main():
     elif model_arch == 'vanilla_cnn':
         base_model = contact_cnn(window_size=config['window_size'], num_features=num_features)
     else:
-        raise ValueError(f"Unknown model_architecture: {model_arch}. Options: 'attention_tcn', 'tcn', 'vanilla_cnn'")
+        raise ValueError(f"Unknown model_architecture: {model_arch}. Options: 'tcn', 'vanilla_cnn'")
     
     from contact_cnn import ContactCNNWithNormalization
     model = ContactCNNWithNormalization(base_model)  # Will load stats from checkpoint

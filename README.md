@@ -3,19 +3,49 @@
 
 ### 1. Start Docker Container
 ```bash
-docker start contact_estimator_NN && docker exec -it contact_estimator_NN /bin/bash
+./docker.sh run
 ```
 
 ### 2. Process CSV Data
 Convert CSV files to numpy format with run boundaries:
 ```bash
-python3 utils/csv2numpyV1.py --config_name config/network_params.yaml
+python3 utils/csv2numpyV1.py
 ```
 
-### 3. Train Model
+### 3. Train Encoder
+Train the configured DAE or VAE encoder:
+```bash
+python3 src/trainEncoder.py
+```
+
+### 4. Train Model
 Train the contact estimation network:
 ```bash
-python3 src/train.py --config_name config/network_params.yaml
+python3 src/train.py
+```
+
+### 5. Test Model
+Evaluate on test set:
+```bash
+python3 src/test.py
+```
+
+### 6. Test One Trajectory
+Run the single-trajectory evaluation:
+```bash
+python3 src/testSingle.py
+```
+
+### 7. Run the Seed Sweep
+Evaluate `testSingle.py` across the default seed range and write its CSV report:
+```bash
+python3 utils/run_testsingle_seeds.py
+```
+
+### 8. Run the Seed Sweep for Encoder
+Evaluate `testSingleDecoupledInput.py` across the default seed range and write its CSV report:
+```bash
+python3 utils/run_testsingle_seedsDecoupled.py
 ```
 
 Each training run creates a timestamped directory in `logs/run_YYYY-MM-DD_HH-MM-SS/` containing:
@@ -26,43 +56,7 @@ Each training run creates a timestamped directory in `logs/run_YYYY-MM-DD_HH-MM-
 - **tensorboard/** - TensorBoard event logs
 - **model_*.pt** - Best and final model checkpoints
 
-### 4. Test Model
-Evaluate on test set:
-```bash
-python3 src/test.py --config_name config/network_params.yaml
-```
-
-### 5. Plot Loss
-Plot training and validation loss/MAE from TensorBoard logs (saves to `results/` directory):
-```bash
-python3 utils/plot_loss.py
-```
-
-**Note:** Plots are now automatically generated at the end of training and saved to the run directory. 
-This manual command is only needed if you want to regenerate plots from existing logs.
-
-This creates:
-- `results/training_validation_loss.png`
-- `results/training_validation_mae.png`
-
-Optional: Specify custom output directory or metric tags:
-```bash
-python3 utils/plot_loss.py --output-dir plots \
-  --train-loss-tag "training/total_loss" \
-  --val-loss-tag "validation/total_loss"
-```
-
-### 6. View Training Results
-To view TensorBoard logs for a specific run:
-```bash
-tensorboard --logdir=logs/run_YYYY-MM-DD_HH-MM-SS/tensorboard
-```
-
-Or view all runs together:
-```bash
-tensorboard --logdir=logs
-```
-
 ## Configuration
 
-All parameters are centralized in `config/network_params.yaml`:
+General settings are in `config/network_params.yaml`; NatPN settings are in
+`config/NatPN_params.yaml`. The utility, training, and test commands load both.
