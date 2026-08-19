@@ -16,7 +16,9 @@ import torch
 import yaml
 
 from contact_cnn import ContactCNNWithNormalization, DERTCN
+from base_test import BaseSingleTest
 from utils.csv2numpyV1 import quaternion_to_rotation_matrix
+from utils.ood_selection import csv_matches_environment_windows, validate_ood_selection
 
 
 # Select one trajectory whose first cmd_vel_x is in this inclusive range.
@@ -29,12 +31,17 @@ OOD_ID_PERCENTILE = 0.95
 UMAP_TRAIN_MAX = 5000
 
 
-def find_random_trajectory(csv_folder, window_size, cmd_vel_x_window, rng):
-    """Read CSVs in random order and return one matching timestamp-delimited trajectory."""
+def find_random_trajectory(csv_folder, window_size, cmd_vel_x_window, rng,
+                           ood_feature='cmd_vel', environment_windows=()):
+    """Read CSVs in random order and return one trajectory matching the configured OOD feature."""
     low, high = cmd_vel_x_window
     csv_files = glob.glob(os.path.join(csv_folder, '*.csv'))
     if not csv_files:
         raise FileNotFoundError(f'No CSV files found in {csv_folder}')
+    if ood_feature == 'environment':
+        csv_files = [path for path in csv_files if csv_matches_environment_windows(path, environment_windows)[0]]
+        if not csv_files:
+            raise ValueError(f'No CSV files in {csv_folder} match environment windows {environment_windows}')
 
     for csv_path in rng.permutation(csv_files):
         df = pd.read_csv(csv_path)
@@ -49,10 +56,11 @@ def find_random_trajectory(csv_folder, window_size, cmd_vel_x_window, rng):
                 continue
 
             start_cmd_vel = trajectory['cmd_vel_x'].iloc[0]
-            if low <= start_cmd_vel <= high:
+            if ood_feature == 'environment' or low <= start_cmd_vel <= high:
                 return trajectory, csv_path, run_index, start_cmd_vel
 
-    raise ValueError(f'No trajectory with at least {window_size} samples starts with cmd_vel_x in [{low}, {high}]')
+    selection = f'environment windows {environment_windows}' if ood_feature == 'environment' else f'cmd_vel_x in [{low}, {high}]'
+    raise ValueError(f'No trajectory with at least {window_size} samples matches {selection}')
 
 
 def make_features(trajectory):
@@ -241,42 +249,25 @@ def save_velocity_plot(time, predicted, ground_truth, contact, output_path):
     plt.close(figure)
 
 
-def main():
-    global RANDOM_SEED, TEST_CMD_VEL_X_WINDOW
-    parser = argparse.ArgumentParser(description='Run one selected CSV trajectory through the contact network.')
-    parser.add_argument('--config_name', default=os.path.join(os.path.dirname(__file__), '../config/network_params.yaml'))
-    parser.add_argument('--seed', type=int, default=RANDOM_SEED)
-    parser.add_argument('--cmd-vel-x-window', type=float, nargs=2, metavar=('MIN', 'MAX'), default=TEST_CMD_VEL_X_WINDOW)
-    parser.add_argument('--metrics-json', help='Optional path for machine-readable evaluation metrics.')
-    parser.add_argument('--skip-umap', action='store_true', help='Compute kNN/OOD metrics without saving a UMAP figure.')
-    parser.add_argument('--save-umap', action='store_true', help='Save the kNN UMAP figure (disabled by default).')
-    parser.add_argument('--knn-cache', help='Optional .npz cache for the invariant training-latent kNN reference.')
-    parser.add_argument('--skip-plots', action='store_true', help='Do not save the per-trajectory velocity plot.')
-    args = parser.parse_args()
-    RANDOM_SEED = args.seed
-    TEST_CMD_VEL_X_WINDOW = tuple(args.cmd_vel_x_window)
-
-    der_config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config', 'DER_params.yaml')
-    with open(der_config_path) as config_file:
-        der_config = yaml.safe_load(config_file) or {}
-    with open(args.config_name) as config_file:
-        config = {**der_config, **(yaml.safe_load(config_file) or {})}
-    low, high = TEST_CMD_VEL_X_WINDOW
-    if low > high:
-        raise ValueError('TEST_CMD_VEL_X_WINDOW must be (min, max) with min <= max')
-
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    csv_folder = config['csv_folder'] if os.path.isabs(config['csv_folder']) else os.path.join(project_root, config['csv_folder'])
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    trajectory, csv_path, run_index, start_cmd_vel = find_random_trajectory(
-        csv_folder, config['window_size'], TEST_CMD_VEL_X_WINDOW, np.random.default_rng(RANDOM_SEED)
-    )
+def run_evaluation(args, context, model=None, checkpoint_path=None):
+    config = context['config']
+    ood_feature = context['ood_feature']
+    environment_windows = context['environment_windows']
+    low, high = context['cmd_vel_x_window']
+    project_root = context['project_root']
+    device = context['device']
+    trajectory = context['trajectory']
+    csv_path = context['csv_path']
+    run_index = context['run_index']
+    start_cmd_vel = context['start_cmd_vel']
+    environment_id = context['environment_id']
 
     trajectory_features = make_features(trajectory)
-    model = make_model(config, trajectory_features.shape[1])
-    checkpoint_path = latest_checkpoint(trajectory_features.shape[1])
-    model.load_state_dict(torch.load(checkpoint_path, map_location=device)['model_state_dict'])
-    model.eval().to(device)
+    if model is None:
+        model = make_model(config, trajectory_features.shape[1])
+        checkpoint_path = latest_checkpoint(trajectory_features.shape[1])
+        model.load_state_dict(torch.load(checkpoint_path, map_location=device)['model_state_dict'])
+        model.eval().to(device)
 
     indices, predicted, variance, contact_probability, contact, ground_truth = run_trajectory(
         model, trajectory, config['window_size'], config.get('test_batch_size', config['batch_size']), device
@@ -298,7 +289,7 @@ def main():
         output_path = os.path.join(os.path.dirname(checkpoint_path), f'trajectory_velocity_comparison_seed{RANDOM_SEED}.png')
         save_velocity_plot(trajectory['timestamp'].to_numpy()[indices], predicted, ground_truth, contact, output_path)
 
-    if RUN_KNN_UMAP:
+    if RUN_KNN_UMAP and not args.skip_knn:
         cache_matches_checkpoint = False
         if args.knn_cache and os.path.isfile(args.knn_cache):
             with np.load(args.knn_cache, allow_pickle=False) as cache:
@@ -356,7 +347,8 @@ def main():
             save_knn_umap(training_latents, trajectory_latents, knn_distances, ood_mask, knn_k, ood_threshold, umap_output_path)
 
     print(f'CSV: {csv_path}')
-    print(f'Trajectory: {run_index}, start cmd_vel_x: {start_cmd_vel:.4e} m/s, selected range: [{low:.4e}, {high:.4e}]')
+    selection = f'environment {environment_id}, windows: {environment_windows}' if ood_feature == 'environment' else f'cmd_vel_x range: [{low:.4e}, {high:.4e}]'
+    print(f'Trajectory: {run_index}, start cmd_vel_x: {start_cmd_vel:.4e} m/s, selected by {selection}')
     print(f'Random seed: {RANDOM_SEED}, trajectory samples: {len(trajectory)}, evaluated windows: {len(indices)}')
     print(f'Contact-final windows: {contact_mask.sum()} / {len(contact)}')
     print(f'Contact-masked velocity MAE: {mae:.4e}')
@@ -369,26 +361,51 @@ def main():
     )
     if output_path:
         print(f'Whole-trajectory velocity plot: {output_path}')
-    if RUN_KNN_UMAP:
+    if RUN_KNN_UMAP and not args.skip_knn:
         print(f'KNN reference windows: {len(training_latents)}, K: {knn_k}')
         print(f'Mean distance to {knn_k} nearest latent neighbors: mean {knn_distances.mean():.4e}, max {knn_distances.max():.4e}')
         print(f'ID threshold ({OOD_ID_PERCENTILE:.0%} training quantile): {ood_threshold:.4e}')
         print(f'OOD {"contact" if contact_mask.any() else "evaluated"} windows / all evaluated windows: {ood_mask.sum()} / {len(contact)} ({100.0 * ood_mask.sum() / len(contact):.4e}%)')
 
+    metrics = {
+        'seed': RANDOM_SEED,
+        'ood_feature': ood_feature,
+        'environment': environment_id,
+        'cmd_vel_x': float(start_cmd_vel),
+        'velocity_mae': float(mae),
+        'uncertainty_final_timestep_gt_contact': uncertainty_final_timestep_gt_contact,
+        'aleatoric_variance': random_aleatoric.tolist(),
+        'epistemic_variance': random_epistemic.tolist(),
+        'knn_ood_windows': int(ood_mask.sum()) if RUN_KNN_UMAP and not args.skip_knn else None,
+        'knn_total_windows': len(contact) if RUN_KNN_UMAP and not args.skip_knn else None,
+        'knn_ood_percentage_total_windows': float(ood_mask.sum() / len(contact)) if RUN_KNN_UMAP and not args.skip_knn else None,
+    }
     if args.metrics_json:
-        metrics = {
-            'seed': RANDOM_SEED,
-            'cmd_vel_x': float(start_cmd_vel),
-            'velocity_mae': float(mae),
-            'uncertainty_final_timestep_gt_contact': uncertainty_final_timestep_gt_contact,
-            'aleatoric_variance': random_aleatoric.tolist(),
-            'epistemic_variance': random_epistemic.tolist(),
-            'knn_ood_windows': int(ood_mask.sum()) if RUN_KNN_UMAP else None,
-            'knn_total_windows': len(contact) if RUN_KNN_UMAP else None,
-            'knn_ood_percentage_total_windows': float(ood_mask.sum() / len(contact)) if RUN_KNN_UMAP else None,
-        }
         with open(args.metrics_json, 'w') as metrics_file:
             json.dump(metrics, metrics_file)
+    return metrics, model, checkpoint_path
+
+
+class DERSingleTest(BaseSingleTest):
+    default_seed = RANDOM_SEED
+    default_cmd_vel_x_window = TEST_CMD_VEL_X_WINDOW
+    model_config_name = 'DER_params.yaml'
+    find_trajectory = staticmethod(find_random_trajectory)
+
+    def add_model_arguments(self, parser):
+        parser.add_argument('--knn-cache', help='Optional .npz cache for the invariant training-latent kNN reference.')
+        parser.add_argument('--skip-plots', action='store_true', help='Do not save the per-trajectory velocity plot.')
+
+    def set_runtime_values(self, args):
+        global RANDOM_SEED, TEST_CMD_VEL_X_WINDOW
+        RANDOM_SEED, TEST_CMD_VEL_X_WINDOW = args.seed, tuple(args.cmd_vel_x_window)
+
+    def run(self, args, context):
+        return run_evaluation(args, context)
+
+
+def main():
+    DERSingleTest().main()
 
 
 if __name__ == '__main__':

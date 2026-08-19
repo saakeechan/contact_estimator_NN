@@ -16,7 +16,9 @@ import torch
 import yaml
 
 from contact_cnn import ContactCNNWithNormalization, TCN, contact_cnn
+from base_test import BaseSingleTest
 from utils.csv2numpyV1 import quaternion_to_rotation_matrix
+from utils.ood_selection import csv_matches_environment_windows, validate_ood_selection
 
 
 # Select one trajectory whose first cmd_vel_x is in this inclusive range.
@@ -29,12 +31,17 @@ OOD_ID_PERCENTILE = 0.95
 UMAP_TRAIN_MAX = 5000
 
 
-def find_random_trajectory(csv_folder, window_size, cmd_vel_x_window, rng):
-    """Read CSVs in random order and return one matching timestamp-delimited trajectory."""
+def find_random_trajectory(csv_folder, window_size, cmd_vel_x_window, rng,
+                           ood_feature='cmd_vel', environment_windows=()):
+    """Read CSVs in random order and return one trajectory matching the configured OOD feature."""
     low, high = cmd_vel_x_window
     csv_files = glob.glob(os.path.join(csv_folder, '*.csv'))
     if not csv_files:
         raise FileNotFoundError(f'No CSV files found in {csv_folder}')
+    if ood_feature == 'environment':
+        csv_files = [path for path in csv_files if csv_matches_environment_windows(path, environment_windows)[0]]
+        if not csv_files:
+            raise ValueError(f'No CSV files in {csv_folder} match environment windows {environment_windows}')
 
     for csv_path in rng.permutation(csv_files):
         df = pd.read_csv(csv_path)
@@ -49,10 +56,11 @@ def find_random_trajectory(csv_folder, window_size, cmd_vel_x_window, rng):
                 continue
 
             start_cmd_vel = trajectory['cmd_vel_x'].iloc[0]
-            if low <= start_cmd_vel <= high:
+            if ood_feature == 'environment' or low <= start_cmd_vel <= high:
                 return trajectory, csv_path, run_index, start_cmd_vel
 
-    raise ValueError(f'No trajectory with at least {window_size} samples starts with cmd_vel_x in [{low}, {high}]')
+    selection = f'environment windows {environment_windows}' if ood_feature == 'environment' else f'cmd_vel_x in [{low}, {high}]'
+    raise ValueError(f'No trajectory with at least {window_size} samples matches {selection}')
 
 
 def make_features(trajectory):
@@ -273,39 +281,18 @@ def save_velocity_plot(time, predicted, ground_truth, contact, output_path):
     plt.close(figure)
 
 
-def main():
-    global RANDOM_SEED, TEST_CMD_VEL_X_WINDOW
-    parser = argparse.ArgumentParser(description='Run one selected CSV trajectory through the contact network.')
-    parser.add_argument('--config_name', default=os.path.join(os.path.dirname(__file__), '../config/network_params.yaml'))
-    parser.add_argument('--seed', type=int, default=RANDOM_SEED)
-    parser.add_argument('--cmd-vel-x-window', type=float, nargs=2, metavar=('MIN', 'MAX'), default=TEST_CMD_VEL_X_WINDOW)
-    parser.add_argument('--metrics-json', help='Optional path for machine-readable evaluation metrics.')
-    parser.add_argument('--skip-umap', action='store_true', help='Compute kNN/OOD metrics without saving a UMAP figure.')
-    parser.add_argument('--save-umap', action='store_true', help='Save the kNN UMAP figure (disabled by default).')
-    parser.add_argument('--knn-cache', help='Optional .npz cache for the invariant training-latent kNN reference.')
-    parser.add_argument('--skip-plots', action='store_true', help='Do not save the per-trajectory velocity plot.')
-    args = parser.parse_args()
-    RANDOM_SEED = args.seed
-    TEST_CMD_VEL_X_WINDOW = tuple(args.cmd_vel_x_window)
-
-    natpn_config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config', 'NatPN_params.yaml')
-    with open(natpn_config_path) as config_file:
-        natpn_config = yaml.safe_load(config_file) or {}
-    with open(args.config_name) as config_file:
-        config = {**natpn_config, **(yaml.safe_load(config_file) or {})}
-    # This evaluator is specifically for the frozen input-latent evidence path.
-    # The checkpoint is resolved below when the base YAML leaves its path empty.
-    config['natpn_evidence_source'] = 'input'
-    low, high = TEST_CMD_VEL_X_WINDOW
-    if low > high:
-        raise ValueError('TEST_CMD_VEL_X_WINDOW must be (min, max) with min <= max')
-
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    csv_folder = config['csv_folder'] if os.path.isabs(config['csv_folder']) else os.path.join(project_root, config['csv_folder'])
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    trajectory, csv_path, run_index, start_cmd_vel = find_random_trajectory(
-        csv_folder, config['window_size'], TEST_CMD_VEL_X_WINDOW, np.random.default_rng(RANDOM_SEED)
-    )
+def run_evaluation(args, context):
+    config = context['config']
+    ood_feature = context['ood_feature']
+    environment_windows = context['environment_windows']
+    low, high = context['cmd_vel_x_window']
+    project_root = context['project_root']
+    device = context['device']
+    trajectory = context['trajectory']
+    csv_path = context['csv_path']
+    run_index = context['run_index']
+    start_cmd_vel = context['start_cmd_vel']
+    environment_id = context['environment_id']
 
     trajectory_features = make_features(trajectory)
     if config.get('natpn_evidence_source', 'task') == 'input' and not config.get('input_natpn_checkpoint'):
@@ -396,7 +383,8 @@ def main():
             save_knn_umap(training_latents, trajectory_latents, knn_distances, ood_mask, knn_k, ood_threshold, umap_output_path)
 
     print(f'CSV: {csv_path}')
-    print(f'Trajectory: {run_index}, start cmd_vel_x: {start_cmd_vel:.4e} m/s, selected range: [{low:.4e}, {high:.4e}]')
+    selection = f'environment {environment_id}, windows: {environment_windows}' if ood_feature == 'environment' else f'cmd_vel_x range: [{low:.4e}, {high:.4e}]'
+    print(f'Trajectory: {run_index}, start cmd_vel_x: {start_cmd_vel:.4e} m/s, selected by {selection}')
     print(f'Random seed: {RANDOM_SEED}, trajectory samples: {len(trajectory)}, evaluated windows: {len(indices)}')
     print(f'Contact-final windows: {contact_mask.sum()} / {len(contact)}')
     print(f'Contact-masked velocity MAE: {mae:.4e}')
@@ -418,6 +406,8 @@ def main():
     if args.metrics_json:
         metrics = {
             'seed': RANDOM_SEED,
+            'ood_feature': ood_feature,
+            'environment': environment_id,
             'cmd_vel_x': float(start_cmd_vel),
             'velocity_mae': float(mae),
             'uncertainty_final_timestep_gt_contact': uncertainty_final_timestep_gt_contact,
@@ -429,6 +419,32 @@ def main():
         }
         with open(args.metrics_json, 'w') as metrics_file:
             json.dump(metrics, metrics_file)
+
+
+class InputNatPNSingleTest(BaseSingleTest):
+    default_seed = RANDOM_SEED
+    default_cmd_vel_x_window = TEST_CMD_VEL_X_WINDOW
+    model_config_name = 'NatPN_params.yaml'
+    find_trajectory = staticmethod(find_random_trajectory)
+
+    def add_model_arguments(self, parser):
+        parser.add_argument('--knn-cache', help='Optional .npz cache for the invariant training-latent kNN reference.')
+        parser.add_argument('--skip-plots', action='store_true', help='Do not save the per-trajectory velocity plot.')
+
+    def configure(self, config):
+        config['natpn_evidence_source'] = 'input'
+        return config
+
+    def set_runtime_values(self, args):
+        global RANDOM_SEED, TEST_CMD_VEL_X_WINDOW
+        RANDOM_SEED, TEST_CMD_VEL_X_WINDOW = args.seed, tuple(args.cmd_vel_x_window)
+
+    def run(self, args, context):
+        return run_evaluation(args, context)
+
+
+def main():
+    InputNatPNSingleTest().main()
 
 
 if __name__ == '__main__':

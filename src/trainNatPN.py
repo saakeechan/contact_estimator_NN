@@ -45,16 +45,10 @@ def supervised_velocity_loss(posteriors, mean, variance, target, loss_type, baye
 
 
 def optimize_natpn_flows(model, dataloader, config, epochs, label):
-    """The input-density flow is pretrained and frozen by trainEncoder.py."""
-    if epochs <= 0 or model.base_model.natpn_evidence_source == 'input':
-        if epochs > 0:
-            print(f'{label}: using frozen input-latent NatPN flow.')
+    """Fit the task-latent NatPN flows with the TCN features frozen."""
+    if epochs <= 0:
         return
-    flows = model.base_model.velocity_heads.models
-    optimizer = optim.Adam(
-        (parameter for natpn_model in flows for parameter in natpn_model.flow.parameters()),
-        lr=config['init_lr'],
-    )
+    optimizer = optim.Adam(model.base_model.velocity_heads.flow.parameters(), lr=config['init_lr'])
     use_dense_supervision = config.get('use_dense_supervision', False)
     for epoch in range(1, epochs + 1):
         model.train()
@@ -188,8 +182,7 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_loss_fn
             if velocity_loss_fn is not None:
                 # Velocity loss on last timestep only, masked to contact samples only
                 velocity_loss_each = supervised_velocity_loss(
-                    posteriors, velocity_output, covariance_output, gt_velocity, velocity_loss_type, velocity_loss_fn,
-                    model.base_model.natpn_evidence_source == 'input'
+                    posteriors, velocity_output, covariance_output, gt_velocity, velocity_loss_type, velocity_loss_fn
                 )
                 
                 velocity_loss_masked = (
@@ -240,7 +233,6 @@ def compute_accuracy(dataloader, model, contact_criterion=None, velocity_loss_fn
         'num_gt_contact': num_gt_contact,
         'total_variance_calibration_ratio': (
             squared_error_sum / (total_variance_sum + 1e-8)
-            if model.base_model.natpn_evidence_source == 'input' else None
         ),
     }
     
@@ -414,8 +406,7 @@ def train(model, train_dataloader, val_dataloader, config):
                 covariance_seq_permuted = covariance_seq.permute(0, 3, 1, 2)  # [B, T, 1, 3]
                 velocity_loss_elementwise = supervised_velocity_loss(
                     posteriors, velocity_seq_permuted, covariance_seq_permuted,
-                    velocity_label_seq, epoch_loss_type, velocity_loss_fn,
-                    model.base_model.natpn_evidence_source == 'input'
+                    velocity_label_seq, epoch_loss_type, velocity_loss_fn
                 )
                 
                 # Use full contact sequence for masking (dense supervision only at contact timesteps)
@@ -428,8 +419,7 @@ def train(model, train_dataloader, val_dataloader, config):
                 # LAST TIMESTEP ONLY: Compute velocity loss only on final output (simpler, faster)
                 velocity_loss_elementwise = supervised_velocity_loss(
                     posteriors, velocity_output, covariance_output,
-                    velocity_label, epoch_loss_type, velocity_loss_fn,
-                    model.base_model.natpn_evidence_source == 'input'
+                    velocity_label, epoch_loss_type, velocity_loss_fn
                 )
                 
                 # Mask to contact samples only (last timestep)
@@ -654,15 +644,6 @@ def main():
         natpn_config = yaml.safe_load(config_file) or {}
     with open(args.config_name) as config_file:
         config = {**natpn_config, **(yaml.safe_load(config_file) or {})}
-    evidence_source = config.get('natpn_evidence_source', 'task')
-    if evidence_source not in {'task', 'input'}:
-        raise ValueError("natpn_evidence_source must be 'task' or 'input'.")
-    if evidence_source == 'input' and config.get('use_dense_supervision', False):
-        raise ValueError('Input-latent NatPN evidence currently supports only use_dense_supervision: false.')
-    if evidence_source == 'input' and not config.get('input_natpn_checkpoint'):
-        raise ValueError('Set input_natpn_checkpoint to the encoder_input_natpn.pt made by trainEncoder.py.')
-
-
     # Load num_features from data metadata (source of truth)
     metadata_path = config['data_folder'] + "all_data_metadata.npy"
     if os.path.exists(metadata_path):
@@ -782,11 +763,9 @@ def main():
             tcn_kernel_size=config.get('tcn_kernel_size', 3),
             tcn_num_blocks=config.get('tcn_num_blocks', 5),
             tcn_dropout=config.get('tcn_dropout', 0.2),
+            natpn_flow_type=config.get('natpn_flow_type', 'radial'),
             natpn_flow_layers=config.get('natpn_flow_layers', 8),
             natpn_certainty_budget=config.get('natpn_certainty_budget', 'normal'),
-            natpn_evidence_source=evidence_source,
-            input_natpn_checkpoint=config.get('input_natpn_checkpoint'),
-            input_epistemic_scale=config.get('input_epistemic_scale', 1.0),
         )
 
     elif model_arch == 'vanilla_cnn':

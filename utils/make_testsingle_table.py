@@ -4,7 +4,9 @@ import csv
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.colors import Normalize
 
 
 def number(value, digits=4):
@@ -22,22 +24,36 @@ def main():
     parser.add_argument('--input-csv', type=Path)
     parser.add_argument('--output-pdf', type=Path)
     parser.add_argument('--output-plot', type=Path)
+    parser.add_argument('--plot-metric', choices=('epistemic', 'negative-log-density'), default='epistemic')
     args = parser.parse_args()
 
     input_csv = args.input_csv or max((root / 'logs').glob('testsingle_seed_sweep_*.csv'), key=lambda path: path.stat().st_mtime)
     output_pdf = args.output_pdf or input_csv.with_suffix('.pdf')
-    output_plot = args.output_plot or input_csv.with_name(f'{input_csv.stem}_mean_epistemic_vs_cmd_vel.png')
     with open(input_csv, newline='') as csv_file:
         rows = list(csv.DictReader(csv_file))
     if not rows:
         raise ValueError(f'No rows in {input_csv}')
+    ood_feature = rows[0].get('ood_feature', 'cmd_vel')
+    if any(row.get('ood_feature', ood_feature) != ood_feature for row in rows):
+        raise ValueError('All rows must use the same ood_feature to create one comparison plot.')
+    if ood_feature not in {'cmd_vel', 'environment'}:
+        raise ValueError(f'Unsupported ood_feature: {ood_feature}')
+    feature_label = 'Environment' if ood_feature == 'environment' else 'Cmd vel'
+    feature_column = 'environment' if ood_feature == 'environment' else 'cmd_vel_x'
+    output_suffix = 'environment' if ood_feature == 'environment' else 'cmd_vel'
+    metric_label = 'Mean epistemic variance' if args.plot_metric == 'epistemic' else 'Negative log density'
+    metric_suffix = 'mean_epistemic' if args.plot_metric == 'epistemic' else 'negative_log_density'
+    output_plot = args.output_plot or input_csv.with_name(f'{input_csv.stem}_{metric_suffix}_vs_{output_suffix}.png')
 
-    headers = ['Seed', 'Cmd vel', 'MAE', 'GT contact', 'Aleatoric variance [vx, vy, vz]',
+    headers = ['Seed', feature_label, 'MAE', 'GT contact', 'Aleatoric variance [vx, vy, vz]',
                'Epistemic variance [vx, vy, vz]', 'kNN OOD']
     table_rows = []
     for row in rows:
-        ood = f"{row['knn_ood_windows']}/{row['knn_total_windows']} = {100 * float(row['knn_ood_percentage_total_windows']):.2f}%"
-        table_rows.append([row['seed'], number(row['cmd_vel_x']), number(row['velocity_mae'], 5),
+        ood = 'Not run' if row['knn_ood_windows'] == '' else (
+            f"{row['knn_ood_windows']}/{row['knn_total_windows']} = "
+            f"{100 * float(row['knn_ood_percentage_total_windows']):.2f}%"
+        )
+        table_rows.append([row['seed'], number(row[feature_column]), number(row['velocity_mae'], 5),
                            row['uncertainty_final_timestep_gt_contact'], vector(row, 'aleatoric'),
                            vector(row, 'epistemic'), ood])
 
@@ -57,13 +73,30 @@ def main():
             pdf.savefig(figure, bbox_inches='tight')
             plt.close(figure)
 
-    cmd_velocity = [float(row['cmd_vel_x']) for row in rows]
-    mean_epistemic = [sum(float(row[f'epistemic_v{axis}']) for axis in 'xyz') / 3 for row in rows]
-    velocity_mae = [float(row['velocity_mae']) for row in rows]
+    feature_values = np.asarray([float(row[feature_column]) for row in rows])
+    plot_values = np.asarray(
+        [sum(float(row[f'epistemic_v{axis}']) for axis in 'xyz') / 3 for row in rows]
+        if args.plot_metric == 'epistemic'
+        else [float(row['negative_log_density']) for row in rows]
+    )
+    velocity_mae = np.asarray([float(row['velocity_mae']) for row in rows])
+    finite_mae = velocity_mae[np.isfinite(velocity_mae)]
+    finite_plot = plot_values[np.isfinite(plot_values)]
+    mae_max = np.percentile(finite_mae, 95)
+    y_min, y_max = finite_plot.min(), np.percentile(finite_plot, 95)
+    if args.plot_metric == 'epistemic':
+        y_min = max(y_min, 1e-8)
+    y_max = max(y_max, y_min * (1.01 if args.plot_metric == 'epistemic' else 1.0) + 1e-12)
+
     figure, axis = plt.subplots(figsize=(9, 6))
-    points = axis.scatter(cmd_velocity, mean_epistemic, c=velocity_mae, cmap='viridis')
-    figure.colorbar(points, ax=axis, label='Contact-masked velocity MAE')
-    axis.set(xlabel='Command velocity x (m/s)', ylabel='Mean epistemic variance', yscale='log')
+    points = axis.scatter(
+        feature_values, plot_values, c=velocity_mae, cmap='viridis',
+        norm=Normalize(vmin=finite_mae.min(), vmax=mae_max, clip=True),
+    )
+    figure.colorbar(points, ax=axis, extend='max', label='Contact-masked velocity MAE (95th-percentile cap)')
+    x_label = 'Environment number' if ood_feature == 'environment' else 'Command velocity x (m/s)'
+    axis.set(xlabel=x_label, ylabel=metric_label, yscale='log' if args.plot_metric == 'epistemic' else 'linear')
+    axis.set_ylim(y_min, y_max)
     axis.grid(True, which='both', alpha=0.3)
     figure.tight_layout()
     figure.savefig(output_plot, dpi=150)

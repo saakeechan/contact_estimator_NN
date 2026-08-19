@@ -97,7 +97,7 @@ def compute_accuracy(dataloader, model, device=torch.device('cpu')):
     per_leg_mse = (velocity_sq_error_sum / (num_contact_samples[:, None] + 1e-8)).cpu().numpy()
     metrics = {
         'velocity_mae': float(velocity_abs_error_sum.sum().item() / (num_contact_samples.sum().item() * 3 + 1e-8)),
-        'velocity_mse': float(velocity_sq_error_sum.sum().item() / (num_contact_samples.sum().item() * 3 + 1e-8)),
+        'velocity_rmse': float(torch.sqrt(velocity_sq_error_sum.sum() / (num_contact_samples.sum() * 3 + 1e-8))),
         'contact_accuracy': float(contact_accuracy),
         'contact_precision': float(contact_precision),
         'contact_recall': float(contact_recall),
@@ -112,9 +112,9 @@ def compute_accuracy(dataloader, model, device=torch.device('cpu')):
         )
         metrics['per_leg'][leg] = {
             'velocity_mae': float(per_leg_mae[index].mean()),
-            'velocity_mse': float(per_leg_mse[index].mean()),
+            'velocity_rmse': float(np.sqrt(per_leg_mse[index].mean())),
             'velocity_mae_components': per_leg_mae[index],
-            'velocity_mse_components': per_leg_mse[index],
+            'velocity_rmse_components': np.sqrt(per_leg_mse[index]),
             'contact_accuracy': float(accuracy),
             'contact_precision': float(precision),
             'contact_recall': float(recall),
@@ -267,11 +267,9 @@ def main():
             tcn_kernel_size=config.get('tcn_kernel_size', 3),
             tcn_num_blocks=config.get('tcn_num_blocks', 5),
             tcn_dropout=config.get('tcn_dropout', 0.2),
+            natpn_flow_type=config.get('natpn_flow_type', 'radial'),
             natpn_flow_layers=config.get('natpn_flow_layers', 8),
             natpn_certainty_budget=config.get('natpn_certainty_budget', 'normal'),
-            natpn_evidence_source=config.get('natpn_evidence_source', 'task'),
-            input_natpn_checkpoint=config.get('input_natpn_checkpoint'),
-            input_epistemic_scale=config.get('input_epistemic_scale', 1.0),
         )
     elif model_arch == 'vanilla_cnn':
         base_model = contact_cnn(window_size=config['window_size'], num_features=num_features)
@@ -335,8 +333,7 @@ def main():
     
     print("\nBody-Velocity Regression Metrics (on contact samples, last timestep only):")
     print("  Velocity MAE: %.6f" % metrics['velocity_mae'])
-    print("  Velocity MSE: %.6f" % metrics['velocity_mse'])
-    print("  Velocity RMSE: %.6f" % np.sqrt(metrics['velocity_mse']))
+    print("  Velocity RMSE: %.6f" % metrics['velocity_rmse'])
     for leg, leg_metrics in metrics['per_leg'].items():
         print(f"\n{leg.capitalize()}:")
         print("  Contact Accuracy:  %.4f" % leg_metrics['contact_accuracy'])
@@ -345,8 +342,8 @@ def main():
         print("  Contact F1:        %.4f" % leg_metrics['contact_f1'])
         print("  Velocity MAE:      %.6f [vx, vy, vz: %.6f, %.6f, %.6f]" % (
             leg_metrics['velocity_mae'], *leg_metrics['velocity_mae_components']))
-        print("  Velocity MSE:      %.6f [vx, vy, vz: %.6f, %.6f, %.6f]" % (
-            leg_metrics['velocity_mse'], *leg_metrics['velocity_mse_components']))
+        print("  Velocity RMSE:     %.6f [vx, vy, vz: %.6f, %.6f, %.6f]" % (
+            leg_metrics['velocity_rmse'], *leg_metrics['velocity_rmse_components']))
     print("="*60)
     
 

@@ -2,6 +2,7 @@ import cmd
 import os
 import argparse
 import glob
+import re
 import sys
 sys.path.append('.')
 import numpy as np
@@ -9,7 +10,23 @@ import pandas as pd
 import yaml
 
 
-def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel_x_windows=((0.0, 2.0),)):
+def environment_number_from_filename(data_name):
+    """Extract an environment ID from a CSV filename.
+
+    Supported examples include ``robotstate_0.csv``, ``run_env5.csv``, and
+    ``run_environment_12.csv``.  For names without an ``env`` marker, the
+    final underscore-delimited number is treated as the environment ID.
+    """
+    stem = os.path.splitext(os.path.basename(data_name))[0]
+    match = re.search(r'(?:^|_)(?:env|environment)_?\(?(\d+)\)?(?:_|$)', stem, re.IGNORECASE)
+    if match is None:
+        match = re.search(r'_(\d+)$', stem)
+    return int(match.group(1)) if match else None
+
+
+def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15,
+                    cmd_vel_x_windows=((0.0, 2.0),), ood_feature='cmd_vel',
+                    environment_windows=((0, 0),)):
     """
     Load data from CSV files and concatenate into single numpy arrays.
     
@@ -68,6 +85,16 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
     
     # Process all CSV files in the folder
     for data_name in sorted(glob.glob(data_pth + '*.csv')):
+        if ood_feature == 'environment':
+            environment_number = environment_number_from_filename(data_name)
+            if environment_number is None:
+                raise ValueError(
+                    f'Cannot determine environment number from CSV filename: {data_name}. '
+                    'Use a name ending in _<number>.csv or containing env<number>.')
+            if not any(low <= environment_number <= high for low, high in environment_windows):
+                print(f"Skipping {data_name} (environment {environment_number} outside {environment_windows})")
+                continue
+
         print("loading... ", data_name)
         
         # Load CSV data
@@ -100,8 +127,9 @@ def csv2numpy_split(data_pth, save_pth, train_ratio=0.7, val_ratio=0.15, cmd_vel
                 # print(f"  Skipping run {run_idx} (only {len(df_run)} sample)")
                 continue
             
-            # Keep runs whose maximum cmd_vel_x belongs to any configured window.
-            if 'command_twist_linear_x' in df_run.columns:
+            # When filtering by command velocity, keep runs whose maximum
+            # cmd_vel_x belongs to any configured window.
+            if ood_feature == 'cmd_vel' and 'command_twist_linear_x' in df_run.columns:
                 max_cmd_vel = df_run['command_twist_linear_x'].max()
                 if not any(low <= max_cmd_vel <= high for low, high in cmd_vel_x_windows):
                     # print(f"  Skipping run {run_idx} (max cmd_vel_x={max_cmd_vel:.2f} outside {cmd_vel_x_windows})")
@@ -239,21 +267,28 @@ def main():
     config.setdefault('save_path', config['data_folder'])  # Use data_folder if save_path not set
     config.setdefault('train_ratio', 0.7)
     config.setdefault('val_ratio', 0.15)
-    cmd_vel_x_windows = config.get('cmd_vel_x_windows', [[0.0, 2.0]])
-    if not cmd_vel_x_windows or not all(isinstance(window, (list, tuple)) and len(window) == 2 and window[0] <= window[1]
-               for window in cmd_vel_x_windows):
-        raise ValueError('cmd_vel_x_windows must be a non-empty list of [min, max] windows with min <= max')
+    ood_feature = config.get('ood_feature', 'cmd_vel')
+    if ood_feature not in ('cmd_vel', 'environment'):
+        raise ValueError("ood_feature must be either 'cmd_vel' or 'environment'")
+    window_key = 'cmd_vel_x_windows' if ood_feature == 'cmd_vel' else 'environment_windows'
+    windows = config.get(window_key, [[0.0, 2.0]] if ood_feature == 'cmd_vel' else [[0, 0]])
+    if not windows or not all(isinstance(window, (list, tuple)) and len(window) == 2 and window[0] <= window[1]
+                              for window in windows):
+        raise ValueError(f'{window_key} must be a non-empty list of [min, max] windows with min <= max')
     
     print("Using configuration:")
     print(f"  CSV folder: {config['csv_folder']}")
     print(f"  Save path: {config['save_path']}")
     print(f"  Train ratio: {config['train_ratio']}")
     print(f"  Val ratio: {config['val_ratio']}")
-    print(f"  Command-velocity windows: {cmd_vel_x_windows}")
+    print(f"  OOD feature: {ood_feature}")
+    print(f"  {'Command-velocity' if ood_feature == 'cmd_vel' else 'Environment'} windows: {windows}")
     
     csv2numpy_split(config['csv_folder'], config['save_path'],
                     config['train_ratio'], config['val_ratio'],
-                    cmd_vel_x_windows)
+                    cmd_vel_x_windows=windows if ood_feature == 'cmd_vel' else (),
+                    ood_feature=ood_feature,
+                    environment_windows=windows if ood_feature == 'environment' else ())
 
 
 if __name__ == '__main__':

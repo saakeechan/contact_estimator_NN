@@ -45,25 +45,17 @@ python3 src/test.py
 ### 8. Test One Trajectory
 Run the single-trajectory evaluation:
 ```bash
-python3 src/testSingle.py
+python3 src/testSingleNatPN.py
 ```
 
-### 9. Run NatPN Seed Sweep
+### 9. Run a Seed Sweep
 ```bash
-python3 utils/testSeriesNatPN.py
-```
-
-### 10. Run DER Seed Sweep
-```bash
-python3 utils/testSeriesDER.py
-```
-
-### 11. Run Encoder Seed Sweep
-```bash
-python3 utils/testSeriesEncoder.py
+python3 utils/testSeries.py
 ```
 
 Each seed sweep writes a CSV, PDF table, and aggregate plot under `testResults/`.
+Select the model, seed range, OOD feature, and command-velocity/environment windows
+at the top of `utils/testSeries.py`.
 The default CSV names include the network and inclusive seed range, such as
 `natpn_seeds_500-600.csv`, `der_seeds_500-600.csv`, and `encoder_seeds_2800-2851.csv`.
 
@@ -79,3 +71,10 @@ Training runs create timestamped directories in `logs/`, `logsNatPN/`, `logsDER/
 
 General settings are in `config/network_params.yaml`; NatPN settings are in
 `config/NatPN_params.yaml`. The utility, training, and test commands load both.
+
+
+
+## TO-DO
+1. Learn alternating optimization for bayesian while flow is frozen and flow while task encoder is frozen
+2. Reformulate the whole bayesian structure because you dont really have prior over mean. Look into IG distributions and get lambda from normalizing flow
+3. Look at the 3 losses, chatpgt gave vs papers, and understand the difference

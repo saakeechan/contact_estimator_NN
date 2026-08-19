@@ -5,6 +5,8 @@ logsEncoder/
 logsDER/
 logsNatPN/
 inference_results/
+NATPN/
+
 .vscode
 *.txt
 Data/
