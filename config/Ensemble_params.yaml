@@ -1,0 +1,3 @@
+# Deep-ensemble-only settings. General data, training, and architecture settings
+# are loaded from network_params.yaml.
+num_ensemble_members: 5

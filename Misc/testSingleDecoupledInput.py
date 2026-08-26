@@ -16,7 +16,7 @@ import torch
 import yaml
 
 from contact_cnn import ContactCNNWithNormalization, TCN, contact_cnn
-from base_test import BaseSingleTest
+from tests.base_test import BaseSingleTest
 from utils.csv2numpyV1 import quaternion_to_rotation_matrix
 from utils.ood_selection import csv_matches_environment_windows, validate_ood_selection
 

@@ -16,7 +16,7 @@ import torch
 import yaml
 
 from contact_cnn import DenoisingTCNAutoencoder
-from base_test import BaseSingleTest
+from tests.base_test import BaseSingleTest
 from Misc.trainEncoder import VariationalTCNAutoencoder, encoder_latent
 from utils.ood_selection import csv_matches_environment_windows, validate_ood_selection
 

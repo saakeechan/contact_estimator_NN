@@ -82,10 +82,8 @@ def main():
     velocity_mae = np.asarray([float(row['velocity_mae']) for row in rows])
     finite_mae = velocity_mae[np.isfinite(velocity_mae)]
     finite_plot = plot_values[np.isfinite(plot_values)]
-    mae_max = np.percentile(finite_mae, 95)
-    y_min, y_max = finite_plot.min(), np.percentile(finite_plot, 95)
-    if args.plot_metric == 'epistemic':
-        y_min = max(y_min, 1e-8)
+    mae_max = np.percentile(finite_mae, 99)
+    y_min, y_max = finite_plot.min(), finite_plot.max()  # Temporary: show the full epistemic range.
     y_max = max(y_max, y_min * (1.01 if args.plot_metric == 'epistemic' else 1.0) + 1e-12)
 
     figure, axis = plt.subplots(figsize=(9, 6))

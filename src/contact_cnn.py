@@ -20,7 +20,7 @@ if str(NATPN_ROOT) not in sys.path:
 from natpn.nn.flow import MaskedAutoregressiveFlow, RadialFlow
 from natpn.nn.output import NormalOutput
 from natpn.nn.scaler import EvidenceScaler
-from natpn.distributions.normal import NormalGamma
+from natpn.distributions import PosteriorUpdate
 
 
 def make_velocity_heads(num_features):
@@ -108,11 +108,8 @@ class NatPNVelocityHeads(nn.Module):
         evidence = log_evidence.exp()
         likelihoods = [output(inputs) for output in self.outputs]
         posteriors = [
-            NormalGamma(
-                likelihood.mean(),
-                output.prior.evidence + evidence,
-                output.prior.alpha + 0.5 * evidence,
-                output.prior.beta + 0.5 * evidence * likelihood.precision.reciprocal(),
+            output.prior.update(
+                PosteriorUpdate(likelihood.expected_sufficient_statistics(), log_evidence)
             )
             for output, likelihood in zip(self.outputs, likelihoods)
         ]
@@ -347,6 +344,30 @@ class DERTCN(nn.Module):
         contact_out = torch.cat([self.contact_heads[leg](features[:, :, -1]) for leg in LEGS], dim=1)
         outputs = velocity_seq, velocity_out, covariance_seq, covariance_out, contact_out
         return (*outputs, nig_params) if return_posteriors else outputs
+
+
+class EnsembleTCN(nn.Module):
+    """TCN member for a deep ensemble with Gaussian velocity likelihoods."""
+    def __init__(self, window_size=10, num_features=12, tcn_num_channels=64,
+                 tcn_kernel_size=3, tcn_num_blocks=5, tcn_dropout=0.2):
+        super().__init__()
+        self.num_features = num_features
+        self.window_size = window_size
+        self.input_proj = nn.Conv1d(num_features, tcn_num_channels, kernel_size=1)
+        self.tcn_backbone = nn.Sequential(*[
+            TCNResidualBlock(tcn_num_channels, tcn_num_channels, tcn_kernel_size, 2 ** i, tcn_dropout)
+            for i in range(tcn_num_blocks)
+        ])
+        self.velocity_heads = make_velocity_heads(tcn_num_channels)
+        self.contact_heads = make_contact_heads(tcn_num_channels)
+
+    def forward(self, x, return_sequence=True, **_):
+        features = self.tcn_backbone(self.input_proj(x.permute(0, 2, 1)))
+        velocity_seq, velocity_out, covariance_seq, covariance_out = predict_velocity(
+            self.velocity_heads, features, return_sequence
+        )
+        contact_out = torch.cat([self.contact_heads[leg](features[:, :, -1]) for leg in LEGS], dim=1)
+        return velocity_seq, velocity_out, covariance_seq, covariance_out, contact_out
 
 
 class CausalConv1d(nn.Module):

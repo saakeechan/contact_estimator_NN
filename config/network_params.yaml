@@ -5,7 +5,7 @@ csv_folder: "Data/CSVFiles/"
 ood_feature: "cmd_vel"
 
 # Add as many [min, max] windows as needed, e.g. [[0.0, 0.5], [1.0, 2.0]].
-cmd_vel_x_windows: [[0.0, 2.0]]
+cmd_vel_x_windows: [[0.0, 1.0]]
 # Example for environment OOD: [[0, 4], [6, 20]] includes 0-4 and 6-20, excluding 5.
 environment_windows: [[0, 10]]
 # Path to the data folder. Data should be separated into train.npy, train_label.npy, val.npy, val_label.npy.

@@ -1,7 +1,12 @@
 # Task-latent NatPN settings.
-natpn_flow_type: "masked_autoregressive"  # "radial" or "masked_autoregressive"
+natpn_flow_type: "radial"  # "radial" or "masked_autoregressive"
 natpn_flow_layers: 8
-natpn_certainty_budget: "constant"
+# Evidence: n = exp(clamp(flow_log_density + log_scale, -30, 30)); H = latent dimension.
+# "constant": log_scale = 0, budget = 1.
+# "exp-half": log_scale = H / 2, budget = exp(H / 2).
+# "exp": log_scale = H, budget = exp(H).
+# "normal": log_scale = log(4*pi)*H / 2, budget = exp(log(4*pi)*H / 2).
+natpn_certainty_budget: "constant"  # "constant", "exp-half", "exp", or "normal"
 natpn_entropy_weight: 1.0e-5
 natpn_warmup_epochs: 5
 natpn_finetune_epochs: 10

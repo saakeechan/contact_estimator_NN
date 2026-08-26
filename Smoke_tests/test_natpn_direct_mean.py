@@ -11,8 +11,8 @@ class SelectSecondFeature(nn.Module):
         return inputs[:, 1]
 
 
-class NatPNDirectMeanTest(unittest.TestCase):
-    def test_evidence_changes_uncertainty_not_mean(self):
+class NatPNPriorWeightedMeanTest(unittest.TestCase):
+    def test_evidence_weights_likelihood_and_prior_means(self):
         heads = NatPNVelocityHeads(latent_dim=2, flow_layers=1)
         heads.flow = SelectSecondFeature()
         heads.scaler = nn.Identity()
@@ -25,9 +25,9 @@ class NatPNDirectMeanTest(unittest.TestCase):
         features = torch.tensor([[[3.0], [0.0]], [[3.0], [torch.log(torch.tensor(4.0))]]])
         _, means, _, _, posteriors = heads(features, return_sequence=False)
 
-        self.assertTrue(torch.allclose(means[..., 0], torch.tensor([[3.0], [3.0]])))
+        self.assertTrue(torch.allclose(means[..., 0], torch.tensor([[2.25], [36.0 / 13.0]])))
         self.assertTrue(torch.allclose(posteriors[0].lambd, torch.tensor([4.0 / 3.0, 13.0 / 3.0])))
-        self.assertTrue(torch.allclose(posteriors[0].beta, torch.tensor([1.5, 3.0])))
+        self.assertTrue(torch.allclose(posteriors[0].beta, torch.tensor([2.625, 57.0 / 13.0])))
 
 
 if __name__ == '__main__':

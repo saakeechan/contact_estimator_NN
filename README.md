@@ -77,4 +77,5 @@ General settings are in `config/network_params.yaml`; NatPN settings are in
 ## TO-DO
 1. Learn alternating optimization for bayesian while flow is frozen and flow while task encoder is frozen
 2. Reformulate the whole bayesian structure because you dont really have prior over mean. Look into IG distributions and get lambda from normalizing flow
-3. Look at the 3 losses, chatpgt gave vs papers, and understand the difference
+    I just maintain a flat prior by doing small prior lambda
+3. Look at expectation of log vs log of expectation
