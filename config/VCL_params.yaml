@@ -1,0 +1,36 @@
+# Ordered continual-learning tasks over cmd_vel_x. Each range is [low, high).
+continual_feature: "cmd_vel_x"
+continual_task_windows:
+  - [0.0, 1.0]
+  - [1.0, 2.0]
+  - [2.0, 3.0]
+evaluation_window: [0.0, 3.0]
+
+# Bayes-by-Backprop posterior q(w) = Normal(mu, softplus(rho)^2).
+# Task 0 prior: pi Normal(0, exp(-sig1)^2) + (1-pi) Normal(0, exp(-sig2)^2).
+# Thereafter, VCL uses a detached copy of the completed task posterior as the
+# Gaussian prior for the next task; that snapshot is included in each checkpoint.
+ucb_rho: -3.0
+ucb_sig1: 0.0
+ucb_sig2: 6.0
+ucb_pi: 0.25
+ucb_mc_samples: 10
+
+# Fraction of each full task to use before its run-disjoint train/validation split.
+# `train_ratio` in network_params.yaml controls that split (0.9 train / 0.1 validation).
+ucb_data_fraction: 0.7
+
+# BBB optimizer. Task 0 uses alpha0. After every task, Algorithm 2 carries
+# each mean rate forward as alpha_mu <- alpha_mu * softplus(rho); alpha_rho
+# remains alpha. The per-weight mean-rate state is saved in each checkpoint.
+ucb_init_lr: 1.0e-3
+ucb_gradient_clip_norm: 10.0
+ucb_lr_patience: 5
+ucb_lr_factor: 3.0
+ucb_min_lr: 1.0e-6
+ucb_max_lr_updates: 3
+
+# Optional lightweight series evaluation after every completed task checkpoint.
+ucb_evaluate_after_task: true
+ucb_evaluation_first_seed: 000
+ucb_evaluation_last_seed: 100 

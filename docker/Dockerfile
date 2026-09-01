@@ -5,7 +5,7 @@ LABEL version="0.7"
 USER root
 
 ENV NVIDIA_VISIBLE_DEVICES=all
-ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,display
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y \
@@ -13,6 +13,11 @@ RUN apt-get update && apt-get install -y \
     cmake \
     vim \
     git-all \
+    libegl1 \
+    libgl1 \
+    libgl1-mesa-dri \
+    libosmesa6 \
+    libxcursor1 \
     python3-dev \
     python3-venv \
  && rm -rf /var/lib/apt/lists/*
@@ -33,6 +38,7 @@ RUN python -m pip install --no-cache-dir \
     onnxscript \
     tqdm \
     pyyaml \
-    matplotlib
+    matplotlib \
+    pyvista
 
 RUN python -c "import torch, umap; print(torch.__version__); print(torch.cuda.is_available()); print(umap.__version__)"

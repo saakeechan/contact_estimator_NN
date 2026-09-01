@@ -2,12 +2,18 @@
 import argparse
 import json
 import os
+import sys
+from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_ROOT))
+sys.path.insert(0, str(_ROOT / 'src'))
 
 import numpy as np
 import torch
 import yaml
 
-from utils.ood_selection import csv_matches_environment_windows, validate_ood_selection
+from tests.ood_selection import csv_matches_environment_windows, validate_ood_selection
 
 
 class BaseSingleTest:
@@ -30,6 +36,7 @@ class BaseSingleTest:
         parser.add_argument('--skip-umap', action='store_true', help='Compute kNN/OOD metrics without saving a UMAP figure.')
         parser.add_argument('--save-umap', action='store_true', help='Save the kNN UMAP figure (disabled by default).')
         parser.add_argument('--skip-knn', action='store_true', help='Do not run kNN/OOD evaluation.')
+        parser.add_argument('--quiet', action='store_true', help='Suppress per-trajectory evaluation output.')
         self.add_model_arguments(parser)
         return parser
 
@@ -316,7 +323,7 @@ class ProbabilisticVelocitySingleTest(BaseSingleTest):
         features = self.make_features(trajectory)
         if model is None:
             model = self.build_model(config, features.shape[1]).to(device)
-            checkpoint_path = self.find_checkpoint(features.shape[1], config)
+            checkpoint_path = checkpoint_path or self.find_checkpoint(features.shape[1], config)
             model.load_state_dict(torch.load(checkpoint_path, map_location=device)['model_state_dict'])
             model.eval()
         indices, predicted, variance, _, contact, ground_truth = self.run_trajectory(model, trajectory, config['window_size'], config.get('test_batch_size', config['batch_size']), device)
@@ -335,16 +342,18 @@ class ProbabilisticVelocitySingleTest(BaseSingleTest):
                                self.get_training_window_starts, self.collect_final_tcn_latents, save_plot,
                                self.knn_k, self.ood_id_percentile)
         mae = float(np.abs(predicted[contact_mask] - ground_truth[contact_mask]).mean()) if contact_mask.any() else float('nan')
-        print(f"CSV: {context['csv_path']}")
-        print(f"Random seed: {args.seed}, trajectory samples: {len(trajectory)}, evaluated windows: {len(indices)}")
-        print(f'Contact-final windows: {contact_mask.sum()} / {len(contact)}')
-        print(f'Contact-masked velocity MAE: {mae:.4e}')
-        print(f'Aleatoric variance [vx, vy, vz]: {aleatoric.tolist()}')
-        print(f'Epistemic variance [vx, vy, vz]: {epistemic.tolist()}')
-        if knn:
-            print(f"KNN reference windows: {len(knn['training_latents'])}, K: {knn['knn_k']}, OOD windows: {knn['ood_mask'].sum()}")
+        if not getattr(args, 'quiet', False):
+            print(f"CSV: {context['csv_path']}")
+            print(f"Random seed: {args.seed}, trajectory samples: {len(trajectory)}, evaluated windows: {len(indices)}")
+            print(f'Contact-final windows: {contact_mask.sum()} / {len(contact)}')
+            print(f'Contact-masked velocity MAE: {mae:.4e}')
+            print(f'Aleatoric variance [vx, vy, vz]: {aleatoric.tolist()}')
+            print(f'Epistemic variance [vx, vy, vz]: {epistemic.tolist()}')
+            if knn:
+                print(f"KNN reference windows: {len(knn['training_latents'])}, K: {knn['knn_k']}, OOD windows: {knn['ood_mask'].sum()}")
         metrics = {
             'seed': args.seed, 'ood_feature': context['ood_feature'], 'environment': context['environment_id'],
+            'run_index': context['run_index'],
             'cmd_vel_x': float(context['start_cmd_vel']),
             'velocity_mae': mae,
             'uncertainty_final_timestep_gt_contact': bool(contact[position] == 1),

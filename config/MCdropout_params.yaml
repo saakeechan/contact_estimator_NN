@@ -1,0 +1,5 @@
+# Monte-Carlo-dropout settings.  Each stochastic pass returns a Gaussian
+# velocity likelihood; its variance is aleatoric and variance across passes is
+# epistemic.
+mc_dropout_rate: 0.2
+mc_dropout_samples: 50

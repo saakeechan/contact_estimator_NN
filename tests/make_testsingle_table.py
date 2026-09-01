@@ -24,7 +24,9 @@ def main():
     parser.add_argument('--input-csv', type=Path)
     parser.add_argument('--output-pdf', type=Path)
     parser.add_argument('--output-plot', type=Path)
-    parser.add_argument('--plot-metric', choices=('epistemic', 'negative-log-density'), default='epistemic')
+    parser.add_argument('--save-pdf', action='store_true', help='Write the PDF table.')
+    parser.add_argument('--save-plot', action='store_true', help='Write the PNG plot.')
+    parser.add_argument('--plot-metric', choices=('epistemic', 'negative-log-density', 'velocity-mae'), default='epistemic')
     args = parser.parse_args()
 
     input_csv = args.input_csv or max((root / 'logs').glob('testsingle_seed_sweep_*.csv'), key=lambda path: path.stat().st_mtime)
@@ -41,8 +43,10 @@ def main():
     feature_label = 'Environment' if ood_feature == 'environment' else 'Cmd vel'
     feature_column = 'environment' if ood_feature == 'environment' else 'cmd_vel_x'
     output_suffix = 'environment' if ood_feature == 'environment' else 'cmd_vel'
-    metric_label = 'Mean epistemic variance' if args.plot_metric == 'epistemic' else 'Negative log density'
-    metric_suffix = 'mean_epistemic' if args.plot_metric == 'epistemic' else 'negative_log_density'
+    metric_label = {'epistemic': 'Mean epistemic variance', 'negative-log-density': 'Negative log density',
+                    'velocity-mae': 'Contact-masked velocity MAE'}[args.plot_metric]
+    metric_suffix = {'epistemic': 'mean_epistemic', 'negative-log-density': 'negative_log_density',
+                     'velocity-mae': 'velocity_mae_vs_cmd_vel'}[args.plot_metric]
     output_plot = args.output_plot or input_csv.with_name(f'{input_csv.stem}_{metric_suffix}_vs_{output_suffix}.png')
 
     headers = ['Seed', feature_label, 'MAE', 'GT contact', 'Aleatoric variance [vx, vy, vz]',
@@ -57,27 +61,29 @@ def main():
                            row['uncertainty_final_timestep_gt_contact'], vector(row, 'aleatoric'),
                            vector(row, 'epistemic'), ood])
 
-    with PdfPages(output_pdf) as pdf:
-        for first in range(0, len(table_rows), 16):
-            figure, axis = plt.subplots(figsize=(16, 8.5))
-            axis.axis('off')
-            table = axis.table(
-                cellText=table_rows[first:first + 16], colLabels=headers, loc='center',
-                colWidths=[0.05, 0.08, 0.08, 0.07, 0.25, 0.25, 0.14],
-            )
-            table.auto_set_font_size(False)
-            table.set_fontsize(7)
-            table.scale(1, 1.65)
-            figure.suptitle(f'{input_csv.stem} ({first + 1}-{min(first + 16, len(table_rows))} of {len(table_rows)})')
-            figure.tight_layout()
-            pdf.savefig(figure, bbox_inches='tight')
-            plt.close(figure)
+    if args.save_pdf:
+        with PdfPages(output_pdf) as pdf:
+            for first in range(0, len(table_rows), 16):
+                figure, axis = plt.subplots(figsize=(16, 8.5))
+                axis.axis('off')
+                table = axis.table(
+                    cellText=table_rows[first:first + 16], colLabels=headers, loc='center',
+                    colWidths=[0.05, 0.08, 0.08, 0.07, 0.25, 0.25, 0.14],
+                )
+                table.auto_set_font_size(False)
+                table.set_fontsize(7)
+                table.scale(1, 1.65)
+                figure.suptitle(f'{input_csv.stem} ({first + 1}-{min(first + 16, len(table_rows))} of {len(table_rows)})')
+                figure.tight_layout()
+                pdf.savefig(figure, bbox_inches='tight')
+                plt.close(figure)
 
     feature_values = np.asarray([float(row[feature_column]) for row in rows])
     plot_values = np.asarray(
         [sum(float(row[f'epistemic_v{axis}']) for axis in 'xyz') / 3 for row in rows]
-        if args.plot_metric == 'epistemic'
-        else [float(row['negative_log_density']) for row in rows]
+        if args.plot_metric == 'epistemic' else
+        [float(row['negative_log_density']) for row in rows] if args.plot_metric == 'negative-log-density' else
+        [float(row['velocity_mae']) for row in rows]
     )
     velocity_mae = np.asarray([float(row['velocity_mae']) for row in rows])
     finite_mae = velocity_mae[np.isfinite(velocity_mae)]
@@ -86,21 +92,29 @@ def main():
     y_min, y_max = finite_plot.min(), finite_plot.max()  # Temporary: show the full epistemic range.
     y_max = max(y_max, y_min * (1.01 if args.plot_metric == 'epistemic' else 1.0) + 1e-12)
 
-    figure, axis = plt.subplots(figsize=(9, 6))
-    points = axis.scatter(
-        feature_values, plot_values, c=velocity_mae, cmap='viridis',
-        norm=Normalize(vmin=finite_mae.min(), vmax=mae_max, clip=True),
-    )
-    figure.colorbar(points, ax=axis, extend='max', label='Contact-masked velocity MAE (95th-percentile cap)')
-    x_label = 'Environment number' if ood_feature == 'environment' else 'Command velocity x (m/s)'
-    axis.set(xlabel=x_label, ylabel=metric_label, yscale='log' if args.plot_metric == 'epistemic' else 'linear')
-    axis.set_ylim(y_min, y_max)
-    axis.grid(True, which='both', alpha=0.3)
-    figure.tight_layout()
-    figure.savefig(output_plot, dpi=150)
-    plt.close(figure)
-    print(f'Wrote {output_pdf}')
-    print(f'Wrote {output_plot}')
+    if args.save_plot:
+        figure, axis = plt.subplots(figsize=(9, 6))
+        if args.plot_metric == 'velocity-mae':
+            axis.scatter(feature_values, velocity_mae, color='tab:blue', s=24)
+            x_label = 'Environment number' if ood_feature == 'environment' else 'Command velocity x (m/s)'
+            axis.set(xlabel=x_label, ylabel=metric_label)
+        else:
+            points = axis.scatter(
+                feature_values, plot_values, c=velocity_mae, cmap='viridis',
+                norm=Normalize(vmin=finite_mae.min(), vmax=mae_max, clip=True),
+            )
+            figure.colorbar(points, ax=axis, extend='max', label='Contact-masked velocity MAE (95th-percentile cap)')
+            x_label = 'Environment number' if ood_feature == 'environment' else 'Command velocity x (m/s)'
+            axis.set(xlabel=x_label, ylabel=metric_label, yscale='log' if args.plot_metric == 'epistemic' else 'linear')
+            axis.set_ylim(y_min, y_max)
+        axis.grid(True, which='both', alpha=0.3)
+        figure.tight_layout()
+        figure.savefig(output_plot, dpi=150)
+        plt.close(figure)
+    if args.save_pdf:
+        print(f'Wrote {output_pdf}')
+    if args.save_plot:
+        print(f'Wrote {output_plot}')
 
 
 if __name__ == '__main__':

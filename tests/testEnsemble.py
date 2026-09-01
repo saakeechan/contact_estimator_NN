@@ -1,9 +1,15 @@
 """Deep-ensemble architecture and checkpoint hooks for the shared evaluator."""
 import glob
 import os
+import sys
+from pathlib import Path
 
 import numpy as np
 import torch
+
+_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_ROOT))
+sys.path.insert(0, str(_ROOT / 'src'))
 
 from contact_cnn import ContactCNNWithNormalization, EnsembleTCN
 from tests.base_test import ProbabilisticVelocitySingleTest

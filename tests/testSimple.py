@@ -2,7 +2,11 @@ import os
 import argparse
 import glob
 import sys
-sys.path.append('.')
+from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_ROOT))
+sys.path.insert(0, str(_ROOT / 'src'))
 import yaml
 from tqdm import tqdm
 import matplotlib

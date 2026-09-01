@@ -1,11 +1,7 @@
 __pycache__/
 results/
-logs/
-logsEncoder/
-logsDER/
-logsNatPN/
-inference_results/
-NATPN/
+logs*/
+Source Codes/
 
 .vscode
 *.txt
@@ -16,3 +12,7 @@ testResults/
 *.pdf
 
 *footVelocitiesPlots*
+
+elevation_analysis/splitData
+elevation_analysis/global_terrain
+

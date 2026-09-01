@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(_ROOT / 'src'))
 
 import numpy as np
@@ -17,6 +18,7 @@ import torch.optim as optim
 import yaml
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader, Subset
+from tqdm import tqdm
 
 from utils.plot_loss import generate_training_summary
 from utils.data_handler import contact_dataset
@@ -42,6 +44,10 @@ def save_onnx_model(model, checkpoint_path, window_size):
         with warnings.catch_warnings():
             warnings.filterwarnings('ignore', category=DeprecationWarning)
             warnings.filterwarnings('ignore', category=UserWarning)
+            warnings.filterwarnings(
+                'ignore', message=r'`isinstance\(treespec, LeafSpec\)` is deprecated.*',
+                category=FutureWarning,
+            )
             torch.onnx.export(
                 ONNXInferenceWrapper(model), example_input, onnx_path, export_params=True,
                 opset_version=18, input_names=['input'],
@@ -138,6 +144,11 @@ class BaseTrainer:
     def forward(self, inputs, dense):
         return self.model(inputs, return_sequence=dense)
 
+    def to_model_device(self, sample):
+        """Accept ordinary CPU DataLoaders as well as preloaded device datasets."""
+        device = next(self.model.parameters()).device
+        return {name: value.to(device) if torch.is_tensor(value) else value for name, value in sample.items()}
+
     def velocity_loss(self, outputs, velocity, dense):
         raise NotImplementedError
 
@@ -169,6 +180,7 @@ class BaseTrainer:
         error_sum = contact_count = None
         with torch.no_grad():
             for sample in dataloader:
+                sample = self.to_model_device(sample)
                 velocity = sample['velocity'][:, -1]
                 outputs = self.forward(sample['data'], False)
                 _, velocity_output, _, covariance_output, contact_output = outputs[:5]
@@ -216,7 +228,9 @@ class BaseTrainer:
             self.on_epoch_start(epoch)
             self.model.train()
             sums = dict(total=0.0, contact=0.0, velocity=0.0)
-            for index, sample in enumerate(train_dataloader):
+            progress = tqdm(train_dataloader, desc=f'Epoch {epoch + 1}/{self.config["num_epoch"]}', unit='batch')
+            for index, sample in enumerate(progress):
+                sample = self.to_model_device(sample)
                 velocity = sample['velocity'] if self.use_dense_supervision else sample['velocity'][:, -1]
                 contact = sample['label_seq'] if self.use_dense_supervision else sample['label']
                 outputs = self.forward(sample['data'], self.use_dense_supervision)
@@ -228,8 +242,7 @@ class BaseTrainer:
                 self.optimizer.zero_grad(); loss.backward(); self.optimizer.step()
                 for key, value in (('total', loss), ('contact', contact_loss), ('velocity', velocity_loss)):
                     sums[key] += value.item()
-                if index % self.config['print_every'] == 0:
-                    print(f"epoch {epoch} / {self.config['num_epoch']}, iteration {index} / {len(train_dataloader)}, loss: {loss.item():.8f}")
+                progress.set_postfix(loss=f'{loss.item():.8f}')
             train_metrics, val_metrics = self.evaluate(train_dataloader), self.evaluate(val_dataloader)
             averages = {key: value / len(train_dataloader) for key, value in sums.items()}
             for scope, metrics in (('training', {'total_loss': averages['total'], 'contact_loss': averages['contact'], 'velocity_loss': averages['velocity'], 'contact_accuracy': train_metrics['contact_acc'], 'velocity_mae': train_metrics['velocity_mae']}), ('validation', {'total_loss': val_metrics['contact_loss'] + val_metrics['velocity_loss'], 'contact_loss': val_metrics['contact_loss'], 'velocity_loss': val_metrics['velocity_loss'], 'contact_accuracy': val_metrics['contact_acc'], 'velocity_mae': val_metrics['velocity_mae']})):
@@ -244,7 +257,8 @@ class BaseTrainer:
         self.after_final_checkpoint(final_path)
         writer.close()
         elapsed = time.time() - started
-        save_tcn_last_timestep_umap(val_dataloader, self.model, os.path.join(self.run_dir, 'tcn_last_timestep_umap.png'), self.config.get('random_seed', 42))
+        if self.config.get('save_umap_visualization', False):
+            save_tcn_last_timestep_umap(val_dataloader, self.model, os.path.join(self.run_dir, 'tcn_last_timestep_umap.png'), self.config.get('random_seed', 42))
         generate_training_summary(run_dir=self.run_dir, config=self.config,
             train_metrics={'train_loss': averages['total'], 'train_contact_acc': train_metrics['contact_acc'], 'train_velocity_mae': train_metrics['velocity_mae'], 'val_loss': val_metrics['contact_loss'] + val_metrics['velocity_loss'], 'val_contact_acc': val_metrics['contact_acc'], 'val_velocity_mae': val_metrics['velocity_mae']},
             val_metrics=val_metrics, best_metrics={'best_val_loss': best['loss'], 'best_val_contact_acc': best['contact'], 'best_val_velocity_mae': best['velocity']}, train_time_seconds=elapsed,

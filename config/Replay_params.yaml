@@ -1,0 +1,19 @@
+# Deterministic TCN replay continual-learning settings. General network and
+# training settings are loaded from network_params.yaml.
+continual_feature: "cmd_vel_x"
+continual_task_windows:
+  - [0.0, 0.5]
+  - [0.5, 1.0]
+  - [1.0 , 1.3]
+  - [1.3 , 1.6]
+
+# Use the existing run-safe task index created by utils/ucb_task_windows.py.
+# `train_ratio` in network_params.yaml is the run-disjoint train/validation split.
+replay_capacity: 50000
+replay_seed: 42
+
+# Run the selected-trajectory replay test series after every task checkpoint.
+evaluation_window: [0.0, 3.0]
+replay_evaluate_after_task: true
+replay_evaluation_first_seed: 0
+replay_evaluation_last_seed: 100
