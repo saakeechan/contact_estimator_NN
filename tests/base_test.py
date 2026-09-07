@@ -14,6 +14,7 @@ import torch
 import yaml
 
 from tests.ood_selection import csv_matches_environment_windows, validate_ood_selection
+from common import resolve_active_legs
 
 
 class BaseSingleTest:
@@ -59,6 +60,11 @@ class BaseSingleTest:
     def prepare(self, args):
         self.set_runtime_values(args)
         config = self.load_config(args.config_name)
+        data_folder = config['data_folder'] if os.path.isabs(config['data_folder']) else os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), config['data_folder'])
+        metadata = np.load(os.path.join(data_folder, 'all_data_metadata.npy'), allow_pickle=True).item()
+        config['legs'] = tuple(metadata.get('legs', ()))
+        if config['legs'] != resolve_active_legs(config.get('active_legs', 'both')):
+            raise ValueError(f"active_legs={config.get('active_legs', 'both')!r} does not match dataset legs={config['legs']}.")
         ood_feature = args.ood_feature or config.get('ood_feature', 'cmd_vel')
         environment_windows = args.environment_window or config.get('environment_windows', [])
         validate_ood_selection(ood_feature, environment_windows)
@@ -205,18 +211,13 @@ class ProbabilisticVelocitySingleTest(BaseSingleTest):
         raise ValueError('No trajectory matches the requested evaluation selection.')
 
     @staticmethod
-    def make_features(trajectory):
-        joint_names = (
-            'left_hip_pitch_joint', 'left_hip_roll_joint', 'left_hip_yaw_joint',
-            'left_knee_joint', 'left_ankle_pitch_joint', 'left_ankle_roll_joint',
-        )
-        q = trajectory[['joint_pos_' + name for name in joint_names]].to_numpy()
-        qd = trajectory[['joint_vel_' + name for name in joint_names]].to_numpy()
-        foot_position = trajectory[['fk_left_foot_pos_x', 'fk_left_foot_pos_y', 'fk_left_foot_pos_z']].to_numpy()
-        foot_velocity = trajectory[['fk_left_foot_vel_x', 'fk_left_foot_vel_y', 'fk_left_foot_vel_z']].to_numpy()
-        torque = trajectory[['joint_torque_' + name for name in joint_names]].to_numpy()
-        torque_mse = np.sum(torque ** 2, axis=1, keepdims=True)
-        return np.concatenate((q, qd, foot_position, foot_velocity, torque, torque_mse, trajectory[['cmd_vel_x']].to_numpy()), axis=1)
+    def make_features(trajectory, legs):
+        features = []
+        for leg in legs:
+            joint_names = tuple(f'{leg}_{name}' for name in ('hip_pitch_joint', 'hip_roll_joint', 'hip_yaw_joint', 'knee_joint', 'ankle_pitch_joint', 'ankle_roll_joint'))
+            torque = trajectory[['joint_torque_' + name for name in joint_names]].to_numpy()
+            features.extend((trajectory[['joint_pos_' + name for name in joint_names]].to_numpy(), trajectory[['joint_vel_' + name for name in joint_names]].to_numpy(), trajectory[[f'fk_{leg}_foot_pos_{axis}' for axis in 'xyz']].to_numpy(), trajectory[[f'fk_{leg}_foot_vel_{axis}' for axis in 'xyz']].to_numpy(), torque, np.sum(torque ** 2, axis=1, keepdims=True)))
+        return np.concatenate((*features, trajectory[['cmd_vel_x']].to_numpy()), axis=1)
 
     @staticmethod
     def make_body_velocity(trajectory):
@@ -263,18 +264,20 @@ class ProbabilisticVelocitySingleTest(BaseSingleTest):
         return torch.cat(latents).numpy()
 
     def run_trajectory(self, model, trajectory, window_size, batch_size, device):
-        features = self.make_features(trajectory)
+        features = self.make_features(trajectory, model.base_model.legs)
         predictions, variances, contact_probabilities = [], [], []
         with torch.no_grad():
             for first in range(0, len(features) - window_size + 1, batch_size):
                 last = min(first + batch_size, len(features) - window_size + 1)
                 windows = torch.from_numpy(np.stack([features[i:i + window_size] for i in range(first, last)])).float().to(device)
                 _, velocity, _, variance, contact_logit = model(windows, return_sequence=False)
-                predictions.append(velocity[:, 0].cpu().numpy())
-                variances.append(variance[:, 0].cpu().numpy())
-                contact_probabilities.append(torch.sigmoid(contact_logit[:, 0]).cpu().numpy())
+                predictions.append(velocity.cpu().numpy())
+                variances.append(variance.cpu().numpy())
+                contact_probabilities.append(torch.sigmoid(contact_logit).cpu().numpy())
         final_indices = np.arange(window_size - 1, len(trajectory))
-        return final_indices, np.concatenate(predictions), np.concatenate(variances), np.concatenate(contact_probabilities), trajectory['lfoot-contact'].to_numpy()[final_indices], self.make_body_velocity(trajectory)[final_indices]
+        contacts = np.stack([trajectory[f'{leg[0]}foot-contact'].to_numpy()[final_indices] for leg in model.base_model.legs], axis=1)
+        body_velocity = self.make_body_velocity(trajectory)[final_indices]
+        return final_indices, np.concatenate(predictions), np.concatenate(variances), np.concatenate(contact_probabilities), contacts, np.repeat(body_velocity[:, None, :], len(model.base_model.legs), axis=1)
 
     @staticmethod
     def save_velocity_plot(time, predicted, ground_truth, contact, output_path):
@@ -320,7 +323,7 @@ class ProbabilisticVelocitySingleTest(BaseSingleTest):
 
     def evaluate(self, args, context, model=None, checkpoint_path=None):
         config, device, trajectory = context['config'], context['device'], context['trajectory']
-        features = self.make_features(trajectory)
+        features = self.make_features(trajectory, config['legs'])
         if model is None:
             model = self.build_model(config, features.shape[1]).to(device)
             checkpoint_path = checkpoint_path or self.find_checkpoint(features.shape[1], config)
@@ -328,24 +331,27 @@ class ProbabilisticVelocitySingleTest(BaseSingleTest):
             model.eval()
         indices, predicted, variance, _, contact, ground_truth = self.run_trajectory(model, trajectory, config['window_size'], config.get('test_batch_size', config['batch_size']), device)
         contact_mask = contact == 1
-        candidates = np.flatnonzero(contact_mask) if contact_mask.any() else np.arange(len(contact))
+        union_contact_mask = contact_mask.any(axis=1)
+        candidates = np.flatnonzero(union_contact_mask) if union_contact_mask.any() else np.arange(len(contact))
         position = int(np.random.default_rng(args.seed).choice(candidates))
         aleatoric, epistemic, *extra = self.uncertainty_for_window(model, features, position, config['window_size'], device)
         output_path = None
         if not args.skip_plots:
             output_path = os.path.join(os.path.dirname(checkpoint_path), f'trajectory_velocity_comparison_seed{args.seed}.png')
-            self.save_velocity_plot(trajectory['timestamp'].to_numpy()[indices], predicted, ground_truth, contact, output_path)
+            for leg_index, leg in enumerate(config['legs']):
+                self.save_velocity_plot(trajectory['timestamp'].to_numpy()[indices], predicted[:, leg_index], ground_truth[:, leg_index], contact[:, leg_index], output_path.replace('.png', f'_{leg}.png'))
         def save_plot(*knn_args):
             if args.save_umap and not args.skip_umap:
                 self.save_knn_umap(*knn_args, os.path.join(os.path.dirname(checkpoint_path), f'contact_trajectory_knn_umap_seed{args.seed}.png'))
-        knn = self.run_knn_ood(args, context, model, checkpoint_path, features, contact_mask,
+        knn = self.run_knn_ood(args, context, model, checkpoint_path, features, union_contact_mask,
                                self.get_training_window_starts, self.collect_final_tcn_latents, save_plot,
                                self.knn_k, self.ood_id_percentile)
-        mae = float(np.abs(predicted[contact_mask] - ground_truth[contact_mask]).mean()) if contact_mask.any() else float('nan')
+        per_leg_mae = {leg: float(np.abs(predicted[:, index][contact_mask[:, index]] - ground_truth[:, index][contact_mask[:, index]]).mean()) if contact_mask[:, index].any() else float('nan') for index, leg in enumerate(config['legs'])}
+        mae = float(np.nanmean(list(per_leg_mae.values())))
         if not getattr(args, 'quiet', False):
             print(f"CSV: {context['csv_path']}")
             print(f"Random seed: {args.seed}, trajectory samples: {len(trajectory)}, evaluated windows: {len(indices)}")
-            print(f'Contact-final windows: {contact_mask.sum()} / {len(contact)}')
+            print(f'Contact-final windows: {contact_mask.sum()} / {contact_mask.size}')
             print(f'Contact-masked velocity MAE: {mae:.4e}')
             print(f'Aleatoric variance [vx, vy, vz]: {aleatoric.tolist()}')
             print(f'Epistemic variance [vx, vy, vz]: {epistemic.tolist()}')
@@ -356,7 +362,8 @@ class ProbabilisticVelocitySingleTest(BaseSingleTest):
             'run_index': context['run_index'],
             'cmd_vel_x': float(context['start_cmd_vel']),
             'velocity_mae': mae,
-            'uncertainty_final_timestep_gt_contact': bool(contact[position] == 1),
+            'uncertainty_final_timestep_gt_contact': {leg: bool(contact[position, index] == 1) for index, leg in enumerate(config['legs'])},
+            'per_leg_velocity_mae': per_leg_mae,
             'aleatoric_variance': aleatoric.tolist(), 'epistemic_variance': epistemic.tolist(),
             'knn_ood_windows': int(knn['ood_mask'].sum()) if knn else None,
             'knn_total_windows': len(contact) if knn else None,

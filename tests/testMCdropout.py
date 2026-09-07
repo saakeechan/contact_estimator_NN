@@ -12,7 +12,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from contact_cnn import ContactCNNWithNormalization, MCDropoutTCN
+from mc_dropout import MCDropoutTCN
+from normalization import ContactCNNWithNormalization
 from tests.base_test import ProbabilisticVelocitySingleTest
 
 
@@ -42,7 +43,7 @@ class MCDropoutSingleTest(ProbabilisticVelocitySingleTest):
             raise ValueError("MC-dropout inference is implemented only for model_architecture: 'tcn'.")
         return ContactCNNWithNormalization(MCDropoutTCN(
             config['window_size'], num_features, config.get('tcn_num_channels', 64),
-            config.get('tcn_kernel_size', 3), config.get('tcn_num_blocks', 5), float(config['mc_dropout_rate']),
+            config.get('tcn_kernel_size', 3), config.get('tcn_num_blocks', 5), float(config['mc_dropout_rate']), legs=config['legs'],
         ))
 
     def find_checkpoint(self, num_features, config):
@@ -68,13 +69,13 @@ class MCDropoutSingleTest(ProbabilisticVelocitySingleTest):
         finally:
             for module in dropout_modules:
                 module.eval()
-        means = torch.stack([output[1][:, 0] for output in outputs])
-        aleatoric = torch.stack([output[3][:, 0] for output in outputs]).mean(dim=0)
+        means = torch.stack([output[1] for output in outputs])
+        aleatoric = torch.stack([output[3] for output in outputs]).mean(dim=0)
         epistemic = means.var(dim=0, unbiased=False)
         return means.mean(dim=0), aleatoric, epistemic
 
     def run_trajectory(self, model, trajectory, window_size, batch_size, device):
-        features = self.make_features(trajectory)
+        features = self.make_features(trajectory, model.base_model.legs)
         predicted, aleatoric, epistemic = [], [], []
         for first in range(0, len(features) - window_size + 1, batch_size):
             last = min(first + batch_size, len(features) - window_size + 1)
@@ -84,13 +85,14 @@ class MCDropoutSingleTest(ProbabilisticVelocitySingleTest):
             aleatoric.append(noise.cpu().numpy())
             epistemic.append(disagreement.cpu().numpy())
         final_indices = np.arange(window_size - 1, len(trajectory))
-        contact = trajectory['lfoot-contact'].to_numpy()[final_indices]
-        return final_indices, np.concatenate(predicted), np.concatenate(aleatoric), np.concatenate(epistemic), contact, self.make_body_velocity(trajectory)[final_indices]
+        contacts = np.stack([trajectory[f'{leg[0]}foot-contact'].to_numpy()[final_indices] for leg in model.base_model.legs], axis=1)
+        body_velocity = self.make_body_velocity(trajectory)[final_indices]
+        return final_indices, np.concatenate(predicted), np.concatenate(aleatoric), np.concatenate(epistemic), contacts, np.repeat(body_velocity[:, None, :], len(model.base_model.legs), axis=1)
 
     def evaluate(self, args, context, model=None, checkpoint_path=None):
         self.mc_samples = int(context['config']['mc_dropout_samples'])
         config, device, trajectory = context['config'], context['device'], context['trajectory']
-        features = self.make_features(trajectory)
+        features = self.make_features(trajectory, config['legs'])
         if model is None:
             model = self.build_model(config, features.shape[1]).to(device)
             checkpoint_path = self.find_checkpoint(features.shape[1], config)
@@ -101,25 +103,28 @@ class MCDropoutSingleTest(ProbabilisticVelocitySingleTest):
         )
         total = aleatoric + epistemic
         contact_mask = contact == 1
-        candidates = np.flatnonzero(contact_mask) if contact_mask.any() else np.arange(len(contact))
+        union_contact_mask = contact_mask.any(axis=1)
+        candidates = np.flatnonzero(union_contact_mask) if union_contact_mask.any() else np.arange(len(contact))
         position = int(np.random.default_rng(args.seed).choice(candidates))
         if not args.skip_plots:
             output_path = os.path.join(os.path.dirname(checkpoint_path), f'mc_dropout_trajectory_seed{args.seed}.png')
-            self.save_velocity_plot(trajectory['timestamp'].to_numpy()[indices], predicted, ground_truth, contact, output_path)
+            for leg_index, leg in enumerate(config['legs']):
+                self.save_velocity_plot(trajectory['timestamp'].to_numpy()[indices], predicted[:, leg_index], ground_truth[:, leg_index], contact[:, leg_index], output_path.replace('.png', f'_{leg}.png'))
 
         def save_plot(*knn_args):
             if args.save_umap and not args.skip_umap:
                 self.save_knn_umap(*knn_args, os.path.join(os.path.dirname(checkpoint_path), f'mc_dropout_knn_umap_seed{args.seed}.png'))
 
-        knn = self.run_knn_ood(args, context, model, checkpoint_path, features, contact_mask,
+        knn = self.run_knn_ood(args, context, model, checkpoint_path, features, union_contact_mask,
                                self.get_training_window_starts, self.collect_final_tcn_latents, save_plot,
                                self.knn_k, self.ood_id_percentile)
-        selected_mask = contact_mask if contact_mask.any() else np.ones(len(contact), dtype=bool)
-        mae = float(np.abs(predicted[contact_mask] - ground_truth[contact_mask]).mean()) if contact_mask.any() else float('nan')
+        selected_mask = union_contact_mask if union_contact_mask.any() else np.ones(len(contact), dtype=bool)
+        per_leg_mae = {leg: float(np.abs(predicted[:, index][contact_mask[:, index]] - ground_truth[:, index][contact_mask[:, index]]).mean()) if contact_mask[:, index].any() else float('nan') for index, leg in enumerate(config['legs'])}
+        mae = float(np.nanmean(list(per_leg_mae.values())))
         return {
             'seed': args.seed, 'ood_feature': context['ood_feature'], 'environment': context['environment_id'],
             'cmd_vel_x': float(context['start_cmd_vel']), 'velocity_mae': mae,
-            'uncertainty_final_timestep_gt_contact': bool(contact[position] == 1),
+            'uncertainty_final_timestep_gt_contact': {leg: bool(contact[position, index] == 1) for index, leg in enumerate(config['legs'])}, 'per_leg_velocity_mae': per_leg_mae,
             'mc_dropout_samples': self.mc_samples,
             'aleatoric_variance': aleatoric[position].tolist(),
             'epistemic_variance': epistemic[position].tolist(),

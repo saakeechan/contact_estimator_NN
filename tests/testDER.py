@@ -11,7 +11,8 @@ sys.path.insert(0, str(_ROOT / 'src'))
 import numpy as np
 import torch
 
-from contact_cnn import ContactCNNWithNormalization, DERTCN
+from der import DERTCN
+from normalization import ContactCNNWithNormalization
 from tests.base_test import ProbabilisticVelocitySingleTest
 
 
@@ -32,7 +33,7 @@ class DERSingleTest(ProbabilisticVelocitySingleTest):
             window_size=config['window_size'], num_features=num_features,
             tcn_num_channels=config.get('tcn_num_channels', 64),
             tcn_kernel_size=config.get('tcn_kernel_size', 3),
-            tcn_num_blocks=config.get('tcn_num_blocks', 5), tcn_dropout=config.get('tcn_dropout', 0.2),
+            tcn_num_blocks=config.get('tcn_num_blocks', 5), tcn_dropout=config.get('tcn_dropout', 0.2), legs=config['legs'],
         ))
 
     def find_checkpoint(self, num_features, config):

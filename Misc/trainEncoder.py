@@ -18,7 +18,7 @@ from tqdm import tqdm
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.append('.')
 
-from contact_cnn import DenoisingTCNAutoencoder
+from Misc.contact_cnn_legacy import DenoisingTCNAutoencoder
 from natpn.nn.flow import RadialFlow
 from natpn.nn.scaler import EvidenceScaler
 from utils.data_handler import contact_dataset

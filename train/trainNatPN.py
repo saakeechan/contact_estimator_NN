@@ -11,14 +11,13 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 import yaml
-from natpn.nn import BayesianLoss
-
-from contact_cnn import ContactCNNWithNormalization, TCN
+from src.natpn import BayesianLoss, TCN
+from normalization import ContactCNNWithNormalization
 from train.base_train import BaseTrainer, load_training_data
 
 
 def natpn_loss(posteriors, target, loss_fn):
-    return torch.stack([loss_fn(posterior, target[..., 0, axis]) for axis, posterior in enumerate(posteriors)], dim=-1).unsqueeze(-2)
+    return torch.stack([torch.stack([loss_fn(posterior, target[..., leg_index, axis]) for axis, posterior in enumerate(leg_posteriors)], dim=-1) for leg_index, leg_posteriors in enumerate(posteriors)], dim=-2)
 
 
 class NatPNTrainer(BaseTrainer):
@@ -89,7 +88,7 @@ def main():
     model = ContactCNNWithNormalization(TCN(
         config['window_size'], num_features, config.get('tcn_num_channels', 64),
         config.get('tcn_kernel_size', 3), config.get('tcn_num_blocks', 5), config.get('tcn_dropout', .2),
-        config.get('natpn_flow_type', 'radial'), config.get('natpn_flow_layers', 8), config.get('natpn_certainty_budget', 'normal'),
+        config.get('natpn_flow_type', 'radial'), config.get('natpn_flow_layers', 8), config.get('natpn_certainty_budget', 'normal'), legs=config['legs'],
     ), global_mean=mean, global_std=std).to(device)
     NatPNTrainer(model, config).train(train_loader, val_loader)
 

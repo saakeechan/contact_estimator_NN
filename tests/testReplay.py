@@ -12,7 +12,8 @@ sys.path.insert(0, str(_ROOT / "src"))
 import numpy as np
 import torch
 
-from contact_cnn import ContactCNNWithNormalization, EnsembleTCN
+from ensemble import EnsembleTCN
+from normalization import ContactCNNWithNormalization
 from tests.base_test import ProbabilisticVelocitySingleTest
 
 
@@ -35,7 +36,7 @@ class ReplaySingleTest(ProbabilisticVelocitySingleTest):
             raise ValueError("Replay inference requires model_architecture: 'tcn'.")
         return ContactCNNWithNormalization(EnsembleTCN(
             config["window_size"], num_features, config.get("tcn_num_channels", 64),
-            config.get("tcn_kernel_size", 3), config.get("tcn_num_blocks", 5), config.get("tcn_dropout", .2),
+            config.get("tcn_kernel_size", 3), config.get("tcn_num_blocks", 5), config.get("tcn_dropout", .2), legs=config['legs'],
         ))
 
     def find_checkpoint(self, num_features, config):

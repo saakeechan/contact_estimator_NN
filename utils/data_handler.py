@@ -16,11 +16,20 @@ class contact_dataset(Dataset):
         """
         At initialization we load .npy files for data, labels, and body velocities.
         self.data: a 2D array of all data points. rows are time axis, columns are features. (num_data, num_features)
-        self.label: left-foot contact state. Shape: (num_data, 1)
-        self.body_velocity: body-frame body velocity. Shape: (num_data, 1, 3)
+        self.label: configured foot-contact states. Shape: (num_data, num_legs)
+        self.body_velocity: body-frame body velocity per leg. Shape: (num_data, num_legs, 3)
         """
         data = np.load(data_path)
         label = np.load(label_path)
+        metadata_path = data_path.replace('all_data.npy', 'all_data_metadata.npy')
+        if not os.path.exists(metadata_path):
+            raise FileNotFoundError(f'Missing dataset metadata: {metadata_path}. Regenerate with utils/csv2numpyV1.py.')
+        metadata = np.load(metadata_path, allow_pickle=True).item()
+        if 'legs' not in metadata:
+            raise ValueError('Dataset metadata has no legs entry. Regenerate with utils/csv2numpyV1.py.')
+        self.legs = tuple(metadata['legs'])
+        if not self.legs or any(leg not in ('left', 'right') for leg in self.legs):
+            raise ValueError(f'Invalid dataset legs metadata: {self.legs}.')
 
         
         self.window_size = window_size
@@ -35,19 +44,19 @@ class contact_dataset(Dataset):
                 f"Missing body-velocity targets: {velocity_path}. Run utils/csv2numpyV1.py first."
             )
 
-        if label.shape != (len(data), 1):
+        if label.shape != (len(data), len(self.legs)):
             raise ValueError(
-                f"Expected left-foot labels with shape ({len(data)}, 1), got {label.shape}."
+                f"Expected {self.legs} labels with shape ({len(data)}, {len(self.legs)}), got {label.shape}."
             )
-        if body_velocity.shape != (len(data), 1, 3):
+        if body_velocity.shape != (len(data), len(self.legs), 3):
             raise ValueError(
-                "Expected body-frame body velocities with shape (N, 1, 3). "
+                f"Expected body-frame body velocities with shape (N, {len(self.legs)}, 3). "
                 f"Got {body_velocity.shape}. Regenerate the numpy dataset."
             )
         
         self.body_velocity = torch.from_numpy(body_velocity).type('torch.FloatTensor').to(device)
         
-        # Labels are left-foot contacts with shape (num_data, 1).
+        # Labels follow metadata['legs'] order.
         label_binary = label.astype(np.float32)
         self.label = torch.from_numpy(label_binary).type('torch.FloatTensor').to(device)
         
@@ -132,9 +141,9 @@ class contact_dataset(Dataset):
         
         Output: 
         - data: (batch_size, window_size, num_features)
-        - label: (batch_size, 1) - left-foot contact at the last timestep
-        - label_seq: (batch_size, window_size, 1) - full contact sequence
-        - velocity: (batch_size, window_size, 1, 3) - body-frame body-velocity sequence
+        - label: (batch_size, 2) - left/right contacts at the last timestep
+        - label_seq: (batch_size, window_size, 2) - full contact sequence
+        - velocity: (batch_size, window_size, 2, 3) - body-frame body-velocity sequence
         """
         if torch.is_tensor(idx):
             idx = idx.tolist()
@@ -146,13 +155,13 @@ class contact_dataset(Dataset):
         this_data = self.data[real_idx:real_idx+self.window_size,:]
         
         # Label: contact at last timestep only
-        this_label = self.label[real_idx+self.window_size-1]  # Shape: (1,)
+        this_label = self.label[real_idx+self.window_size-1]  # Shape: (2,)
         
         # Label sequence: full contact sequence for all timesteps (for dense supervision)
-        this_label_seq = self.label[real_idx:real_idx+self.window_size, :]  # Shape: (window_size, 1)
+        this_label_seq = self.label[real_idx:real_idx+self.window_size, :]  # Shape: (window_size, 2)
         
         # Velocity: full sequence
-        this_velocity = self.body_velocity[real_idx:real_idx+self.window_size, :]  # Shape: (window_size, 1, 3)
+        this_velocity = self.body_velocity[real_idx:real_idx+self.window_size, :]  # Shape: (window_size, 2, 3)
             
         sample = {'data': this_data, 'label': this_label, 'label_seq': this_label_seq, 'velocity': this_velocity}
 

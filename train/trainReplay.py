@@ -18,9 +18,11 @@ import torch
 import yaml
 from torch.utils.data import DataLoader, Dataset
 
-from contact_cnn import ContactCNNWithNormalization, EnsembleTCN
+from ensemble import EnsembleTCN
+from normalization import ContactCNNWithNormalization
 from train.base_train import BaseTrainer
 from utils.ucb_task_windows import _validate_task_windows
+from common import resolve_active_legs
 
 
 class WindowDataset(Dataset):
@@ -49,6 +51,11 @@ def _load_config(network_path, replay_path):
         config.update(yaml.safe_load(file) or {})
     data_folder = Path(config["data_folder"])
     config["data_folder"] = str(data_folder if data_folder.is_absolute() else _ROOT / data_folder)
+    metadata = np.load(Path(config['data_folder']) / 'all_data_metadata.npy', allow_pickle=True).item()
+    legs = tuple(metadata.get('legs', ()))
+    if legs != resolve_active_legs(config.get('active_legs', 'both')):
+        raise ValueError(f"active_legs={config.get('active_legs', 'both')!r} does not match dataset legs={legs}.")
+    config['legs'] = legs
     return config
 
 
@@ -141,6 +148,8 @@ def run_replay_training(config, task_index, model_factory, trainer_type, logs_na
     index = _load_index(task_index, tasks, config["window_size"])
     data_folder = Path(config["data_folder"])
     data, labels, velocities = (np.load(data_folder / name) for name in ("all_data.npy", "all_labels.npy", "all_body_velocities.npy"))
+    if labels.shape != (len(data), len(config['legs'])) or velocities.shape != (len(data), len(config['legs']), 3):
+        raise ValueError('Dataset labels/velocity targets do not match active_legs. Regenerate the numpy dataset and task index.')
     seed = int(config.get("random_seed", 42))
     splits = [_split_task(index, task_id, float(config.get("train_ratio", .85)), seed) for task_id in range(len(tasks))]
     for task_id, (train, validation) in enumerate(splits):
@@ -200,7 +209,7 @@ def main():
         config, args.task_index,
         lambda cfg, features, mean, std: ContactCNNWithNormalization(EnsembleTCN(
             cfg["window_size"], features, cfg.get("tcn_num_channels", 64), cfg.get("tcn_kernel_size", 3),
-            cfg.get("tcn_num_blocks", 5), cfg.get("tcn_dropout", .2)), mean, std),
+            cfg.get("tcn_num_blocks", 5), cfg.get("tcn_dropout", .2), legs=cfg['legs']), mean, std),
         ReplayTrainer, "logsReplay", "replay", "Replay", "velocity-mae",
         args.dry_run, args.skip_evaluate_after_task,
     )

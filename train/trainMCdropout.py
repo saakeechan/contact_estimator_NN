@@ -12,7 +12,8 @@ import torch
 import torch.nn.functional as F
 import yaml
 
-from contact_cnn import ContactCNNWithNormalization, MCDropoutTCN
+from mc_dropout import MCDropoutTCN
+from normalization import ContactCNNWithNormalization
 from train.base_train import BaseTrainer, load_training_data
 
 
@@ -50,7 +51,7 @@ def main():
     num_features, mean, std, train_loader, val_loader = load_training_data(config, device)
     model = ContactCNNWithNormalization(MCDropoutTCN(
         config['window_size'], num_features, config.get('tcn_num_channels', 64),
-        config.get('tcn_kernel_size', 3), config.get('tcn_num_blocks', 5), dropout_rate,
+        config.get('tcn_kernel_size', 3), config.get('tcn_num_blocks', 5), dropout_rate, legs=config['legs'],
     ), global_mean=mean, global_std=std).to(device)
     MCDropoutTrainer(model, config).train(train_loader, val_loader)
 

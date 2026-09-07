@@ -15,7 +15,7 @@ import pandas as pd
 import torch
 import yaml
 
-from contact_cnn import DenoisingTCNAutoencoder
+from Misc.contact_cnn_legacy import DenoisingTCNAutoencoder
 from tests.base_test import BaseSingleTest
 from Misc.trainEncoder import VariationalTCNAutoencoder, encoder_latent
 from utils.ood_selection import csv_matches_environment_windows, validate_ood_selection

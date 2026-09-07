@@ -20,16 +20,19 @@ from sklearn.metrics import recall_score
 from sklearn.metrics import jaccard_score
 from sklearn.metrics import confusion_matrix
 
-from contact_cnn import *
+from natpn import TCN
+from normalization import ContactCNNWithNormalization
+from vanilla_cnn import contact_cnn
+from common import resolve_active_legs
 from utils.data_handler import *
 
 PLOT_WINDOW_SIZE = 100
 
-def compute_confusion_mat(bin_contact_pred_arr, bin_contact_gt_arr):
+def compute_confusion_mat(bin_contact_pred_arr, bin_contact_gt_arr, legs):
     """Compute left-foot and combined confusion matrices."""
     confusion_mat = {
         leg: confusion_matrix(bin_contact_gt_arr[:, index], bin_contact_pred_arr[:, index], labels=[0, 1])
-        for index, leg in enumerate(('left_leg',))
+        for index, leg in enumerate(legs)
     }
     combined = confusion_matrix(bin_contact_gt_arr.ravel(), bin_contact_pred_arr.ravel(), labels=[0, 1])
     confusion_mat['combined'] = combined
@@ -49,18 +52,18 @@ def compute_jaccard(bin_pred_arr, bin_gt_arr):
     jaccard = jaccard_score(bin_gt_arr.ravel(), bin_pred_arr.ravel(), zero_division=0)
     return jaccard
 
-def compute_accuracy(dataloader, model, device=torch.device('cpu')):
+def compute_accuracy(dataloader, model, legs, device=torch.device('cpu')):
     """
     Compute left-foot contact and body-velocity metrics.
     """
-    velocity_abs_error_sum = torch.zeros((1, 3), device=device)
-    velocity_sq_error_sum = torch.zeros((1, 3), device=device)
-    num_contact_samples = torch.zeros(1, device=device)
+    velocity_abs_error_sum = torch.zeros((len(legs), 3), device=device)
+    velocity_sq_error_sum = torch.zeros((len(legs), 3), device=device)
+    num_contact_samples = torch.zeros(len(legs), device=device)
     
-    true_positive = torch.zeros(1, device=device)
-    false_positive = torch.zeros(1, device=device)
-    false_negative = torch.zeros(1, device=device)
-    true_negative = torch.zeros(1, device=device)
+    true_positive = torch.zeros(len(legs), device=device)
+    false_positive = torch.zeros(len(legs), device=device)
+    false_negative = torch.zeros(len(legs), device=device)
+    true_negative = torch.zeros(len(legs), device=device)
     
     with torch.no_grad():
         for sample in tqdm(dataloader):
@@ -108,7 +111,7 @@ def compute_accuracy(dataloader, model, device=torch.device('cpu')):
         'contact_f1': float(contact_f1),
         'per_leg': {},
     }
-    for index, leg in enumerate(('left',)):
+    for index, leg in enumerate(legs):
         precision = true_positive[index].item() / (true_positive[index].item() + false_positive[index].item() + 1e-8)
         recall = true_positive[index].item() / (true_positive[index].item() + false_negative[index].item() + 1e-8)
         accuracy = (true_positive[index].item() + true_negative[index].item()) / (
@@ -127,7 +130,7 @@ def compute_accuracy(dataloader, model, device=torch.device('cpu')):
     return metrics
 
 
-def save_velocity_plots(dataloader, model, output_dir):
+def save_velocity_plots(dataloader, model, output_dir, legs):
     """Save a three-component body-velocity predicted-vs-ground-truth plot."""
     predicted, ground_truth, contact = [], [], []
     with torch.no_grad():
@@ -143,7 +146,7 @@ def save_velocity_plots(dataloader, model, output_dir):
     sample_index = np.arange(len(contact))
     os.makedirs(output_dir, exist_ok=True)
 
-    for leg_index, leg_name in enumerate(('body',)):
+    for leg_index, leg_name in enumerate(legs):
         fig, axes = plt.subplots(3, 1, figsize=(14, 9), sharex=True)
         contact_changes = np.diff(np.concatenate(([0], contact[:, leg_index] > 0.5, [0])))
         contact_starts = np.where(contact_changes == 1)[0]
@@ -161,7 +164,7 @@ def save_velocity_plots(dataloader, model, output_dir):
         axes[0].set_title('Body-frame body velocity: prediction vs ground truth')
         axes[-1].set_xlabel('Time step in sampled window')
         fig.tight_layout()
-        output_path = os.path.join(output_dir, 'body_velocity_comparison.png')
+        output_path = os.path.join(output_dir, f'{leg_name}_body_velocity_comparison.png')
         fig.savefig(output_path, dpi=150, bbox_inches='tight')
         plt.close(fig)
         print(f'Saved body-velocity plot: {output_path}')
@@ -185,10 +188,12 @@ def main():
     if os.path.exists(metadata_path):
         metadata = np.load(metadata_path, allow_pickle=True).item()
         num_features = metadata['num_features']
+        legs = tuple(metadata['legs'])
+        if legs != resolve_active_legs(config.get('active_legs', 'both')):
+            raise ValueError(f"active_legs={config.get('active_legs', 'both')!r} does not match dataset legs={legs}.")
         print(f"Loaded num_features={num_features} from data metadata")
     else:
-        num_features = config.get('num_features', 25)
-        print(f"⚠️  Warning: metadata file not found, using config num_features={num_features}")
+        raise FileNotFoundError(f'Missing dataset metadata: {metadata_path}. Run utils/csv2numpyV1.py first.')
 
     # Load ALL data (not pre-split) - use same splitting logic as train.py
     all_dataset = contact_dataset(data_path=config['data_folder']+"all_data.npy",\
@@ -263,7 +268,6 @@ def main():
     model_arch = config.get('model_architecture', 'vanilla_cnn').lower()
     
     if model_arch == 'tcn':
-        from contact_cnn import TCN
         base_model = TCN(
             window_size=config['window_size'],
             num_features=num_features,
@@ -273,14 +277,13 @@ def main():
             tcn_dropout=config.get('tcn_dropout', 0.2),
             natpn_flow_type=config.get('natpn_flow_type', 'radial'),
             natpn_flow_layers=config.get('natpn_flow_layers', 8),
-            natpn_certainty_budget=config.get('natpn_certainty_budget', 'normal'),
+            natpn_certainty_budget=config.get('natpn_certainty_budget', 'normal'), legs=legs,
         )
     elif model_arch == 'vanilla_cnn':
-        base_model = contact_cnn(window_size=config['window_size'], num_features=num_features)
+        base_model = contact_cnn(window_size=config['window_size'], num_features=num_features, legs=legs)
     else:
         raise ValueError(f"Unknown model_architecture: {model_arch}. Options: 'tcn', 'vanilla_cnn'")
     
-    from contact_cnn import ContactCNNWithNormalization
     model = ContactCNNWithNormalization(base_model)  # Will load stats from checkpoint
 
     # Find latest PyTorch checkpoint from logs
@@ -322,8 +325,8 @@ def main():
         print(f"⚠️  WARNING: global_std is all ones (using fallback - normalization NOT loaded!)")
     print(f"{'='*60}\n")
 
-    metrics = compute_accuracy(test_dataloader, model, device=device)
-    save_velocity_plots(plot_dataloader, model, os.path.dirname(latest_pt))
+    metrics = compute_accuracy(test_dataloader, model, legs, device=device)
+    save_velocity_plots(plot_dataloader, model, os.path.dirname(latest_pt), legs)
 
     print("\n" + "="*60)
     print("BODY-VELOCITY TEST RESULTS")

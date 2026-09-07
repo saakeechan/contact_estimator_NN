@@ -22,6 +22,7 @@ from tqdm import tqdm
 
 from utils.plot_loss import generate_training_summary
 from utils.data_handler import contact_dataset
+from common import resolve_active_legs
 
 
 class ONNXInferenceWrapper(nn.Module):
@@ -200,7 +201,7 @@ class BaseTrainer:
                 totals['correct'] += (prediction == sample['label']).sum().item()
                 totals['data'] += sample['label'].numel()
         batches = max(len(dataloader), 1)
-        components = np.zeros((1, 3)) if error_sum is None else (error_sum / (contact_count[:, None] + 1e-8)).cpu().tolist()
+        components = np.zeros((len(self.model.base_model.legs), 3)) if error_sum is None else (error_sum / (contact_count[:, None] + 1e-8)).cpu().tolist()
         mae = 0.0 if error_sum is None else error_sum.sum().item() / (contact_count.sum().item() * 3 + 1e-8)
         return {
             'contact_acc': totals['correct'] / totals['data'] if totals['data'] else 0.0,
@@ -268,7 +269,16 @@ class BaseTrainer:
 def load_training_data(config, device, seed=None):
     """Load run-disjoint splits and normalization statistics from training windows only."""
     metadata_path = os.path.join(config['data_folder'], 'all_data_metadata.npy')
-    num_features = np.load(metadata_path, allow_pickle=True).item()['num_features'] if os.path.exists(metadata_path) else config.get('num_features', 25)
+    if not os.path.exists(metadata_path):
+        raise FileNotFoundError(f'Missing dataset metadata: {metadata_path}. Run utils/csv2numpyV1.py first.')
+    metadata = np.load(metadata_path, allow_pickle=True).item()
+    if 'legs' not in metadata:
+        raise ValueError('Dataset metadata has no legs entry. Regenerate with utils/csv2numpyV1.py.')
+    legs = tuple(metadata['legs'])
+    if legs != resolve_active_legs(config.get('active_legs', 'both')):
+        raise ValueError(f"active_legs={config.get('active_legs', 'both')!r} does not match dataset legs={legs}.")
+    config['legs'] = legs
+    num_features = metadata['num_features']
     dataset = contact_dataset(os.path.join(config['data_folder'], 'all_data.npy'), os.path.join(config['data_folder'], 'all_labels.npy'), config['window_size'], device=device)
     run_ids = np.unique(dataset.window_to_run_id)
     if len(run_ids) < 3:

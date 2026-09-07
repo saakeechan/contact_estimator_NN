@@ -9,7 +9,8 @@ sys.path.insert(0, str(_ROOT / 'src'))
 import torch
 import yaml
 
-from contact_cnn import ContactCNNWithNormalization, DERTCN
+from der import DERTCN
+from normalization import ContactCNNWithNormalization
 from train.base_train import BaseTrainer, load_training_data
 
 
@@ -54,7 +55,7 @@ def main():
         raise ValueError("DER training requires model_architecture: 'tcn'.")
     model = ContactCNNWithNormalization(DERTCN(
         config['window_size'], num_features, config.get('tcn_num_channels', 64),
-        config.get('tcn_kernel_size', 3), config.get('tcn_num_blocks', 5), config.get('tcn_dropout', .2),
+        config.get('tcn_kernel_size', 3), config.get('tcn_num_blocks', 5), config.get('tcn_dropout', .2), legs=config['legs'],
     ), global_mean=mean, global_std=std).to(device)
     DERTrainer(model, config).train(train_loader, val_loader)
 

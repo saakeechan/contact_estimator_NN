@@ -5,11 +5,12 @@ csv_folder: "Data/CSVFiles/"
 ood_feature: "cmd_vel"
 
 # Add as many [min, max] windows as needed, e.g. [[0.0, 0.5], [1.0, 2.0]].
-cmd_vel_x_windows: [[0.0, 3.0]]
+cmd_vel_x_windows: [[0.0, 1.0]]
 # Example for environment OOD: [[0, 4], [6, 20]] includes 0-4 and 6-20, excluding 5.
 environment_windows: [[0, 10]]
 # Path to the data folder. Data should be separated into train.npy, train_label.npy, val.npy, val_label.npy.
 data_folder: "Data/NumpyFiles/"
+active_legs: both  # left | right | both; feature/output order is always left then right
 
 
 print_every: 2000
@@ -26,7 +27,7 @@ val_ratio: 0.1
 # Network params
 batch_size: 60  # Used for both training and testing
 init_lr: 0.001
-num_epoch: 1 # Reduced for quick training with small dataset
+num_epoch: 3 # Reduced for quick training with small dataset
 
 # Multi-task Learning: Contact Classification + Velocity Regression
 # Balances contact classification loss vs. velocity regression loss

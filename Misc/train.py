@@ -12,7 +12,9 @@ import time
 
 import torch.optim as optim
 
-from contact_cnn import *
+from natpn import TCN
+from normalization import ContactCNNWithNormalization
+from vanilla_cnn import contact_cnn
 from utils.data_handler import *
 from utils.plot_loss import generate_training_summary
 from natpn.nn import BayesianLoss
@@ -777,7 +779,6 @@ def main():
         raise ValueError("NatPN velocity training is currently implemented only for model_architecture: 'tcn'.")
     
     if model_arch == 'tcn':
-        from contact_cnn import TCN
         base_model = TCN(
             window_size=config['window_size'],
             num_features=num_features,
@@ -798,7 +799,6 @@ def main():
             num_features=num_features
         )
     
-    from contact_cnn import ContactCNNWithNormalization
     model = ContactCNNWithNormalization(base_model, global_mean=global_mean, global_std=global_std)
     model = model.to(device)
 

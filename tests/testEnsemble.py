@@ -11,7 +11,8 @@ _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(_ROOT / 'src'))
 
-from contact_cnn import ContactCNNWithNormalization, EnsembleTCN
+from ensemble import EnsembleTCN
+from normalization import ContactCNNWithNormalization
 from tests.base_test import ProbabilisticVelocitySingleTest
 
 
@@ -26,23 +27,25 @@ class EnsembleSingleTest(ProbabilisticVelocitySingleTest):
 
     @torch.no_grad()
     def run_ensemble_trajectory(self, models, trajectory, window_size, batch_size, device):
-        features = self.make_features(trajectory)
+        features = self.make_features(trajectory, models[0].base_model.legs)
         member_means, member_variances = [], []
         for first in range(0, len(features) - window_size + 1, batch_size):
             last = min(first + batch_size, len(features) - window_size + 1)
             windows = torch.from_numpy(np.stack([features[i:i + window_size] for i in range(first, last)])).float().to(device)
             outputs = [model(windows, return_sequence=False) for model in models]
-            member_means.append(torch.stack([output[1][:, 0] for output in outputs]))
-            member_variances.append(torch.stack([output[3][:, 0] for output in outputs]))
+            member_means.append(torch.stack([output[1] for output in outputs]))
+            member_variances.append(torch.stack([output[3] for output in outputs]))
         means = torch.cat(member_means, dim=1)
         aleatoric = torch.cat(member_variances, dim=1).mean(dim=0)
         epistemic = means.var(dim=0, unbiased=False)
         final_indices = np.arange(window_size - 1, len(trajectory))
-        return final_indices, means.mean(dim=0).cpu().numpy(), (aleatoric + epistemic).cpu().numpy(), aleatoric.cpu().numpy(), epistemic.cpu().numpy(), trajectory['lfoot-contact'].to_numpy()[final_indices], self.make_body_velocity(trajectory)[final_indices]
+        contacts = np.stack([trajectory[f'{leg[0]}foot-contact'].to_numpy()[final_indices] for leg in models[0].base_model.legs], axis=1)
+        body_velocity = self.make_body_velocity(trajectory)[final_indices]
+        return final_indices, means.mean(dim=0).cpu().numpy(), (aleatoric + epistemic).cpu().numpy(), aleatoric.cpu().numpy(), epistemic.cpu().numpy(), contacts, np.repeat(body_velocity[:, None, :], len(models[0].base_model.legs), axis=1)
 
     def evaluate(self, args, context, models=None, checkpoint_paths=None):
         config, device, trajectory = context['config'], context['device'], context['trajectory']
-        features = self.make_features(trajectory)
+        features = self.make_features(trajectory, config['legs'])
         if models is None:
             checkpoint_paths = self.find_member_checkpoints(config, features.shape[1])
             models = []
@@ -52,16 +55,18 @@ class EnsembleSingleTest(ProbabilisticVelocitySingleTest):
                 models.append(model.eval())
         indices, predicted, total, aleatoric, epistemic, contact, ground_truth = self.run_ensemble_trajectory(models, trajectory, config['window_size'], config.get('test_batch_size', config['batch_size']), device)
         contact_mask = contact == 1
-        selected_mask = contact_mask if contact_mask.any() else np.ones(len(contact), dtype=bool)
+        selected_mask = contact_mask.any(axis=1) if contact_mask.any() else np.ones(len(contact), dtype=bool)
         position = int(np.random.default_rng(args.seed).choice(np.flatnonzero(selected_mask)))
         if not args.skip_plots:
             output_path = os.path.join(os.path.dirname(os.path.dirname(checkpoint_paths[0])), f'ensemble_trajectory_seed{args.seed}.png')
-            self.save_velocity_plot(trajectory['timestamp'].to_numpy()[indices], predicted, ground_truth, contact, output_path)
-        mae = float(np.abs(predicted[contact_mask] - ground_truth[contact_mask]).mean()) if contact_mask.any() else float('nan')
+            for leg_index, leg in enumerate(config['legs']):
+                self.save_velocity_plot(trajectory['timestamp'].to_numpy()[indices], predicted[:, leg_index], ground_truth[:, leg_index], contact[:, leg_index], output_path.replace('.png', f'_{leg}.png'))
+        per_leg_mae = {leg: float(np.abs(predicted[:, index][contact_mask[:, index]] - ground_truth[:, index][contact_mask[:, index]]).mean()) if contact_mask[:, index].any() else float('nan') for index, leg in enumerate(config['legs'])}
+        mae = float(np.nanmean(list(per_leg_mae.values())))
         metrics = {
             'seed': args.seed, 'ood_feature': context['ood_feature'], 'environment': context['environment_id'],
             'cmd_vel_x': float(context['start_cmd_vel']), 'velocity_mae': mae,
-            'uncertainty_final_timestep_gt_contact': bool(contact[position] == 1),
+            'uncertainty_final_timestep_gt_contact': {leg: bool(contact[position, index] == 1) for index, leg in enumerate(config['legs'])}, 'per_leg_velocity_mae': per_leg_mae,
             'num_ensemble_members': len(models), 'aleatoric_variance': aleatoric[position].tolist(),
             'epistemic_variance': epistemic[position].tolist(), 'total_variance': total[position].tolist(),
             'mean_epistemic_variance_on_contact': epistemic[selected_mask].mean(axis=0).tolist(),
@@ -76,7 +81,7 @@ class EnsembleSingleTest(ProbabilisticVelocitySingleTest):
             window_size=config['window_size'], num_features=num_features,
             tcn_num_channels=config.get('tcn_num_channels', 64),
             tcn_kernel_size=config.get('tcn_kernel_size', 3),
-            tcn_num_blocks=config.get('tcn_num_blocks', 5), tcn_dropout=config.get('tcn_dropout', 0.2),
+            tcn_num_blocks=config.get('tcn_num_blocks', 5), tcn_dropout=config.get('tcn_dropout', 0.2), legs=config['legs'],
         ))
 
     def find_member_checkpoints(self, config, num_features):

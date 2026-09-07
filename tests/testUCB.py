@@ -12,7 +12,8 @@ sys.path.insert(0, str(_ROOT / "src"))
 import numpy as np
 import torch
 
-from contact_cnn import ContactCNNWithNormalization, UCBTCN
+from normalization import ContactCNNWithNormalization
+from ucb import UCBTCN
 from tests.base_test import ProbabilisticVelocitySingleTest
 
 
@@ -58,7 +59,7 @@ class UCBSingleTest(ProbabilisticVelocitySingleTest):
             config["window_size"], num_features, config.get("tcn_num_channels", 64),
             config.get("tcn_kernel_size", 3), config.get("tcn_num_blocks", 5), config.get("tcn_dropout", .2),
             config.get("ucb_rho", -3.0), config.get("ucb_sig1", 0.0),
-            config.get("ucb_sig2", 6.0), config.get("ucb_pi", .25),
+            config.get("ucb_sig2", 6.0), config.get("ucb_pi", .25), legs=config['legs'],
         ))
 
     def find_checkpoint(self, num_features, config):
@@ -77,12 +78,12 @@ class UCBSingleTest(ProbabilisticVelocitySingleTest):
     def stochastic_outputs(model, windows, samples):
         model.eval()
         outputs = [model(windows, return_sequence=False, sample=True) for _ in range(samples)]
-        means = torch.stack([output[1][:, 0] for output in outputs])
-        aleatoric = torch.stack([output[3][:, 0] for output in outputs]).mean(dim=0)
+        means = torch.stack([output[1] for output in outputs])
+        aleatoric = torch.stack([output[3] for output in outputs]).mean(dim=0)
         return means.mean(dim=0), aleatoric, means.var(dim=0, unbiased=False)
 
     def run_trajectory(self, model, trajectory, window_size, batch_size, device):
-        features = self.make_features(trajectory)
+        features = self.make_features(trajectory, model.base_model.legs)
         predictions, aleatoric, epistemic = [], [], []
         for first in range(0, len(features) - window_size + 1, batch_size):
             last = min(first + batch_size, len(features) - window_size + 1)
@@ -94,8 +95,9 @@ class UCBSingleTest(ProbabilisticVelocitySingleTest):
         final_indices = np.arange(window_size - 1, len(trajectory))
         # The base evaluator only needs the total predictive variance here.
         total = np.concatenate(aleatoric) + np.concatenate(epistemic)
-        return (final_indices, np.concatenate(predictions), total, np.zeros(len(final_indices)),
-                trajectory["lfoot-contact"].to_numpy()[final_indices], self.make_body_velocity(trajectory)[final_indices])
+        contacts = np.stack([trajectory[f'{leg[0]}foot-contact'].to_numpy()[final_indices] for leg in model.base_model.legs], axis=1)
+        body_velocity = self.make_body_velocity(trajectory)[final_indices]
+        return final_indices, np.concatenate(predictions), total, np.zeros_like(total), contacts, np.repeat(body_velocity[:, None, :], len(model.base_model.legs), axis=1)
 
     @staticmethod
     def get_training_window_starts(data_folder, window_size, config):
@@ -124,12 +126,12 @@ class UCBSingleTest(ProbabilisticVelocitySingleTest):
     def evaluate(self, args, context, model=None, checkpoint_path=None):
         self.mc_samples = int(context["config"]["ucb_mc_samples"])
         if checkpoint_path is None:
-            features = self.make_features(context["trajectory"])
+            features = self.make_features(context["trajectory"], context['config']['legs'])
             checkpoint_path = self.find_checkpoint(features.shape[1], context["config"])
         checkpoint = torch.load(checkpoint_path, map_location=context["device"])
         context["config"]["ucb_training_window_starts"] = checkpoint.get("train_window_starts")
         if model is None:
-            features = self.make_features(context["trajectory"])
+            features = self.make_features(context["trajectory"], context['config']['legs'])
             model = self.build_model(context["config"], features.shape[1]).to(context["device"])
             _load_ucb_inference_checkpoint(model, checkpoint["model_state_dict"])
         model.eval()

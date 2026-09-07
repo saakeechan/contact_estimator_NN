@@ -8,7 +8,8 @@ _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(_ROOT / "src"))
 
-from contact_cnn import ContactCNNWithNormalization, MCDropoutTCN
+from mc_dropout import MCDropoutTCN
+from normalization import ContactCNNWithNormalization
 from train.trainMCdropout import MCDropoutTrainer
 from train.trainReplay import _load_config, run_replay_training
 
@@ -31,7 +32,7 @@ def main():
         config, args.task_index,
         lambda cfg, features, mean, std: ContactCNNWithNormalization(MCDropoutTCN(
             cfg["window_size"], features, cfg.get("tcn_num_channels", 64), cfg.get("tcn_kernel_size", 3),
-            cfg.get("tcn_num_blocks", 5), cfg["mc_dropout_rate"]), mean, std),
+            cfg.get("tcn_num_blocks", 5), cfg["mc_dropout_rate"], legs=cfg['legs']), mean, std),
         MCDropoutTrainer, "logsReplayMCDropout", "replay_mc_dropout", "ReplayMCDropout", "epistemic",
         args.dry_run, args.skip_evaluate_after_task,
     )

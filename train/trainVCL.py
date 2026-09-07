@@ -21,7 +21,9 @@ from torch.optim import Adam
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from contact_cnn import ContactCNNWithNormalization, VCLTCN
+from normalization import ContactCNNWithNormalization
+from vcl import VCLTCN
+from common import resolve_active_legs
 from utils.ucb_task_windows import _validate_task_windows
 
 
@@ -293,8 +295,11 @@ def main():
     index = _load_task_index(args.task_index, task_windows, config["window_size"])
     data_folder = Path(config["data_folder"])
     data, labels, velocities = (np.load(data_folder / name) for name in ("all_data.npy", "all_labels.npy", "all_body_velocities.npy"))
-    if labels.shape != (len(data), 1) or velocities.shape != (len(data), 1, 3):
-        raise ValueError("Expected all_labels.npy (N,1) and all_body_velocities.npy (N,1,3).")
+    metadata = np.load(data_folder / 'all_data_metadata.npy', allow_pickle=True).item()
+    legs = tuple(metadata.get('legs', ()))
+    if legs != resolve_active_legs(config.get('active_legs', 'both')) or labels.shape != (len(data), len(legs)) or velocities.shape != (len(data), len(legs), 3):
+        raise ValueError('Dataset legs/shapes do not match active_legs. Regenerate the numpy dataset and task index.')
+    config['legs'] = legs
     starts = index["window_starts"]
     if np.any(starts < 0) or np.any(starts + config["window_size"] > len(data)):
         raise ValueError("Task index contains starts outside all_data.npy; rebuild the task index.")
@@ -322,7 +327,7 @@ def main():
     model = ContactCNNWithNormalization(VCLTCN(
         config["window_size"], data.shape[1], config.get("tcn_num_channels", 64), config.get("tcn_kernel_size", 3),
         config.get("tcn_num_blocks", 5), config.get("tcn_dropout", .2), config.get("vcl_rho", -3.0),
-        vcl_prior_sigma=float(config.get("vcl_prior_sigma", 1.0))), global_mean=mean, global_std=std).to(device)
+        vcl_prior_sigma=float(config.get("vcl_prior_sigma", 1.0)), legs=config['legs']), global_mean=mean, global_std=std).to(device)
     if checkpoint is not None:
         model.load_state_dict(checkpoint["model_state_dict"], strict=True)
     else:

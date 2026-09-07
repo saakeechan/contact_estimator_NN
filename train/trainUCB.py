@@ -21,7 +21,9 @@ import yaml
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from contact_cnn import ContactCNNWithNormalization, UCBTCN
+from normalization import ContactCNNWithNormalization
+from ucb import UCBTCN
+from common import resolve_active_legs
 from utils.ucb_task_windows import _validate_task_windows
 
 
@@ -353,8 +355,11 @@ def main():
     data = np.load(data_folder / "all_data.npy")
     labels = np.load(data_folder / "all_labels.npy")
     velocities = np.load(data_folder / "all_body_velocities.npy")
-    if labels.shape != (len(data), 1) or velocities.shape != (len(data), 1, 3):
-        raise ValueError("Expected all_labels.npy (N,1) and all_body_velocities.npy (N,1,3).")
+    metadata = np.load(data_folder / 'all_data_metadata.npy', allow_pickle=True).item()
+    legs = tuple(metadata.get('legs', ()))
+    if legs != resolve_active_legs(config.get('active_legs', 'both')) or labels.shape != (len(data), len(legs)) or velocities.shape != (len(data), len(legs), 3):
+        raise ValueError('Dataset legs/shapes do not match active_legs. Regenerate the numpy dataset and task index.')
+    config['legs'] = legs
     starts = index["window_starts"]
     if np.any(starts < 0) or np.any(starts + config["window_size"] > len(data)):
         raise ValueError("Task index contains starts outside all_data.npy; rebuild it with utils/ucb_task_windows.py.")
@@ -388,7 +393,7 @@ def main():
     model = ContactCNNWithNormalization(UCBTCN(
         config["window_size"], data.shape[1], config.get("tcn_num_channels", 64), config.get("tcn_kernel_size", 3),
         config.get("tcn_num_blocks", 5), config.get("tcn_dropout", .2), config.get("ucb_rho", -3.0),
-        config.get("ucb_sig1", 0.0), config.get("ucb_sig2", 6.0), config.get("ucb_pi", .25),
+        config.get("ucb_sig1", 0.0), config.get("ucb_sig2", 6.0), config.get("ucb_pi", .25), legs=config['legs'],
     ), global_mean=mean, global_std=std).to(device)
     mean_lr_multipliers = {}
     if checkpoint is not None:
