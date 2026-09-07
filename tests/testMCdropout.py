@@ -46,7 +46,7 @@ class MCDropoutSingleTest(ProbabilisticVelocitySingleTest):
         ))
 
     def find_checkpoint(self, num_features, config):
-        logs_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'logsMCDropout')
+        logs_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'logs', 'logsMCDropout')
         for run_dir in sorted(glob.glob(os.path.join(logs_root, 'run_*')), key=os.path.getmtime, reverse=True):
             for filename in ('model_best_val_velocity.pt', 'model_final_epoch.pt'):
                 checkpoint = os.path.join(run_dir, filename)

@@ -81,7 +81,7 @@ class EnsembleSingleTest(ProbabilisticVelocitySingleTest):
 
     def find_member_checkpoints(self, config, num_features):
         expected_members = int(config['num_ensemble_members'])
-        logs_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'logsEnsemble')
+        logs_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'logs', 'logsEnsemble')
         for run_dir in sorted(glob.glob(os.path.join(logs_root, 'run_*')), key=os.path.getmtime, reverse=True):
             checkpoints = sorted(glob.glob(os.path.join(run_dir, 'member_*', 'model_best_val_velocity.pt')))
             if len(checkpoints) == expected_members:

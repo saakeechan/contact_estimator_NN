@@ -93,21 +93,32 @@ def main():
     y_max = max(y_max, y_min * (1.01 if args.plot_metric == 'epistemic' else 1.0) + 1e-12)
 
     if args.save_plot:
-        figure, axis = plt.subplots(figsize=(9, 6))
-        if args.plot_metric == 'velocity-mae':
-            axis.scatter(feature_values, velocity_mae, color='tab:blue', s=24)
-            x_label = 'Environment number' if ood_feature == 'environment' else 'Command velocity x (m/s)'
-            axis.set(xlabel=x_label, ylabel=metric_label)
+        x_label = 'Environment number' if ood_feature == 'environment' else 'Command velocity x (m/s)'
+        if args.plot_metric == 'epistemic':
+            figure, (epistemic_axis, mae_axis) = plt.subplots(2, 1, figsize=(9, 9), sharex=True)
+            epistemic_axis.scatter(feature_values, plot_values, color='tab:purple', s=24)
+            epistemic_axis.set(ylabel=metric_label, yscale='log')
+            mae_axis.scatter(feature_values, velocity_mae, color='tab:blue', s=24)
+            mae_axis.set(xlabel=x_label, ylabel='Contact-masked velocity MAE')
+            for axis in (epistemic_axis, mae_axis):
+                axis.grid(True, which='both', alpha=0.3)
         else:
-            points = axis.scatter(
-                feature_values, plot_values, c=velocity_mae, cmap='viridis',
-                norm=Normalize(vmin=finite_mae.min(), vmax=mae_max, clip=True),
-            )
-            figure.colorbar(points, ax=axis, extend='max', label='Contact-masked velocity MAE (95th-percentile cap)')
-            x_label = 'Environment number' if ood_feature == 'environment' else 'Command velocity x (m/s)'
-            axis.set(xlabel=x_label, ylabel=metric_label, yscale='log' if args.plot_metric == 'epistemic' else 'linear')
+            figure, axis = plt.subplots(figsize=(9, 6))
+            if args.plot_metric == 'velocity-mae':
+                axis.scatter(feature_values, velocity_mae, color='tab:blue', s=24)
+                axis.set(xlabel=x_label, ylabel=metric_label)
+            else:
+                points = axis.scatter(
+                    feature_values, plot_values, c=velocity_mae, cmap='viridis',
+                    norm=Normalize(vmin=finite_mae.min(), vmax=mae_max, clip=True),
+                )
+                figure.colorbar(points, ax=axis, extend='max', label='Contact-masked velocity MAE (95th-percentile cap)')
+                axis.set(xlabel=x_label, ylabel=metric_label)
+            axis.grid(True, which='both', alpha=0.3)
+        if args.plot_metric == 'epistemic':
+            epistemic_axis.set_ylim(y_min, y_max)
+        elif args.plot_metric != 'velocity-mae':
             axis.set_ylim(y_min, y_max)
-        axis.grid(True, which='both', alpha=0.3)
         figure.tight_layout()
         figure.savefig(output_plot, dpi=150)
         plt.close(figure)

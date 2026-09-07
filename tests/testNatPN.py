@@ -43,7 +43,7 @@ class NatPNSingleTest(ProbabilisticVelocitySingleTest):
 
     def find_checkpoint(self, num_features, config):
         flow_type = config.get('natpn_flow_type', 'radial')
-        logs_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'logsNatPN')
+        logs_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'logs', 'logsNatPN')
         for run_dir in sorted(glob.glob(os.path.join(logs_root, '*')), key=os.path.getmtime, reverse=True):
             for filename in ('model_natpn_finetuned.pt', 'model_best_val_velocity.pt'):
                 checkpoint = os.path.join(run_dir, filename)

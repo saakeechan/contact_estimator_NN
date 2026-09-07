@@ -42,7 +42,7 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if config.get('model_architecture', 'tcn').lower() != 'tcn':
         raise ValueError("Ensemble training requires model_architecture: 'tcn'.")
-    root_dir = os.path.join('logsEnsemble', f"run_{__import__('datetime').datetime.now():%Y-%m-%d_%H-%M-%S}")
+    root_dir = _ROOT / 'logs' / 'logsEnsemble' / f"run_{__import__('datetime').datetime.now():%Y-%m-%d_%H-%M-%S}"
     num_features, mean, std, train_loader, val_loader = load_training_data(config, device)
     train_dataset = train_loader.dataset
     for index in range(count):
@@ -58,7 +58,7 @@ def main():
             config['window_size'], num_features, config.get('tcn_num_channels', 64),
             config.get('tcn_kernel_size', 3), config.get('tcn_num_blocks', 5), config.get('tcn_dropout', .2),
         ), global_mean=mean, global_std=std).to(device)
-        EnsembleTrainer(model, {**config, 'member_index': index, 'member_seed': seed}, os.path.join(root_dir, f'member_{index:02d}')).train(train_loader, val_loader)
+        EnsembleTrainer(model, {**config, 'member_index': index, 'member_seed': seed}, root_dir / f'member_{index:02d}').train(train_loader, val_loader)
 
 
 if __name__ == '__main__':

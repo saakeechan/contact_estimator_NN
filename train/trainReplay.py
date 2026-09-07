@@ -97,7 +97,7 @@ def _loader(data, labels, velocities, starts, config, shuffle, seed):
 
 class ReplayTrainer(BaseTrainer):
     """BaseTrainer's ordinary Gaussian workflow, reset once per continual task."""
-    logs_dir = "logsReplay"
+    logs_dir = _ROOT / "logs" / "logsReplay"
 
     def velocity_loss(self, outputs, velocity, dense):
         prediction, covariance = outputs[0], outputs[2]
@@ -151,7 +151,7 @@ def run_replay_training(config, task_index, model_factory, trainer_type, logs_na
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     mean, std = _normalization_stats(data, splits[0][0], config["window_size"], device)
     model = model_factory(config, data.shape[1], mean, std).to(device)
-    run_dir = _ROOT / logs_name / f"run_{datetime.now():%Y-%m-%d_%H-%M-%S}"
+    run_dir = _ROOT / "logs" / logs_name / f"run_{datetime.now():%Y-%m-%d_%H-%M-%S}"
     run_dir.mkdir(parents=True)
     with (run_dir / "network_params.yaml").open("w") as file:
         yaml.safe_dump(config, file, sort_keys=False)

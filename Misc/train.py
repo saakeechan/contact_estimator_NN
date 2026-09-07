@@ -7,6 +7,7 @@ import yaml
 from tqdm import tqdm
 import warnings
 from datetime import datetime
+from pathlib import Path
 import time
 
 import torch.optim as optim
@@ -24,6 +25,8 @@ warnings.filterwarnings(
     category=FutureWarning,
     message=".*LeafSpec.*"
 )
+
+_ROOT = Path(__file__).resolve().parents[1]
 
 
 def natpn_loss(posteriors, target, loss_fn):
@@ -310,7 +313,7 @@ def save_onnx_model(model, checkpoint_path, window_size):
 def train(model, train_dataloader, val_dataloader, config):
     # Create timestamped run directory
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    run_dir = os.path.join("logs", f"run_{timestamp}")
+    run_dir = _ROOT / "logs" / f"run_{timestamp}"
     os.makedirs(run_dir, exist_ok=True)
     
     # Save config copy to run directory

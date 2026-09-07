@@ -62,7 +62,7 @@ class UCBSingleTest(ProbabilisticVelocitySingleTest):
         ))
 
     def find_checkpoint(self, num_features, config):
-        logs_root = _ROOT / "logsUCB"
+        logs_root = _ROOT / "logs" / "logsUCB"
         for run_dir in sorted(glob.glob(str(logs_root / "run_*")), key=os.path.getmtime, reverse=True):
             checkpoints = sorted(glob.glob(os.path.join(run_dir, "model_after_task_*.pt")), reverse=True)
             for checkpoint in checkpoints:

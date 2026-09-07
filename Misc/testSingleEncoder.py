@@ -92,7 +92,7 @@ def make_model(config, num_features):
 
 
 def latest_checkpoint(encoder_type):
-    logs_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'logsEncoder')
+    logs_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'logs', 'logsEncoder')
     checkpoint_name = 'dae_best_val_mse.pt' if encoder_type == 'DAE' else 'vae_best_val_loss.pt'
     for run_dir in sorted(glob.glob(os.path.join(logs_root, '*')), key=os.path.getmtime, reverse=True):
         checkpoint = os.path.join(run_dir, checkpoint_name)

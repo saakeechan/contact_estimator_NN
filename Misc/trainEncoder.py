@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -14,6 +15,7 @@ from torch.utils.data import DataLoader, Subset
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
+_ROOT = Path(__file__).resolve().parents[1]
 sys.path.append('.')
 
 from contact_cnn import DenoisingTCNAutoencoder
@@ -212,7 +214,7 @@ def save_tcn_last_timestep_umap(dataloader, model, output_path, random_seed=42, 
 def train(model, train_dataloader, val_dataloader, config):
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     encoder_type = config['encoder_type'].lower()
-    run_dir = os.path.join("logsEncoder", f"{encoder_type}_{timestamp}")
+    run_dir = _ROOT / "logs" / "logsEncoder" / f"{encoder_type}_{timestamp}"
     os.makedirs(run_dir, exist_ok=True)
     with open(os.path.join(run_dir, "network_params.yaml"), 'w') as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)

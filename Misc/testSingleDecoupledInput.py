@@ -108,7 +108,7 @@ def make_model(config, num_features):
 
 def latest_checkpoint(num_features, evidence_source):
     """Select the newest task checkpoint matching the active input contract and NatPN mode."""
-    logs_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'logsNatPN')
+    logs_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'logs', 'logsNatPN')
     for run_dir in sorted(glob.glob(os.path.join(logs_root, '*')), key=os.path.getmtime, reverse=True):
         for filename in ('model_natpn_finetuned.pt', 'model_best_val_velocity.pt'):
             checkpoint = os.path.join(run_dir, filename)
@@ -127,7 +127,7 @@ def latest_checkpoint(num_features, evidence_source):
 
 def latest_input_natpn_checkpoint(num_features):
     """Select the newest input-density artifact compatible with the current CSV features."""
-    logs_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'logsEncoder')
+    logs_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'logs', 'logsEncoder')
     for checkpoint_path in sorted(
         glob.glob(os.path.join(logs_root, '*', 'encoder_input_natpn.pt')),
         key=os.path.getmtime,

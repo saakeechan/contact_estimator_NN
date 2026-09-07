@@ -124,7 +124,7 @@ def save_tcn_last_timestep_umap(dataloader, model, output_path, random_seed=42, 
 class BaseTrainer:
     """Model-independent epoch, evaluation, checkpoint, and reporting workflow."""
 
-    logs_dir = 'logs'
+    logs_dir = _ROOT / 'logs'
     loss_description = 'Gaussian negative log-likelihood'
 
     def __init__(self, model, config, run_dir=None):

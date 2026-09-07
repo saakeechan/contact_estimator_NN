@@ -22,7 +22,7 @@ def natpn_loss(posteriors, target, loss_fn):
 
 
 class NatPNTrainer(BaseTrainer):
-    logs_dir = 'logsNatPN'
+    logs_dir = _ROOT / 'logs' / 'logsNatPN'
 
     def __init__(self, model, config):
         super().__init__(model, config)

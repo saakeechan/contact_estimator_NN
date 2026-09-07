@@ -23,7 +23,7 @@ def nig_loss(parameters, target, regularizer_weight):
 
 
 class DERTrainer(BaseTrainer):
-    logs_dir = 'logsDER'
+    logs_dir = _ROOT / 'logs' / 'logsDER'
 
     def __init__(self, model, config):
         super().__init__(model, config)

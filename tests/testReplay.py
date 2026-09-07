@@ -44,13 +44,14 @@ class ReplaySingleTest(ProbabilisticVelocitySingleTest):
             if not os.path.isfile(checkpoint):
                 raise FileNotFoundError(checkpoint)
             return checkpoint
-        for run_dir in sorted(glob.glob(str(_ROOT / "logsReplay" / "run_*")), key=os.path.getmtime, reverse=True):
+        logs_root = _ROOT / "logs" / "logsReplay"
+        for run_dir in sorted(glob.glob(str(logs_root / "run_*")), key=os.path.getmtime, reverse=True):
             checkpoints = sorted(glob.glob(os.path.join(run_dir, "model_after_task_*.pt")), reverse=True)
             for checkpoint in checkpoints:
                 state = torch.load(checkpoint, map_location="cpu")["model_state_dict"]
                 if state["base_model.input_proj.weight"].shape[1] == num_features:
                     return checkpoint
-        raise FileNotFoundError(f"No replay checkpoint with {num_features} input features found in {_ROOT / 'logsReplay'}.")
+        raise FileNotFoundError(f"No replay checkpoint with {num_features} input features found in {logs_root}.")
 
     @staticmethod
     def get_training_window_starts(data_folder, window_size, config):

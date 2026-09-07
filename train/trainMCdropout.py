@@ -17,7 +17,7 @@ from train.base_train import BaseTrainer, load_training_data
 
 
 class MCDropoutTrainer(BaseTrainer):
-    logs_dir = 'logsMCDropout'
+    logs_dir = _ROOT / 'logs' / 'logsMCDropout'
     loss_description = 'Gaussian negative log-likelihood (dropout enabled during training)'
 
     def velocity_loss(self, outputs, velocity, dense):

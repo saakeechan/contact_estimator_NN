@@ -13,16 +13,20 @@ MIN_VELOCITY_VARIANCE = 1e-6
 UCB_MIN_RHO = -12.0
 UCB_MAX_RHO = 5.0
 
-NATPN_ROOT = Path(__file__).resolve().parents[1] / "NATPN" / "natural-posterior-network"
-if not NATPN_ROOT.is_dir():
-    raise RuntimeError(f"Bundled NatPN source is missing: {NATPN_ROOT}")
-if str(NATPN_ROOT) not in sys.path:
-    sys.path.insert(0, str(NATPN_ROOT))
-
-from natpn.nn.flow import MaskedAutoregressiveFlow, RadialFlow
-from natpn.nn.output import NormalOutput
-from natpn.nn.scaler import EvidenceScaler
-from natpn.distributions import PosteriorUpdate
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+NATPN_ROOT = next((path for path in (
+    _PROJECT_ROOT / "NATPN" / "natural-posterior-network",
+    _PROJECT_ROOT / "Source Codes" / "NATPN" / "natural-posterior-network",
+) if path.is_dir()), None)
+if NATPN_ROOT is not None:
+    if str(NATPN_ROOT) not in sys.path:
+        sys.path.insert(0, str(NATPN_ROOT))
+    from natpn.nn.flow import MaskedAutoregressiveFlow, RadialFlow
+    from natpn.nn.output import NormalOutput
+    from natpn.nn.scaler import EvidenceScaler
+    from natpn.distributions import PosteriorUpdate
+else:
+    MaskedAutoregressiveFlow = RadialFlow = NormalOutput = EvidenceScaler = PosteriorUpdate = None
 
 
 def make_velocity_heads(num_features):
@@ -78,6 +82,8 @@ class NatPNVelocityHeads(nn.Module):
     """Task-latent NatPN heads with one shared flow-derived evidence space."""
     def __init__(self, latent_dim, flow_type="radial", flow_layers=8, certainty_budget="normal"):
         super().__init__()
+        if NATPN_ROOT is None:
+            raise RuntimeError("NatPN is required for NatPNVelocityHeads; expected NATPN/natural-posterior-network or Source Codes/NATPN/natural-posterior-network.")
         if flow_type == "radial":
             flow = lambda: RadialFlow(latent_dim, flow_layers)
         elif flow_type == "masked_autoregressive":
@@ -395,35 +401,76 @@ class _UCBPrior(nn.Module):
 
 
 class _BayesianParameterLayer(nn.Module):
-    """Shared BBB sampling plus an optional frozen previous-task Gaussian prior."""
-    def __init__(self, rho=-3.0, sig1=0.0, sig2=6.0, pi=0.25):
+    """Mean-field Bayesian layer with checkpointed diagonal-Gaussian VCL priors."""
+    def __init__(self, rho=-3.0, sig1=0.0, sig2=6.0, pi=0.25, initial_prior_sigma=None):
         super().__init__()
         self.rho = rho
         self.prior = _UCBPrior(sig1, sig2, pi)
+        self.initial_prior_sigma = initial_prior_sigma
         self.log_prior = None
         self.log_variational_posterior = None
 
     def _initialize_continual_prior(self):
-        """Create checkpointed buffers; task 0 still uses the mixture prior."""
-        self.register_buffer("weight_prior_mu", self.weight_mu.detach().clone())
-        self.register_buffer("weight_prior_sigma", self.posterior_scale(self.weight_rho).detach().clone())
-        if self.bias_mu is not None:
-            self.register_buffer("bias_prior_mu", self.bias_mu.detach().clone())
-            self.register_buffer("bias_prior_sigma", self.posterior_scale(self.bias_rho).detach().clone())
+        """Create detached Gaussian buffers; VCL task 0 uses N(0, initial_sigma²)."""
+        if self.initial_prior_sigma is None:
+            weight_mu, weight_sigma = self.weight_mu.detach().clone(), self.posterior_scale(self.weight_rho).detach().clone()
         else:
-            self.register_buffer("bias_prior_mu", None)
-            self.register_buffer("bias_prior_sigma", None)
-        self.register_buffer("uses_previous_posterior_prior", torch.tensor(False))
+            weight_mu = torch.zeros_like(self.weight_mu)
+            weight_sigma = torch.full_like(self.weight_mu, float(self.initial_prior_sigma)).clamp_min(1e-8)
+        self.register_buffer("prior_weight_mu", weight_mu)
+        self.register_buffer("prior_weight_sigma", weight_sigma)
+        if self.bias_mu is not None:
+            if self.initial_prior_sigma is None:
+                bias_mu, bias_sigma = self.bias_mu.detach().clone(), self.posterior_scale(self.bias_rho).detach().clone()
+            else:
+                bias_mu = torch.zeros_like(self.bias_mu)
+                bias_sigma = torch.full_like(self.bias_mu, float(self.initial_prior_sigma)).clamp_min(1e-8)
+            self.register_buffer("prior_bias_mu", bias_mu)
+            self.register_buffer("prior_bias_sigma", bias_sigma)
+        else:
+            self.register_buffer("prior_bias_mu", None)
+            self.register_buffer("prior_bias_sigma", None)
+        self.register_buffer("uses_previous_posterior_prior", torch.tensor(self.initial_prior_sigma is not None))
+
+    def posterior_sigma(self):
+        """Weight posterior standard deviation; biases use the same parameterization."""
+        return self.posterior_scale(self.weight_rho)
+
+    def kl_to_prior(self):
+        """Analytic KL(q || p) for this layer's weights and optional bias."""
+        def gaussian_kl(mu, rho, prior_mu, prior_sigma):
+            sigma = self.posterior_scale(rho)
+            prior_sigma = prior_sigma.clamp_min(1e-8)
+            return (torch.log(prior_sigma / sigma)
+                    + (sigma.square() + (mu - prior_mu).square()) / (2.0 * prior_sigma.square())
+                    - 0.5).sum()
+
+        result = gaussian_kl(self.weight_mu, self.weight_rho, self.prior_weight_mu, self.prior_weight_sigma)
+        if self.bias_mu is not None:
+            result = result + gaussian_kl(self.bias_mu, self.bias_rho, self.prior_bias_mu, self.prior_bias_sigma)
+        return result
 
     @torch.no_grad()
-    def snapshot_posterior_as_prior(self):
+    def set_prior_from_posterior(self):
         """Freeze q_t as p_(t+1); buffers deliberately do not share storage."""
-        self.weight_prior_mu.copy_(self.weight_mu)
-        self.weight_prior_sigma.copy_(self.posterior_scale(self.weight_rho))
+        self.prior_weight_mu.copy_(self.weight_mu.detach())
+        self.prior_weight_sigma.copy_(self.posterior_scale(self.weight_rho.detach()))
         if self.bias_mu is not None:
-            self.bias_prior_mu.copy_(self.bias_mu)
-            self.bias_prior_sigma.copy_(self.posterior_scale(self.bias_rho))
+            self.prior_bias_mu.copy_(self.bias_mu.detach())
+            self.prior_bias_sigma.copy_(self.posterior_scale(self.bias_rho.detach()))
         self.uses_previous_posterior_prior.fill_(True)
+
+    snapshot_posterior_as_prior = set_prior_from_posterior
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        """Accept checkpoints written before VCL named the buffers prior_* ."""
+        for current, legacy in (("prior_weight_mu", "weight_prior_mu"), ("prior_weight_sigma", "weight_prior_sigma"),
+                                ("prior_bias_mu", "bias_prior_mu"), ("prior_bias_sigma", "bias_prior_sigma")):
+            current_key, legacy_key = prefix + current, prefix + legacy
+            if current_key not in state_dict and legacy_key in state_dict:
+                state_dict[current_key] = state_dict[legacy_key]
+            state_dict.pop(legacy_key, None)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     @staticmethod
     def _log_variational_posterior(value, mu, rho):
@@ -452,8 +499,8 @@ class _BayesianParameterLayer(nn.Module):
 class BayesianConv1d(_BayesianParameterLayer):
     """Bayesian 1-D convolution equivalent to UCB/src's BayesianConv2D."""
     def __init__(self, in_channels, out_channels, kernel_size, *, dilation=1, bias=True,
-                 rho=-3.0, sig1=0.0, sig2=6.0, pi=0.25):
-        super().__init__(rho, sig1, sig2, pi)
+                 rho=-3.0, sig1=0.0, sig2=6.0, pi=0.25, initial_prior_sigma=None):
+        super().__init__(rho, sig1, sig2, pi, initial_prior_sigma)
         self.dilation = dilation
         self.kernel_size = kernel_size
         self.weight_mu = nn.Parameter(torch.empty(out_channels, in_channels, kernel_size).normal_(0.0, 0.1))
@@ -468,13 +515,13 @@ class BayesianConv1d(_BayesianParameterLayer):
 
     def forward(self, x, sample=False, calculate_log_probs=False):
         weight, log_prior, log_q = self._sample_parameter(
-            self.weight_mu, self.weight_rho, self.weight_prior_mu, self.weight_prior_sigma, sample, calculate_log_probs
+            self.weight_mu, self.weight_rho, self.prior_weight_mu, self.prior_weight_sigma, sample, calculate_log_probs
         )
         if self.bias_mu is None:
             bias = None
         else:
             bias, bias_prior, bias_log_q = self._sample_parameter(
-                self.bias_mu, self.bias_rho, self.bias_prior_mu, self.bias_prior_sigma, sample, calculate_log_probs
+                self.bias_mu, self.bias_rho, self.prior_bias_mu, self.prior_bias_sigma, sample, calculate_log_probs
             )
             log_prior, log_q = log_prior + bias_prior, log_q + bias_log_q
         self.log_prior, self.log_variational_posterior = log_prior, log_q
@@ -483,8 +530,9 @@ class BayesianConv1d(_BayesianParameterLayer):
 
 class BayesianLinear(_BayesianParameterLayer):
     """Bayesian affine layer with the UCB/src variational parameterization."""
-    def __init__(self, in_features, out_features, *, bias=True, rho=-3.0, sig1=0.0, sig2=6.0, pi=0.25):
-        super().__init__(rho, sig1, sig2, pi)
+    def __init__(self, in_features, out_features, *, bias=True, rho=-3.0, sig1=0.0, sig2=6.0, pi=0.25,
+                 initial_prior_sigma=None):
+        super().__init__(rho, sig1, sig2, pi, initial_prior_sigma)
         self.weight_mu = nn.Parameter(torch.empty(out_features, in_features).normal_(0.0, 0.1))
         self.weight_rho = nn.Parameter(torch.empty_like(self.weight_mu).normal_(rho, 0.1))
         if bias:
@@ -497,13 +545,13 @@ class BayesianLinear(_BayesianParameterLayer):
 
     def forward(self, x, sample=False, calculate_log_probs=False):
         weight, log_prior, log_q = self._sample_parameter(
-            self.weight_mu, self.weight_rho, self.weight_prior_mu, self.weight_prior_sigma, sample, calculate_log_probs
+            self.weight_mu, self.weight_rho, self.prior_weight_mu, self.prior_weight_sigma, sample, calculate_log_probs
         )
         if self.bias_mu is None:
             bias = None
         else:
             bias, bias_prior, bias_log_q = self._sample_parameter(
-                self.bias_mu, self.bias_rho, self.bias_prior_mu, self.bias_prior_sigma, sample, calculate_log_probs
+                self.bias_mu, self.bias_rho, self.prior_bias_mu, self.prior_bias_sigma, sample, calculate_log_probs
             )
             log_prior, log_q = log_prior + bias_prior, log_q + bias_log_q
         self.log_prior, self.log_variational_posterior = log_prior, log_q
@@ -542,10 +590,12 @@ class UCBTCN(nn.Module):
     """
     def __init__(self, window_size=10, num_features=12, tcn_num_channels=64,
                  tcn_kernel_size=3, tcn_num_blocks=5, tcn_dropout=0.2,
-                 ucb_rho=-3.0, ucb_sig1=0.0, ucb_sig2=6.0, ucb_pi=0.25):
+                 ucb_rho=-3.0, ucb_sig1=0.0, ucb_sig2=6.0, ucb_pi=0.25,
+                 initial_prior_sigma=None):
         super().__init__()
         self.num_features, self.window_size = num_features, window_size
-        ucb_kwargs = dict(rho=ucb_rho, sig1=ucb_sig1, sig2=ucb_sig2, pi=ucb_pi)
+        ucb_kwargs = dict(rho=ucb_rho, sig1=ucb_sig1, sig2=ucb_sig2, pi=ucb_pi,
+                          initial_prior_sigma=initial_prior_sigma)
         self.input_proj = _BayesianCausalConv1d(num_features, tcn_num_channels, 1, 1, **ucb_kwargs)
         self.tcn_backbone = nn.ModuleList([
             _BayesianTCNResidualBlock(tcn_num_channels, tcn_kernel_size, 2 ** index, tcn_dropout, **ucb_kwargs)
@@ -566,7 +616,16 @@ class UCBTCN(nn.Module):
         """Turn the completed task posterior into the frozen prior for the next task."""
         for module in self.modules():
             if isinstance(module, _BayesianParameterLayer):
-                module.snapshot_posterior_as_prior()
+                module.set_prior_from_posterior()
+
+    def kl_to_prior(self):
+        """Analytic diagonal-Gaussian KL over every Bayesian weight and bias."""
+        return sum(module.kl_to_prior() for module in self.modules()
+                   if isinstance(module, _BayesianParameterLayer))
+
+    @torch.no_grad()
+    def set_prior_from_posterior(self):
+        self.snapshot_posterior_as_prior()
 
     def extract_features(self, x, sample=False, calculate_log_probs=False):
         """Return causal TCN features for latent-space diagnostics."""
@@ -589,6 +648,14 @@ class UCBTCN(nn.Module):
             velocity_seq = covariance_seq = None
         contact_out = self.contact_head(features[:, :, -1], sample, calculate_log_probs)
         return velocity_seq, velocity_out, covariance_seq, covariance_out, contact_out
+
+
+class VCLTCN(UCBTCN):
+    """Shared-head Bayesian TCN whose initial prior is the VCL Gaussian N(0, σ²)."""
+    def __init__(self, *args, vcl_prior_sigma=1.0, **kwargs):
+        if vcl_prior_sigma <= 0:
+            raise ValueError("vcl_prior_sigma must be positive.")
+        super().__init__(*args, initial_prior_sigma=vcl_prior_sigma, **kwargs)
 
 
 class CausalConv1d(nn.Module):

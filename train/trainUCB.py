@@ -377,7 +377,7 @@ def main():
         start_task = int(checkpoint["next_task_id"])
         run_dir = args.resume_checkpoint.resolve().parent
     else:
-        run_dir = _ROOT / "logsUCB" / f"run_{datetime.now():%Y-%m-%d_%H-%M-%S}"
+        run_dir = _ROOT / "logs" / "logsUCB" / f"run_{datetime.now():%Y-%m-%d_%H-%M-%S}"
         run_dir.mkdir(parents=True, exist_ok=False)
         with (run_dir / "network_params.yaml").open("w") as file:
             yaml.safe_dump(config, file, sort_keys=False)

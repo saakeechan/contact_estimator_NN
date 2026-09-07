@@ -31,6 +31,7 @@ MODEL_SCRIPTS = {
     'ensemble': 'tests/testEnsemble.py',
     'mc_dropout': 'tests/testMCdropout.py',
     'ucb': 'tests/testUCB.py',
+    'vcl': 'tests/testVCL.py',
     'replay': 'tests/testReplay.py',
     'replay_mc_dropout': 'tests/testReplayMCdropout.py',
 }
@@ -40,6 +41,7 @@ MODEL_RESULTS_DIRECTORIES = {
     'ensemble': 'Ensemble',
     'mc_dropout': 'MCDropout',
     'ucb': 'UCB',
+    'vcl': 'VCL',
     'replay': 'Replay',
     'replay_mc_dropout': 'ReplayMCDropout',
 }
@@ -102,6 +104,9 @@ class SeriesTest:
         elif args.model == 'ucb':
             from tests.testUCB import UCBSingleTest, run_evaluation
             evaluator, cached_model, cached_checkpoint = UCBSingleTest(), None, None
+        elif args.model == 'vcl':
+            from tests.testVCL import VCLSingleTest, run_evaluation
+            evaluator, cached_model, cached_checkpoint = VCLSingleTest(), None, None
         elif args.model == 'replay':
             from tests.testReplay import ReplaySingleTest, run_evaluation
             evaluator, cached_model, cached_checkpoint = ReplaySingleTest(), None, None

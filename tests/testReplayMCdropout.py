@@ -28,12 +28,13 @@ class ReplayMCDropoutSingleTest(MCDropoutSingleTest):
     def find_checkpoint(self, num_features, config):
         if getattr(self, "checkpoint_override", None):
             return self.checkpoint_override
-        for run_dir in sorted(glob.glob(str(_ROOT / "logsReplayMCDropout" / "run_*")), key=os.path.getmtime, reverse=True):
+        logs_root = _ROOT / "logs" / "logsReplayMCDropout"
+        for run_dir in sorted(glob.glob(str(logs_root / "run_*")), key=os.path.getmtime, reverse=True):
             for checkpoint in sorted(glob.glob(os.path.join(run_dir, "model_after_task_*.pt")), reverse=True):
                 state = torch.load(checkpoint, map_location="cpu")["model_state_dict"]
                 if state["base_model.input_proj.weight"].shape[1] == num_features:
                     return checkpoint
-        raise FileNotFoundError(f"No replay MC-dropout checkpoint with {num_features} input features found.")
+        raise FileNotFoundError(f"No replay MC-dropout checkpoint with {num_features} input features found in {logs_root}.")
 
     @staticmethod
     def get_training_window_starts(data_folder, window_size, config):

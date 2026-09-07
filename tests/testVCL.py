@@ -1,4 +1,4 @@
-"""UCB Bayes-by-Backprop hooks for the shared velocity evaluator."""
+"""VCL Bayesian-TCN hooks for the shared probabilistic velocity evaluator."""
 
 import glob
 import os
@@ -12,65 +12,50 @@ sys.path.insert(0, str(_ROOT / "src"))
 import numpy as np
 import torch
 
-from contact_cnn import ContactCNNWithNormalization, UCBTCN
+from contact_cnn import ContactCNNWithNormalization, VCLTCN
 from tests.base_test import ProbabilisticVelocitySingleTest
 
 
-def _load_ucb_inference_checkpoint(model, state_dict):
-    """Accept legacy fixed-prior checkpoints for inference only."""
-    incompatible = model.load_state_dict(state_dict, strict=False)
-    allowed_missing = {
-        name for name in model.state_dict()
-        if name.endswith(("weight_prior_mu", "weight_prior_sigma", "bias_prior_mu", "bias_prior_sigma", "uses_previous_posterior_prior"))
-    }
-    if incompatible.unexpected_keys or set(incompatible.missing_keys) - allowed_missing:
-        raise RuntimeError(
-            f"Checkpoint is incompatible with the UCB model; missing={incompatible.missing_keys}, "
-            f"unexpected={incompatible.unexpected_keys}."
-        )
-
-
-class UCBSingleTest(ProbabilisticVelocitySingleTest):
+class VCLSingleTest(ProbabilisticVelocitySingleTest):
     default_seed = 203
     default_cmd_vel_x_window = (0.0, 3.0)
-    model_config_name = "UCB_params.yaml"
+    model_config_name = "VCL_params.yaml"
     find_trajectory = staticmethod(ProbabilisticVelocitySingleTest.find_random_trajectory)
 
     def add_model_arguments(self, parser):
-        parser.add_argument("--knn-cache", help="Optional cache for the active-task UCB latent reference.")
+        parser.add_argument("--knn-cache", help="Optional cache for the active VCL latent reference.")
         parser.add_argument("--skip-plots", action="store_true", help="Do not save the per-trajectory velocity plot.")
-        parser.add_argument("--mc-samples", type=int, help="Override ucb_mc_samples from the config.")
+        parser.add_argument("--mc-samples", type=int, help="Override vcl_evaluation_mc_samples from the config.")
 
     def set_runtime_values(self, args):
         self.mc_samples_override = args.mc_samples
 
     def configure(self, config):
-        samples = int(getattr(self, "mc_samples_override", None) or config["ucb_mc_samples"])
+        samples = int(getattr(self, "mc_samples_override", None) or config["vcl_evaluation_mc_samples"])
         if samples < 2:
-            raise ValueError("UCB predictive uncertainty requires ucb_mc_samples >= 2.")
-        config["ucb_mc_samples"] = samples
+            raise ValueError("VCL predictive uncertainty requires at least two samples.")
+        config["vcl_evaluation_mc_samples"] = samples
         return config
 
     def build_model(self, config, num_features):
         if config.get("model_architecture", "tcn").lower() != "tcn":
-            raise ValueError("UCB inference requires model_architecture: 'tcn'.")
-        return ContactCNNWithNormalization(UCBTCN(
+            raise ValueError("VCL inference requires model_architecture: 'tcn'.")
+        return ContactCNNWithNormalization(VCLTCN(
             config["window_size"], num_features, config.get("tcn_num_channels", 64),
             config.get("tcn_kernel_size", 3), config.get("tcn_num_blocks", 5), config.get("tcn_dropout", .2),
-            config.get("ucb_rho", -3.0), config.get("ucb_sig1", 0.0),
-            config.get("ucb_sig2", 6.0), config.get("ucb_pi", .25),
+            config.get("vcl_rho", -3.0), vcl_prior_sigma=float(config.get("vcl_prior_sigma", 1.0)),
         ))
 
     def find_checkpoint(self, num_features, config):
-        logs_root = _ROOT / "logsUCB"
+        logs_root = _ROOT / "logs" / "logsVCL"
         for run_dir in sorted(glob.glob(str(logs_root / "run_*")), key=os.path.getmtime, reverse=True):
-            checkpoints = sorted(glob.glob(os.path.join(run_dir, "model_after_task_*.pt")), reverse=True)
+            checkpoints = sorted(glob.glob(os.path.join(run_dir, "task_*_posterior.pt")), reverse=True)
             for checkpoint in checkpoints:
                 state = torch.load(checkpoint, map_location="cpu")
                 weights = state["model_state_dict"]
                 if weights["base_model.input_proj.conv.weight_mu"].shape[1] == num_features:
                     return checkpoint
-        raise FileNotFoundError(f"No UCB checkpoint with {num_features} input features found in {logs_root}.")
+        raise FileNotFoundError(f"No VCL checkpoint with {num_features} input features found in {logs_root}.")
 
     @staticmethod
     @torch.no_grad()
@@ -99,7 +84,7 @@ class UCBSingleTest(ProbabilisticVelocitySingleTest):
 
     @staticmethod
     def get_training_window_starts(data_folder, window_size, config):
-        starts = config.get("ucb_training_window_starts")
+        starts = config.get("vcl_training_window_starts")
         if starts is not None:
             return np.asarray(starts, dtype=np.int64)
         return ProbabilisticVelocitySingleTest.get_training_window_starts(data_folder, window_size, config)
@@ -122,27 +107,27 @@ class UCBSingleTest(ProbabilisticVelocitySingleTest):
         return aleatoric.squeeze(0).cpu().numpy(), epistemic.squeeze(0).cpu().numpy()
 
     def evaluate(self, args, context, model=None, checkpoint_path=None):
-        self.mc_samples = int(context["config"]["ucb_mc_samples"])
+        self.mc_samples = int(context["config"]["vcl_evaluation_mc_samples"])
         if checkpoint_path is None:
             features = self.make_features(context["trajectory"])
             checkpoint_path = self.find_checkpoint(features.shape[1], context["config"])
         checkpoint = torch.load(checkpoint_path, map_location=context["device"])
-        context["config"]["ucb_training_window_starts"] = checkpoint.get("train_window_starts")
+        context["config"]["vcl_training_window_starts"] = checkpoint.get("train_window_starts")
         if model is None:
             features = self.make_features(context["trajectory"])
             model = self.build_model(context["config"], features.shape[1]).to(context["device"])
-            _load_ucb_inference_checkpoint(model, checkpoint["model_state_dict"])
+            model.load_state_dict(checkpoint["model_state_dict"], strict=True)
         model.eval()
         metrics, model, checkpoint_path = super().evaluate(args, context, model, checkpoint_path)
         aleatoric, epistemic = np.asarray(metrics["aleatoric_variance"]), np.asarray(metrics["epistemic_variance"])
-        metrics["ucb_mc_samples"] = self.mc_samples
+        metrics["vcl_mc_samples"] = self.mc_samples
         metrics["total_variance"] = (aleatoric + epistemic).tolist()
         return metrics, model, checkpoint_path
 
 
 def run_evaluation(args, context, model=None, checkpoint_path=None):
-    return UCBSingleTest().evaluate(args, context, model, checkpoint_path)
+    return VCLSingleTest().evaluate(args, context, model, checkpoint_path)
 
 
 if __name__ == "__main__":
-    UCBSingleTest().main()
+    VCLSingleTest().main()

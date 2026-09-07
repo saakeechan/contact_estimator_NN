@@ -59,7 +59,7 @@ at the top of `utils/testSeries.py`.
 The default CSV names include the network and inclusive seed range, such as
 `natpn_seeds_500-600.csv`, `der_seeds_500-600.csv`, and `encoder_seeds_2800-2851.csv`.
 
-Training runs create timestamped directories in `logs/`, `logsNatPN/`, `logsDER/`, or `logsEncoder/`, containing:
+Training runs create timestamped directories under `logs/` (for example, `logs/logsNatPN/`, `logs/logsDER/`, or `logs/logsEncoder/`), containing:
 - **network_params.yaml** - Copy of configuration used
 - **training_summary.txt/json** - Final metrics, training time, best results
 - **training_validation_loss.png** - Loss curves (auto-generated)
