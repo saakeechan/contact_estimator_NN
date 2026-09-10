@@ -212,7 +212,10 @@ class ProbabilisticVelocitySingleTest(BaseSingleTest):
 
     @staticmethod
     def make_features(trajectory, legs):
-        features = []
+        features = [
+            trajectory[['acc_body_x', 'acc_body_y', 'acc_body_z']].to_numpy(),
+            trajectory[['gyro_body_x', 'gyro_body_y', 'gyro_body_z']].to_numpy(),
+        ]
         for leg in legs:
             joint_names = tuple(f'{leg}_{name}' for name in ('hip_pitch_joint', 'hip_roll_joint', 'hip_yaw_joint', 'knee_joint', 'ankle_pitch_joint', 'ankle_roll_joint'))
             torque = trajectory[['joint_torque_' + name for name in joint_names]].to_numpy()
@@ -221,7 +224,7 @@ class ProbabilisticVelocitySingleTest(BaseSingleTest):
 
     @staticmethod
     def make_body_velocity(trajectory):
-        from utils.csv2numpyV1 import quaternion_to_rotation_matrix
+        from utils.csv2numpyIsaac import quaternion_to_rotation_matrix
 
         velocity_world = trajectory[['vel_x', 'vel_y', 'vel_z']].to_numpy()
         quaternion = trajectory[['quat_w', 'quat_i', 'quat_j', 'quat_k']].to_numpy()

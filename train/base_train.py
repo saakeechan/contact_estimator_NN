@@ -215,8 +215,10 @@ class BaseTrainer:
         torch.save({'epoch': epoch, 'model_state_dict': self.model.state_dict(),
                     'optimizer_state_dict': self.optimizer.state_dict(), 'loss': train_loss,
                     'contact_acc': train_metrics['contact_acc'], 'velocity_mae': train_metrics['velocity_mae'],
-                    'val_loss': val_metrics['contact_loss'] + val_metrics['velocity_loss'],
-                    'val_contact_acc': val_metrics['contact_acc'], 'val_velocity_mae': val_metrics['velocity_mae']}, path)
+                    **({} if val_metrics is None else {
+                        'val_loss': val_metrics['contact_loss'] + val_metrics['velocity_loss'],
+                        'val_contact_acc': val_metrics['contact_acc'], 'val_velocity_mae': val_metrics['velocity_mae'],
+                    })}, path)
         save_onnx_model(self.model, path, self.config['window_size'])
         return path
 
@@ -224,6 +226,7 @@ class BaseTrainer:
         writer, started = SummaryWriter(self.config['log_writer_path']), time.time()
         print(f'VELOCITY LOSS: {self.loss_description}')
         self.before_training(train_dataloader)
+        has_validation = val_dataloader is not None
         best = {'loss': float('inf'), 'velocity': float('inf'), 'contact': 0.0}
         for epoch in range(self.config['num_epoch']):
             self.on_epoch_start(epoch)
@@ -244,26 +247,32 @@ class BaseTrainer:
                 for key, value in (('total', loss), ('contact', contact_loss), ('velocity', velocity_loss)):
                     sums[key] += value.item()
                 progress.set_postfix(loss=f'{loss.item():.8f}')
-            train_metrics, val_metrics = self.evaluate(train_dataloader), self.evaluate(val_dataloader)
+            train_metrics = self.evaluate(train_dataloader)
+            val_metrics = self.evaluate(val_dataloader) if has_validation else None
             averages = {key: value / len(train_dataloader) for key, value in sums.items()}
-            for scope, metrics in (('training', {'total_loss': averages['total'], 'contact_loss': averages['contact'], 'velocity_loss': averages['velocity'], 'contact_accuracy': train_metrics['contact_acc'], 'velocity_mae': train_metrics['velocity_mae']}), ('validation', {'total_loss': val_metrics['contact_loss'] + val_metrics['velocity_loss'], 'contact_loss': val_metrics['contact_loss'], 'velocity_loss': val_metrics['velocity_loss'], 'contact_accuracy': val_metrics['contact_acc'], 'velocity_mae': val_metrics['velocity_mae']})):
+            metric_groups = [('training', {'total_loss': averages['total'], 'contact_loss': averages['contact'], 'velocity_loss': averages['velocity'], 'contact_accuracy': train_metrics['contact_acc'], 'velocity_mae': train_metrics['velocity_mae']})]
+            if has_validation:
+                metric_groups.append(('validation', {'total_loss': val_metrics['contact_loss'] + val_metrics['velocity_loss'], 'contact_loss': val_metrics['contact_loss'], 'velocity_loss': val_metrics['velocity_loss'], 'contact_accuracy': val_metrics['contact_acc'], 'velocity_mae': val_metrics['velocity_mae']}))
+            for scope, metrics in metric_groups:
                 for name, value in metrics.items(): writer.add_scalar(f'{scope}/{name}', value, epoch)
-            writer.add_scalar('validation/total_variance_calibration_ratio', val_metrics['total_variance_calibration_ratio'], epoch)
-            val_loss = val_metrics['contact_loss'] + val_metrics['velocity_loss']
-            for key, value, suffix, comparison in (('contact', val_metrics['contact_acc'], 'best_val_contact_acc', lambda a, b: a > b), ('velocity', val_metrics['velocity_mae'], 'best_val_velocity', lambda a, b: a < b), ('loss', val_loss, 'best_val_loss', lambda a, b: a < b)):
-                if comparison(value, best[key]): best[key] = value; self._checkpoint(epoch, averages['total'], train_metrics, val_metrics, suffix)
-            print(f"Finished epoch {epoch + 1}/{self.config['num_epoch']} | train MAE {train_metrics['velocity_mae']:.4f} | val MAE {val_metrics['velocity_mae']:.4f}")
+            if has_validation:
+                writer.add_scalar('validation/total_variance_calibration_ratio', val_metrics['total_variance_calibration_ratio'], epoch)
+                val_loss = val_metrics['contact_loss'] + val_metrics['velocity_loss']
+                for key, value, suffix, comparison in (('contact', val_metrics['contact_acc'], 'best_val_contact_acc', lambda a, b: a > b), ('velocity', val_metrics['velocity_mae'], 'best_val_velocity', lambda a, b: a < b), ('loss', val_loss, 'best_val_loss', lambda a, b: a < b)):
+                    if comparison(value, best[key]): best[key] = value; self._checkpoint(epoch, averages['total'], train_metrics, val_metrics, suffix)
+            message = f"Finished epoch {epoch + 1}/{self.config['num_epoch']} | train MAE {train_metrics['velocity_mae']:.4f}"
+            print(message if not has_validation else f"{message} | val MAE {val_metrics['velocity_mae']:.4f}")
         self.after_training(train_dataloader)
         final_path = self._checkpoint(epoch, averages['total'], train_metrics, val_metrics, 'final_epoch')
         self.after_final_checkpoint(final_path)
         writer.close()
         elapsed = time.time() - started
-        if self.config.get('save_umap_visualization', False):
+        if has_validation and self.config.get('save_umap_visualization', False):
             save_tcn_last_timestep_umap(val_dataloader, self.model, os.path.join(self.run_dir, 'tcn_last_timestep_umap.png'), self.config.get('random_seed', 42))
         generate_training_summary(run_dir=self.run_dir, config=self.config,
-            train_metrics={'train_loss': averages['total'], 'train_contact_acc': train_metrics['contact_acc'], 'train_velocity_mae': train_metrics['velocity_mae'], 'val_loss': val_metrics['contact_loss'] + val_metrics['velocity_loss'], 'val_contact_acc': val_metrics['contact_acc'], 'val_velocity_mae': val_metrics['velocity_mae']},
-            val_metrics=val_metrics, best_metrics={'best_val_loss': best['loss'], 'best_val_contact_acc': best['contact'], 'best_val_velocity_mae': best['velocity']}, train_time_seconds=elapsed,
-            checkpoint_paths={'best_val_loss': f"{self.config['model_save_path']}_best_val_loss.pt", 'best_val_contact_acc': f"{self.config['model_save_path']}_best_val_contact_acc.pt", 'best_val_velocity': f"{self.config['model_save_path']}_best_val_velocity.pt", 'final_epoch': final_path})
+            train_metrics={'train_loss': averages['total'], 'train_contact_acc': train_metrics['contact_acc'], 'train_velocity_mae': train_metrics['velocity_mae']},
+            val_metrics=val_metrics, best_metrics={} if not has_validation else {'best_val_loss': best['loss'], 'best_val_contact_acc': best['contact'], 'best_val_velocity_mae': best['velocity']}, train_time_seconds=elapsed,
+            checkpoint_paths={'final_epoch': final_path} if not has_validation else {'best_val_loss': f"{self.config['model_save_path']}_best_val_loss.pt", 'best_val_contact_acc': f"{self.config['model_save_path']}_best_val_contact_acc.pt", 'best_val_velocity': f"{self.config['model_save_path']}_best_val_velocity.pt", 'final_epoch': final_path})
 
 
 def load_training_data(config, device, seed=None):
@@ -281,15 +290,21 @@ def load_training_data(config, device, seed=None):
     num_features = metadata['num_features']
     dataset = contact_dataset(os.path.join(config['data_folder'], 'all_data.npy'), os.path.join(config['data_folder'], 'all_labels.npy'), config['window_size'], device=device)
     run_ids = np.unique(dataset.window_to_run_id)
-    if len(run_ids) < 3:
-        raise ValueError(f'Need at least 3 runs for train/val/test split, but only have {len(run_ids)}.')
+    no_validation = config.get('val_ratio') is None or str(config.get('val_ratio')).lower() == 'none'
+    one_run = len(run_ids) < 2
+    if one_run and not no_validation:
+        warnings.warn(
+            'Only one run is available; reusing its training windows for validation. '
+            'Validation metrics will not measure generalization to a separate run.',
+            UserWarning,
+        )
     if config.get('shuffle'):
         np.random.default_rng(config.get('random_seed', 42)).shuffle(run_ids)
-    train_count = max(1, int(config.get('train_ratio', .7) * len(run_ids)))
-    val_count = max(1, int(config.get('val_ratio', .15) * len(run_ids)))
+    train_count = len(run_ids) if no_validation else max(1, int(config.get('train_ratio', .7) * len(run_ids)))
+    val_count = 0 if no_validation else max(1, int(config.get('val_ratio', .15) * len(run_ids)))
     train_indices = dataset.get_windows_by_run_ids(set(run_ids[:train_count]))
-    val_indices = dataset.get_windows_by_run_ids(set(run_ids[train_count:train_count + val_count]))
-    if not train_indices or not val_indices:
+    val_indices = None if no_validation else (train_indices if one_run else dataset.get_windows_by_run_ids(set(run_ids[train_count:train_count + val_count])))
+    if not train_indices or (not no_validation and not val_indices):
         raise ValueError(
             f'Run split produced {len(train_indices)} training and {len(val_indices)} validation windows. '
             'Adjust the split ratios or collect longer runs.'
@@ -301,5 +316,5 @@ def load_training_data(config, device, seed=None):
     std = clipped.std(dim=0, keepdim=True).unsqueeze(0).clamp_min(1e-8).to(device)
     generator = torch.Generator().manual_seed(seed) if seed is not None else None
     train_loader = DataLoader(Subset(dataset, train_indices), batch_size=config['batch_size'], shuffle=config['shuffle'], generator=generator)
-    val_loader = DataLoader(Subset(dataset, val_indices), batch_size=config['batch_size'], shuffle=False)
+    val_loader = None if no_validation else DataLoader(Subset(dataset, val_indices), batch_size=config['batch_size'], shuffle=False)
     return num_features, mean, std, train_loader, val_loader

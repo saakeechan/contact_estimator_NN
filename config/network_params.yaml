@@ -1,16 +1,16 @@
 # CSV data processing params
-csv_folder: "Data/CSVFiles/"
+csv_folder: "Data/MujocoCSVFiles/Slope/"
 
 # Select the OOD dimension used to filter training data: "cmd_vel" or "environment".
 ood_feature: "cmd_vel"
 
 # Add as many [min, max] windows as needed, e.g. [[0.0, 0.5], [1.0, 2.0]].
-cmd_vel_x_windows: [[0.0, 1.0]]
+cmd_vel_x_windows: [[-3.0, 3.0]]
 # Example for environment OOD: [[0, 4], [6, 20]] includes 0-4 and 6-20, excluding 5.
 environment_windows: [[0, 10]]
 # Path to the data folder. Data should be separated into train.npy, train_label.npy, val.npy, val_label.npy.
-data_folder: "Data/NumpyFiles/"
-active_legs: both  # left | right | both; feature/output order is always left then right
+data_folder: "Data/MujocoNumpyFiles/Slope/"
+active_legs: left  # left | right | both; feature/output order is always left then right
 
 
 print_every: 2000
@@ -20,14 +20,14 @@ save_umap_visualization: false  # Save tcn_last_timestep_umap.png and _dv_norm.p
 
 window_size: 24 # Number of consecutive samples to stack as input (temporal context)
 shuffle: True
-random_seed: 42  # For reproducible train/val/test splits
-train_ratio: 0.9
-val_ratio: 0.1
+random_seed: 45  # For reproducible train/val/test splits
+train_ratio: 0.8
+val_ratio: none  # none: train on every run/window; do not validate or test
 
 # Network params
 batch_size: 60  # Used for both training and testing
 init_lr: 0.001
-num_epoch: 3 # Reduced for quick training with small dataset
+num_epoch: 5 # Reduced for quick training with small dataset
 
 # Multi-task Learning: Contact Classification + Velocity Regression
 # Balances contact classification loss vs. velocity regression loss
@@ -47,12 +47,6 @@ use_dense_supervision: False # True: compute loss on full velocity sequence (all
                              # False: compute loss only on last timestep output
                              # Dense supervision helps learn temporal patterns
                              # Last-only is faster and simpler but may underfit
-
-# Model Architecture Selection
-# Choose which neural network architecture to use
-model_architecture: "tcn"  # Options: "tcn", "vanilla_cnn"
-                                   # - tcn: Pure Temporal Convolutional Network with residual blocks (good balance)
-                                   # - vanilla_cnn: Simple dilated CNN (fastest, fewest parameters)
 
 # TCN hyperparameters
 tcn_num_channels: 64        # Number of channels in TCN layers

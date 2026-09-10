@@ -1,20 +1,13 @@
 # Replay continual learning with MC-dropout epistemic uncertainty.
-continual_feature: "cmd_vel_x"
-continual_task_windows:
-  - [0.0, 0.5]
-  - [0.5, 1.0]
-  - [1.0, 1.3]
-  - [1.3, 1.6]
-  - [1.6, 2.0]
-  - [2.0, 2.5]
-  - [2.5, 3.0]
+# One continual-learning task per MuJoCo folder, in this exact order.
+continual_environments: [Flat, Dampy, 'Slip', 'Slope']
 
 replay_capacity: 5000
-replay_seed: 42
+replay_seed: 444
 
 # MC-dropout uncertainty: per-pass Gaussian variance is aleatoric; variance
 # of the stochastic means is epistemic.
-mc_dropout_rate: 0.3
+mc_dropout_rate: 0.2
 mc_dropout_samples: 50
 
 evaluation_window: [0.0, 3.0]

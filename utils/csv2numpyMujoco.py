@@ -8,6 +8,9 @@ import yaml
 
 CANONICAL_LEGS = ('left', 'right')
 
+# The two contact labels correspond directly to force channels 0 and 1.
+MUJOCO_CONTACT_FORCE_INDICES = {'left': 0, 'right': 1}
+
 
 def resolve_active_legs(value):
     value = str(value).lower()
@@ -69,8 +72,9 @@ def csv2numpy_split(data_pth, save_pth, cmd_vel_x_windows=((0.0, 2.0),),
     - save_pth: path to numpy saving directory
     
     Output:
-    - all_data.npy: all data concatenated with left- then right-leg features
-      followed by shared cmd_vel_x (51 raw features total)
+    - all_data.npy: all data concatenated with body-frame IMU acceleration and
+      gyroscope readings, left- then right-leg features, then shared cmd_vel_x
+      (57 raw features total when both legs are active)
     - all_labels.npy: left/right foot-contact labels (shape: N x 2, binary 0/1)
     - all_data_boundaries.npy: indices marking end of each run (CRITICAL for preventing data leakage)
     - all_data_metadata.npy: metadata dict with num_features (SOURCE OF TRUTH for network architecture)
@@ -124,9 +128,9 @@ def csv2numpy_split(data_pth, save_pth, cmd_vel_x_windows=((0.0, 2.0),),
         # Load CSV data
         df = pd.read_csv(data_name)
         
-        # Detect run boundaries within the file by finding time resets
+        # Detect run boundaries within the file by finding time resets.
         # Time resets to ~0.02 indicate a new run
-        time_col = df['timestamp'].values if 'timestamp' in df.columns else None
+        time_col = df['time'].values if 'time' in df.columns else None
         run_boundaries = [0]  # Start of first run
         
         if time_col is not None:
@@ -153,32 +157,33 @@ def csv2numpy_split(data_pth, save_pth, cmd_vel_x_windows=((0.0, 2.0),),
             
             # When filtering by command velocity, keep runs whose maximum
             # cmd_vel_x belongs to any configured window.
-            if ood_feature == 'cmd_vel' and 'cmd_vel_x' in df_run.columns:
-                max_cmd_vel = df_run['cmd_vel_x'].max()
+            if ood_feature == 'cmd_vel' and 'command_twist_linear_x' in df_run.columns:
+                max_cmd_vel = df_run['command_twist_linear_x'].max()
                 if not any(low <= max_cmd_vel <= high for low, high in cmd_vel_x_windows):
                     # print(f"  Skipping run {run_idx} (max cmd_vel_x={max_cmd_vel:.2f} outside {cmd_vel_x_windows})")
                     continue
             
             # Extract IMU data in body frame
-            imu_acc = df_run[['acc_body_x', 'acc_body_y', 'acc_body_z']].values
-            imu_omega = df_run[['gyro_body_x', 'gyro_body_y', 'gyro_body_z']].values
+            imu_acc = df_run[['lowstate_accel_x', 'lowstate_accel_y', 'lowstate_accel_z']].values
+            imu_omega = df_run[['lowstate_gyro_x', 'lowstate_gyro_y', 'lowstate_gyro_z']].values
 
             # Extract command velocity - 1 value
-            cmd_vel = df_run[['cmd_vel_x']].values
+            cmd_vel = df_run[['command_twist_linear_x']].values
 
             leg_features = []
             for leg in legs:
                 joint_names = joint_names_by_leg[leg]
-                q = df_run[['joint_pos_' + name for name in joint_names]].values
-                qd = df_run[['joint_vel_' + name for name in joint_names]].values
+                q = df_run[[name + '_q' for name in joint_names]].values
+                qd = df_run[[name + '_qd' for name in joint_names]].values
                 position = df_run[[f'fk_{leg}_foot_pos_{axis}' for axis in 'xyz']].values
                 velocity = df_run[[f'fk_{leg}_foot_vel_{axis}' for axis in 'xyz']].values
-                torque = df_run[['joint_torque_' + name for name in joint_names]].values
+                torque = df_run[[name + '_tau_est' for name in joint_names]].values
                 torque_mse = np.sum(torque ** 2, axis=1, keepdims=True)
                 leg_features.extend((q, qd, position, velocity, torque, torque_mse))
 
-            # Feature order: left block, right block, then shared command velocity.
-            cur_data = np.concatenate([*leg_features, cmd_vel], axis=1)
+            # Feature order: body-frame IMU acceleration/angular rate, leg blocks,
+            # then shared command velocity.
+            cur_data = np.concatenate([imu_acc, imu_omega, *leg_features, cmd_vel], axis=1)
             
             # Initialize all_data and capture num_features from actual data shape
             if num_features is None:
@@ -190,10 +195,17 @@ def csv2numpy_split(data_pth, save_pth, cmd_vel_x_windows=((0.0, 2.0),),
 
             # Output extraction
             
-            contacts = df_run[[f'{leg[0]}foot-contact' for leg in legs]].values.astype(int)
+            contacts = np.column_stack([
+                (df_run[f'sport_foot_force_{MUJOCO_CONTACT_FORCE_INDICES[leg]}'] > 0).astype(int)
+                for leg in legs
+            ])
             
-            body_velocity_world = df_run[['vel_x', 'vel_y', 'vel_z']].values
-            body_quaternion = df_run[['quat_w', 'quat_i', 'quat_j', 'quat_k']].values
+            body_velocity_world = df_run[[
+                'sport_velocity_world_x', 'sport_velocity_world_y', 'sport_velocity_world_z'
+            ]].values
+            body_quaternion = df_run[[
+                'lowstate_quat_w', 'lowstate_quat_x', 'lowstate_quat_y', 'lowstate_quat_z'
+            ]].values
             rotation_body_to_world = quaternion_to_rotation_matrix(body_quaternion)
             body_velocities = np.einsum(
                 'nij,nj->ni', rotation_body_to_world.transpose(0, 2, 1), body_velocity_world
@@ -253,8 +265,8 @@ def csv2numpy_split(data_pth, save_pth, cmd_vel_x_windows=((0.0, 2.0),),
     np.save(save_pth + "all_data_metadata.npy", metadata)
     
     print(f"Saved {all_data.shape[0]} samples to all_data.npy")
-    print(f"Saved {all_labels.shape} left/right foot-contact labels to all_labels.npy")
-    print(f"Saved {all_body_velocities.shape} body-frame [vx/vy/vz] targets to all_body_velocities.npy")
+    print(f"Saved {all_labels.shape[0]} left/right foot-contact labels to all_labels.npy")
+    print(f"Saved {all_body_velocities.shape[0]} body-frame [vx/vy/vz] targets to all_body_velocities.npy")
     print(f"Saved {len(all_boundaries)} run boundaries to all_data_boundaries.npy")
     print(f"Saved metadata (num_features={num_features}) to all_data_metadata.npy")
     print("Done!")
@@ -264,43 +276,35 @@ def main():
     parser = argparse.ArgumentParser(description='Convert CSV to numpy.')
     parser.add_argument('--config_name', type=str, 
                         default=os.path.dirname(os.path.abspath(__file__)) + '/../config/network_params.yaml')
-    parser.add_argument('--csv_folder', type=str, default=None,
-                        help='Path to CSV folder (overrides config file)')
-    parser.add_argument('--save_path', type=str, default=None,
-                        help='Path to save numpy files (overrides config file)')
     args = parser.parse_args()
     
     with open(args.config_name) as config_file:
         config = yaml.load(config_file, Loader=yaml.FullLoader)
     
-    # Override with command line arguments if provided
-    if args.csv_folder:
-        config['csv_folder'] = args.csv_folder
-    if args.save_path:
-        config['save_path'] = args.save_path
-    
-    # Set defaults if not in config
-    config.setdefault('csv_folder', '../Data/CSVFiles/')
-    config.setdefault('data_folder', '../Data/NumpyFiles/')
-    config.setdefault('save_path', config['data_folder'])  # Use data_folder if save_path not set
+    # Keep MuJoCo conversion isolated from the active training-data config.
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    mujoco_csv_folder = os.path.join(script_dir, '../Data/MujocoCSVFiles/Flat/')
+    mujoco_numpy_folder = os.path.join(script_dir, '../Data/MujocoNumpyFiles/Flat/')
+
+    # Set defaults for non-path conversion options.
     ood_feature = config.get('ood_feature', 'cmd_vel')
     legs = resolve_active_legs(config.get('active_legs', 'both'))
     if ood_feature not in ('cmd_vel', 'environment'):
         raise ValueError("ood_feature must be either 'cmd_vel' or 'environment'")
     window_key = 'cmd_vel_x_windows' if ood_feature == 'cmd_vel' else 'environment_windows'
-    windows = config.get(window_key, [[0.0, 2.0]] if ood_feature == 'cmd_vel' else [[0, 0]])
+    windows = config.get(window_key, [[0.0, 2.0]] if ood_feature == 'cmd_vel' else [[0, 10]])
     if not windows or not all(isinstance(window, (list, tuple)) and len(window) == 2 and window[0] <= window[1]
                               for window in windows):
         raise ValueError(f'{window_key} must be a non-empty list of [min, max] windows with min <= max')
     
     print("Using configuration:")
-    print(f"  CSV folder: {config['csv_folder']}")
-    print(f"  Save path: {config['save_path']}")
+    print(f"  CSV folder: {mujoco_csv_folder}")
+    print(f"  Save path: {mujoco_numpy_folder}")
     print(f"  OOD feature: {ood_feature}")
     print(f"  Active legs: {', '.join(legs)}")
     print(f"  {'Command-velocity' if ood_feature == 'cmd_vel' else 'Environment'} windows: {windows}")
     
-    csv2numpy_split(config['csv_folder'], config['save_path'],
+    csv2numpy_split(mujoco_csv_folder, mujoco_numpy_folder,
                     cmd_vel_x_windows=windows if ood_feature == 'cmd_vel' else (),
                     ood_feature=ood_feature,
                     environment_windows=windows if ood_feature == 'environment' else (), legs=legs)

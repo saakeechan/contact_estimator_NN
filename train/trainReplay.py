@@ -71,9 +71,11 @@ def _load_index(path, task_windows, window_size):
         return {name: index[name].copy() for name in required}
 
 
-def _split_task(index, task_id, train_ratio, seed):
+def _split_task(index, task_id, train_ratio, seed, no_validation=False):
     mask = index["task_ids"] == task_id
     starts, run_ids = index["window_starts"][mask], index["window_run_ids"][mask]
+    if no_validation:
+        return starts, None
     runs = np.unique(run_ids)
     if len(runs) < 2:
         raise ValueError(f"Task {task_id} needs windows from at least two runs for a run-disjoint validation split.")
@@ -151,9 +153,10 @@ def run_replay_training(config, task_index, model_factory, trainer_type, logs_na
     if labels.shape != (len(data), len(config['legs'])) or velocities.shape != (len(data), len(config['legs']), 3):
         raise ValueError('Dataset labels/velocity targets do not match active_legs. Regenerate the numpy dataset and task index.')
     seed = int(config.get("random_seed", 42))
-    splits = [_split_task(index, task_id, float(config.get("train_ratio", .85)), seed) for task_id in range(len(tasks))]
+    no_validation = config.get('val_ratio') is None or str(config.get('val_ratio')).lower() == 'none'
+    splits = [_split_task(index, task_id, float(config.get("train_ratio", .85)), seed, no_validation) for task_id in range(len(tasks))]
     for task_id, (train, validation) in enumerate(splits):
-        print(f"Task {task_id} [{tasks[task_id, 0]:g}, {tasks[task_id, 1]:g}): {len(train)} train, {len(validation)} validation")
+        print(f"Task {task_id} [{tasks[task_id, 0]:g}, {tasks[task_id, 1]:g}): {len(train)} train" + ("" if validation is None else f", {len(validation)} validation"))
     if dry_run:
         return
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
@@ -168,30 +171,31 @@ def run_replay_training(config, task_index, model_factory, trainer_type, logs_na
     for task_id, (task_train, task_validation) in enumerate(splits):
         training_starts = np.concatenate((task_train, replay))
         train_loader = _loader(data, labels, velocities, training_starts, config, True, seed + task_id)
-        validation_loader = _loader(data, labels, velocities, task_validation, config, False, seed)
+        validation_loader = None if task_validation is None else _loader(data, labels, velocities, task_validation, config, False, seed)
         print(f"Task {task_id}: {len(task_train)} current + {len(replay)} replay windows")
         task_dir = run_dir / f"task_{task_id:02d}"
         trainer = trainer_type(model, config.copy(), str(task_dir))
         trainer.train(train_loader, validation_loader)
-        best_checkpoint = task_dir / "model_best_val_loss.pt"
+        best_checkpoint = task_dir / ("model_final_epoch.pt" if no_validation else "model_best_val_loss.pt")
         best_state = torch.load(best_checkpoint, map_location=device)
         model.load_state_dict(best_state["model_state_dict"])
         completed_train.append(task_train)
         replay = _balanced_replay(completed_train, int(config["replay_capacity"]), int(config.get("replay_seed", seed)))
         checkpoint = run_dir / f"model_after_task_{task_id:02d}.pt"
         torch.save({"model_state_dict": model.state_dict(), "task_id": task_id, "next_task_id": task_id + 1,
-                    "best_validation_loss": best_state["val_loss"], "best_epoch": best_state["epoch"],
+                    "best_validation_loss": best_state.get("val_loss"), "best_epoch": best_state["epoch"],
                     "replay_window_starts": replay.tolist(), "task_train_window_starts": [x.tolist() for x in completed_train],
                     "config": config}, checkpoint)
         if config.get("replay_evaluate_after_task", True) and not skip_evaluate_after_task:
             _evaluate_task_checkpoint(run_dir, task_id, checkpoint, config, test_model, test_results_name, plot_metric)
-        for eval_task, (_, eval_starts) in enumerate(splits[:task_id + 1]):
-            metrics = trainer.evaluate(_loader(data, labels, velocities, eval_starts, config, False, seed))
-            metrics["loss"] = metrics["contact_loss"] + metrics["velocity_loss"]
-            rows.append({"checkpoint_after_task": task_id, "evaluation_task": eval_task, **metrics})
-        with (run_dir / "task_metrics.csv").open("w", newline="") as file:
-            writer = csv.DictWriter(file, fieldnames=rows[0].keys()); writer.writeheader(); writer.writerows(rows)
-        print(f"Saved {checkpoint} and {run_dir / 'task_metrics.csv'}")
+        if not no_validation:
+            for eval_task, (_, eval_starts) in enumerate(splits[:task_id + 1]):
+                metrics = trainer.evaluate(_loader(data, labels, velocities, eval_starts, config, False, seed))
+                metrics["loss"] = metrics["contact_loss"] + metrics["velocity_loss"]
+                rows.append({"checkpoint_after_task": task_id, "evaluation_task": eval_task, **metrics})
+            with (run_dir / "task_metrics.csv").open("w", newline="") as file:
+                writer = csv.DictWriter(file, fieldnames=rows[0].keys()); writer.writeheader(); writer.writerows(rows)
+        print(f"Saved {checkpoint}" + ("" if no_validation else f" and {run_dir / 'task_metrics.csv'}"))
 
 
 def main():
