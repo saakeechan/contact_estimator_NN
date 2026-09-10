@@ -176,14 +176,14 @@ def run_replay_training(config, task_index, model_factory, trainer_type, logs_na
         task_dir = run_dir / f"task_{task_id:02d}"
         trainer = trainer_type(model, config.copy(), str(task_dir))
         trainer.train(train_loader, validation_loader)
-        best_checkpoint = task_dir / ("model_final_epoch.pt" if no_validation else "model_best_val_loss.pt")
-        best_state = torch.load(best_checkpoint, map_location=device)
-        model.load_state_dict(best_state["model_state_dict"])
+        final_checkpoint = task_dir / "model_final_epoch.pt"
+        final_state = torch.load(final_checkpoint, map_location=device)
+        model.load_state_dict(final_state["model_state_dict"])
         completed_train.append(task_train)
         replay = _balanced_replay(completed_train, int(config["replay_capacity"]), int(config.get("replay_seed", seed)))
         checkpoint = run_dir / f"model_after_task_{task_id:02d}.pt"
         torch.save({"model_state_dict": model.state_dict(), "task_id": task_id, "next_task_id": task_id + 1,
-                    "best_validation_loss": best_state.get("val_loss"), "best_epoch": best_state["epoch"],
+                    "final_epoch": final_state["epoch"], "final_validation_loss": final_state.get("val_loss"),
                     "replay_window_starts": replay.tolist(), "task_train_window_starts": [x.tolist() for x in completed_train],
                     "config": config}, checkpoint)
         if config.get("replay_evaluate_after_task", True) and not skip_evaluate_after_task:

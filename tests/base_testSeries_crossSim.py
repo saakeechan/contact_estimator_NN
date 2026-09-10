@@ -2,7 +2,8 @@
 
 The model is loaded exactly once. For every seed, the runner evaluates one
 contact-final, boundary-safe window from every scenario in ``TEST_SCENARIOS``
-and overlays them against that window's command velocity.
+and overlays them against that window's command velocity. Callers can restrict
+selection to a command-velocity interval.
 """
 import argparse
 import csv
@@ -65,7 +66,7 @@ MODEL_EVALUATORS = {
 
 
 def load_dataset(name, folder):
-    """Load the three canonical arrays and validate their shared sample axis."""
+    """Load and validate one canonical cross-simulation dataset."""
     folder = Path(folder)
     if not folder.is_dir():
         raise FileNotFoundError(f'{name} dataset folder does not exist: {folder}')
@@ -74,15 +75,36 @@ def load_dataset(name, folder):
     velocities = np.load(folder / 'all_body_velocities.npy', mmap_mode='r')
     boundaries = np.load(folder / 'all_data_boundaries.npy')
     metadata = np.load(folder / 'all_data_metadata.npy', allow_pickle=True).item()
+    if data.ndim != 2:
+        raise ValueError(f'{folder}: all_data.npy must have shape (samples, features).')
     if not (len(data) == len(labels) == len(velocities)):
         raise ValueError(f'{folder}: data, labels, and velocities have inconsistent lengths.')
-    if int(metadata['num_features']) != data.shape[1]:
+    if 'num_features' not in metadata or int(metadata['num_features']) != data.shape[1]:
         raise ValueError(f'{folder}: metadata num_features does not match all_data.npy.')
+    legs = tuple(metadata.get('legs', ()))
+    if not legs:
+        raise ValueError(f'{folder}: metadata must define at least one leg.')
+    if labels.shape != (len(data), len(legs)):
+        raise ValueError(f'{folder}: all_labels.npy must have shape ({len(data)}, {len(legs)}).')
+    if velocities.shape != (len(data), len(legs), 3):
+        raise ValueError(f'{folder}: all_body_velocities.npy must have shape ({len(data)}, {len(legs)}, 3).')
+    if boundaries.ndim != 1 or not len(boundaries) or boundaries[-1] != len(data) or np.any(np.diff(boundaries) <= 0):
+        raise ValueError(f'{folder}: boundaries must be strictly increasing and end at sample {len(data)}.')
     return {
         'name': name,
         'folder': folder, 'data': data, 'labels': labels, 'velocities': velocities,
         'boundaries': boundaries, 'metadata': metadata,
     }
+
+
+def validate_compatible_datasets(datasets):
+    """Return the reference dataset after checking feature dimensions and leg order."""
+    reference = datasets[0]
+    for dataset in datasets[1:]:
+        if (dataset['data'].shape[1] != reference['data'].shape[1]
+                or dataset['metadata']['legs'] != reference['metadata']['legs']):
+            raise ValueError(f"{dataset['name']} must match {reference['name']} feature dimensions and leg order.")
+    return reference
 
 
 def valid_window_starts(boundaries, window_size):
@@ -144,16 +166,29 @@ def predict_with_epistemic(model_name, evaluator, model, windows, samples):
     return mean, epistemic
 
 
-def evaluate_dataset(model_name, evaluator, config, device, model, dataset, seed, scenario_index):
-    """Evaluate one reproducibly selected contact-final window."""
-    starts = valid_window_starts(dataset['boundaries'], config['window_size'])
-    final_indices = starts + config['window_size'] - 1
+def eligible_window_starts(dataset, window_size, cmd_vel_x_window=None):
+    """Return contact-final starts, optionally restricted by final command velocity."""
+    starts = valid_window_starts(dataset['boundaries'], window_size)
+    final_indices = starts + window_size - 1
     contacts = np.asarray(dataset['labels'][final_indices])
-    if contacts.ndim == 1:
-        contacts = contacts[:, None]
-    starts = starts[(contacts == 1).any(axis=1)]
+    eligible = (contacts == 1).any(axis=1)
+    if cmd_vel_x_window is not None:
+        low, high = map(float, cmd_vel_x_window)
+        if low > high:
+            raise ValueError('Command-velocity window must be ordered as (min, max).')
+        command_velocity = np.asarray(dataset['data'][final_indices, -1])
+        eligible &= (low <= command_velocity) & (command_velocity <= high)
+    starts = starts[eligible]
     if not len(starts):
-        raise ValueError(f"{dataset['name']} has no contact-final windows.")
+        suffix = '' if cmd_vel_x_window is None else f' in command-velocity window {tuple(cmd_vel_x_window)}'
+        raise ValueError(f"{dataset['name']} has no contact-final windows{suffix}.")
+    return starts
+
+
+def evaluate_dataset(model_name, evaluator, config, device, model, dataset, seed, scenario_index,
+                     cmd_vel_x_window=None):
+    """Evaluate one reproducibly selected eligible window."""
+    starts = eligible_window_starts(dataset, config['window_size'], cmd_vel_x_window)
     selected_start = int(np.random.default_rng(np.random.SeedSequence([seed, scenario_index])).choice(starts))
     offsets = np.arange(config['window_size'])
     samples = config.get('mc_dropout_samples', config.get('ucb_mc_samples', config.get('vcl_evaluation_mc_samples')))
@@ -163,14 +198,8 @@ def evaluate_dataset(model_name, evaluator, config, device, model, dataset, seed
     predicted, epistemic = predict_with_epistemic(model_name, evaluator, model, windows, samples)
     predicted, epistemic = predicted.cpu().numpy(), epistemic.cpu().numpy()
     final_index = selected_start + config['window_size'] - 1
-    contacts = np.asarray(dataset['labels'][final_index])
-    ground_truth = np.asarray(dataset['velocities'][final_index])
-    if contacts.ndim == 0:
-        contacts = contacts.reshape(1, 1)
-    else:
-        contacts = contacts[None, :]
-    if ground_truth.ndim == 2:
-        ground_truth = ground_truth[None]
+    contacts = np.asarray(dataset['labels'][final_index])[None, :]
+    ground_truth = np.asarray(dataset['velocities'][final_index])[None, :, :]
     contact_mask = contacts == 1
     mean_epistemic = float(epistemic[contact_mask].mean())
     return {
@@ -182,26 +211,23 @@ def evaluate_dataset(model_name, evaluator, config, device, model, dataset, seed
     }
 
 
-def save_plot(rows, output_path, scenario_order=TEST_SCENARIOS, by_environment=False):
+def save_plot(rows, output_path, scenario_order=TEST_SCENARIOS):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
     figure, (epistemic_axis, mae_axis) = plt.subplots(2, 1, figsize=(9, 9), sharex=True)
-    for scenario_index, scenario in enumerate(scenario_order):
+    for scenario in scenario_order:
         source_rows = [row for row in rows if row['simulator'] == scenario]
-        command_velocity = ([scenario_index] * len(source_rows) if by_environment
-                            else [float(row['cmd_vel_x']) for row in source_rows])
+        command_velocity = [float(row['cmd_vel_x']) for row in source_rows]
         log10_epistemic = [float(row['log10_mean_epistemic_variance']) for row in source_rows]
         mae = [float(row['velocity_mae']) for row in source_rows]
         epistemic_axis.scatter(command_velocity, log10_epistemic, s=30,
-                               label=f'{scenario} (mean log10 epi={np.mean(log10_epistemic):.2f})', **SCENARIO_STYLES[scenario])
+                               label=f'{scenario} (log epi={np.mean(log10_epistemic):.2f})', **SCENARIO_STYLES[scenario])
         mae_axis.scatter(command_velocity, mae, s=30,
-                         label=f'{scenario} (mean MAE={np.mean(mae):.2e})', **SCENARIO_STYLES[scenario])
-    epistemic_axis.set(ylabel='log10(mean epistemic variance)')
-    mae_axis.set(xlabel='MuJoCo environment' if by_environment else 'Command velocity x (m/s)', ylabel='Contact-masked velocity MAE')
-    if by_environment:
-        mae_axis.set_xticks(range(len(scenario_order)), scenario_order)
+                         label=f'{scenario} (MAE={np.mean(mae):.2e})', **SCENARIO_STYLES[scenario])
+    epistemic_axis.set(ylabel='log Epistemic variance')
+    mae_axis.set(xlabel='Command velocity x m/s', ylabel='Velocity Error')
     for axis in (epistemic_axis, mae_axis):
         axis.grid(True, which='both', alpha=0.3)
         axis.legend()
@@ -211,7 +237,7 @@ def save_plot(rows, output_path, scenario_order=TEST_SCENARIOS, by_environment=F
 
 
 def run_cross_sim_evaluation(model_name, config_path, scenarios, checkpoint_path, first_seed, last_seed,
-                             output_csv, save_csv=True, save_png=True, by_environment=False):
+                             output_csv, save_csv=True, save_png=True, cmd_vel_x_window=None):
     """Shared cross-simulation evaluation used by standalone and replay training."""
     if first_seed > last_seed:
         raise ValueError('Use an ordered seed range.')
@@ -222,18 +248,15 @@ def run_cross_sim_evaluation(model_name, config_path, scenarios, checkpoint_path
     if missing_styles:
         raise ValueError(f'Missing plot styles for scenario(s): {sorted(missing_styles)}')
     datasets = [load_dataset(name, SCENARIO_FOLDERS[name]) for name in scenarios]
-    reference = datasets[0]
-    for dataset in datasets[1:]:
-        if (dataset['data'].shape[1] != reference['data'].shape[1]
-                or dataset['metadata']['legs'] != reference['metadata']['legs']):
-            raise ValueError(f"{dataset['name']} must match {reference['name']} feature dimensions and leg order.")
+    reference = validate_compatible_datasets(datasets)
     evaluator, config, device, model, checkpoint = load_evaluator_and_model(
         model_name, config_path, reference['data'].shape[1], reference['metadata']['legs'], checkpoint_path
     )
     print(f'Loaded {model_name} checkpoint(s): {checkpoint}')
     rows = []
     for seed in range(first_seed, last_seed + 1):
-        rows.extend(evaluate_dataset(model_name, evaluator, config, device, model, dataset, seed, scenario_index)
+        rows.extend(evaluate_dataset(model_name, evaluator, config, device, model, dataset, seed, scenario_index,
+                                     cmd_vel_x_window)
                     for scenario_index, dataset in enumerate(datasets))
     output_csv = Path(output_csv)
     if save_csv:
@@ -244,7 +267,7 @@ def run_cross_sim_evaluation(model_name, config_path, scenarios, checkpoint_path
         print(f'Wrote {len(rows)} rows to {output_csv}')
     if save_png:
         output_csv.parent.mkdir(parents=True, exist_ok=True)
-        save_plot(rows, output_csv.with_suffix('.png'), scenarios, by_environment)
+        save_plot(rows, output_csv.with_suffix('.png'), scenarios)
         print(f'Wrote {output_csv.with_suffix(".png")}')
     return rows
 
@@ -258,9 +281,6 @@ def main(argv=None):
     parser.add_argument('--no-save-csv', action='store_true')
     parser.add_argument('--no-save-plot', action='store_true')
     args = parser.parse_args(argv)
-    if args.first_seed > args.last_seed:
-        raise ValueError('Use an ordered seed range.')
-
     output_dir = _ROOT / 'testResults' / 'CrossSim'
     scenario_suffix = '_'.join(TEST_SCENARIOS).lower()
     output_csv = args.output_csv or output_dir / f'{MODEL}_{scenario_suffix}_seeds_{args.first_seed}-{args.last_seed}.csv'

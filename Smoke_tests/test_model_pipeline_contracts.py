@@ -20,6 +20,7 @@ from train.trainEnsemble import EnsembleTrainer
 from train.trainMCdropout import MCDropoutTrainer
 from train.trainNatPN import NatPNTrainer
 from train.trainReplay import ReplayTrainer
+from tests.base_testSeries_crossSim import eligible_window_starts, load_dataset, validate_compatible_datasets
 from tests.testNatPN import NatPNSingleTest
 from utils.data_handler import contact_dataset
 
@@ -174,6 +175,38 @@ class ModelPipelineContractsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             resolve_active_legs('front')
         self.assertIsNotNone(NatPNTrainer)
+
+    def test_cross_sim_window_selection_filters_contact_and_command_velocity(self):
+        dataset = {
+            'name': 'test',
+            'boundaries': np.array([5]),
+            'data': np.array([[0., 0.], [0., -2.], [0., -.5], [0., 0.], [0., 2.]]),
+            'labels': np.array([[0.], [1.], [1.], [0.], [1.]]),
+        }
+        self.assertTrue(np.array_equal(eligible_window_starts(dataset, 2, (-1., 1.)), np.array([1])))
+        with self.assertRaisesRegex(ValueError, 'command-velocity window'):
+            eligible_window_starts(dataset, 2, (3., 4.))
+
+    def test_cross_sim_loader_enforces_canonical_array_shapes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            np.save(root / 'all_data.npy', np.zeros((5, FEATURES), dtype=np.float32))
+            np.save(root / 'all_labels.npy', np.zeros((5, 1), dtype=np.float32))
+            np.save(root / 'all_body_velocities.npy', np.zeros((5, 1, 3), dtype=np.float32))
+            np.save(root / 'all_data_boundaries.npy', np.array([5]))
+            np.save(root / 'all_data_metadata.npy', {'legs': ['left'], 'num_features': FEATURES})
+            self.assertEqual(load_dataset('test', root)['labels'].shape, (5, 1))
+            np.save(root / 'all_labels.npy', np.zeros(5, dtype=np.float32))
+            with self.assertRaisesRegex(ValueError, 'all_labels'):
+                load_dataset('test', root)
+
+    def test_cross_sim_datasets_must_share_features_and_leg_order(self):
+        flat = {'name': 'Flat', 'data': np.zeros((2, FEATURES)), 'metadata': {'legs': ('left',)}}
+        slope = {'name': 'Slope', 'data': np.zeros((2, FEATURES)), 'metadata': {'legs': ('left',)}}
+        self.assertIs(validate_compatible_datasets([flat, slope]), flat)
+        slope['metadata']['legs'] = ('right',)
+        with self.assertRaisesRegex(ValueError, 'feature dimensions and leg order'):
+            validate_compatible_datasets([flat, slope])
 
     def test_library_and_project_natpn_prior_defaults_are_intentionally_distinct(self):
         self.assertAlmostEqual(NormalOutput(2).prior.evidence.item(), 1. / 3.)

@@ -43,8 +43,8 @@ def main():
     feature_label = 'Environment' if ood_feature == 'environment' else 'Cmd vel'
     feature_column = 'environment' if ood_feature == 'environment' else 'cmd_vel_x'
     output_suffix = 'environment' if ood_feature == 'environment' else 'cmd_vel'
-    metric_label = {'epistemic': 'Mean epistemic variance', 'negative-log-density': 'Negative log density',
-                    'velocity-mae': 'Contact-masked velocity MAE'}[args.plot_metric]
+    metric_label = {'epistemic': 'log Epistemic variance', 'negative-log-density': 'Negative log density',
+                    'velocity-mae': 'Velocity Error'}[args.plot_metric]
     metric_suffix = {'epistemic': 'mean_epistemic', 'negative-log-density': 'negative_log_density',
                      'velocity-mae': 'velocity_mae_vs_cmd_vel'}[args.plot_metric]
     output_plot = args.output_plot or input_csv.with_name(f'{input_csv.stem}_{metric_suffix}_vs_{output_suffix}.png')
@@ -93,28 +93,31 @@ def main():
     y_max = max(y_max, y_min * (1.01 if args.plot_metric == 'epistemic' else 1.0) + 1e-12)
 
     if args.save_plot:
-        x_label = 'Environment number' if ood_feature == 'environment' else 'Command velocity x (m/s)'
+        x_label = 'Environment number' if ood_feature == 'environment' else 'Command velocity x m/s'
         if args.plot_metric == 'epistemic':
             figure, (epistemic_axis, mae_axis) = plt.subplots(2, 1, figsize=(9, 9), sharex=True)
-            epistemic_axis.scatter(feature_values, plot_values, color='tab:purple', s=24)
+            epistemic_axis.scatter(feature_values, plot_values, color='tab:purple', s=24, label='log epi')
             epistemic_axis.set(ylabel=metric_label, yscale='log')
-            mae_axis.scatter(feature_values, velocity_mae, color='tab:blue', s=24)
-            mae_axis.set(xlabel=x_label, ylabel='Contact-masked velocity MAE')
+            mae_axis.scatter(feature_values, velocity_mae, color='tab:blue', s=24, label='MAE')
+            mae_axis.set(xlabel=x_label, ylabel='Velocity Error')
             for axis in (epistemic_axis, mae_axis):
                 axis.grid(True, which='both', alpha=0.3)
+                axis.legend()
         else:
             figure, axis = plt.subplots(figsize=(9, 6))
             if args.plot_metric == 'velocity-mae':
-                axis.scatter(feature_values, velocity_mae, color='tab:blue', s=24)
+                axis.scatter(feature_values, velocity_mae, color='tab:blue', s=24, label='MAE')
                 axis.set(xlabel=x_label, ylabel=metric_label)
             else:
                 points = axis.scatter(
                     feature_values, plot_values, c=velocity_mae, cmap='viridis',
                     norm=Normalize(vmin=finite_mae.min(), vmax=mae_max, clip=True),
                 )
-                figure.colorbar(points, ax=axis, extend='max', label='Contact-masked velocity MAE (95th-percentile cap)')
+                figure.colorbar(points, ax=axis, extend='max', label='Velocity Error (95th-percentile cap)')
                 axis.set(xlabel=x_label, ylabel=metric_label)
             axis.grid(True, which='both', alpha=0.3)
+            if args.plot_metric == 'velocity-mae':
+                axis.legend()
         if args.plot_metric == 'epistemic':
             epistemic_axis.set_ylim(y_min, y_max)
         elif args.plot_metric != 'velocity-mae':

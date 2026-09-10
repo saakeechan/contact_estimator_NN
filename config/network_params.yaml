@@ -1,6 +1,3 @@
-# CSV data processing params
-csv_folder: "Data/MujocoCSVFiles/Slope/"
-
 # Select the OOD dimension used to filter training data: "cmd_vel" or "environment".
 ood_feature: "cmd_vel"
 

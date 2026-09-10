@@ -8,6 +8,26 @@ import yaml
 
 CANONICAL_LEGS = ('left', 'right')
 
+# Edit these when converting a different Isaac CSV dataset.
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CSV_FOLDER = os.path.join(PROJECT_ROOT, 'Data/CSVFiles/')
+DATA_FOLDER = os.path.join(PROJECT_ROOT, 'Data/NumpyFiles/')
+
+ISAAC_SCHEMA = {
+    'time': 'timestamp',
+    'command_velocity': 'cmd_vel_x',
+    'imu_acceleration': ('acc_body_x', 'acc_body_y', 'acc_body_z'),
+    'imu_angular_rate': ('gyro_body_x', 'gyro_body_y', 'gyro_body_z'),
+    'joint_position_pattern': 'joint_pos_{joint}',
+    'joint_velocity_pattern': 'joint_vel_{joint}',
+    'joint_torque_pattern': 'joint_torque_{joint}',
+    'foot_position_pattern': 'fk_{leg}_foot_pos_{axis}',
+    'foot_velocity_pattern': 'fk_{leg}_foot_vel_{axis}',
+    'contact_columns': {'left': 'lfoot-contact', 'right': 'rfoot-contact'},
+    'world_velocity': ('vel_x', 'vel_y', 'vel_z'),
+    'quaternion': ('quat_w', 'quat_i', 'quat_j', 'quat_k'),
+}
+
 
 def resolve_active_legs(value):
     value = str(value).lower()
@@ -48,7 +68,8 @@ def environment_number_from_filename(data_name):
 
 
 def csv2numpy_split(data_pth, save_pth, cmd_vel_x_windows=((0.0, 2.0),),
-                    ood_feature='cmd_vel', environment_windows=((0, 0),), legs=CANONICAL_LEGS):
+                    ood_feature='cmd_vel', environment_windows=((0, 0),), legs=CANONICAL_LEGS,
+                    schema=ISAAC_SCHEMA):
     """
     Load data from CSV files and concatenate into single numpy arrays.
     
@@ -127,7 +148,8 @@ def csv2numpy_split(data_pth, save_pth, cmd_vel_x_windows=((0.0, 2.0),),
         
         # Detect run boundaries within the file by finding time resets
         # Time resets to ~0.02 indicate a new run
-        time_col = df['timestamp'].values if 'timestamp' in df.columns else None
+        time_column = schema['time']
+        time_col = df[time_column].values if time_column in df.columns else None
         run_boundaries = [0]  # Start of first run
         
         if time_col is not None:
@@ -154,27 +176,28 @@ def csv2numpy_split(data_pth, save_pth, cmd_vel_x_windows=((0.0, 2.0),),
             
             # When filtering by command velocity, keep runs whose maximum
             # cmd_vel_x belongs to any configured window.
-            if ood_feature == 'cmd_vel' and 'cmd_vel_x' in df_run.columns:
-                max_cmd_vel = df_run['cmd_vel_x'].max()
+            command_velocity_column = schema['command_velocity']
+            if ood_feature == 'cmd_vel' and command_velocity_column in df_run.columns:
+                max_cmd_vel = df_run[command_velocity_column].max()
                 if not any(low <= max_cmd_vel <= high for low, high in cmd_vel_x_windows):
                     # print(f"  Skipping run {run_idx} (max cmd_vel_x={max_cmd_vel:.2f} outside {cmd_vel_x_windows})")
                     continue
             
             # Extract IMU data in body frame
-            imu_acc = df_run[['acc_body_x', 'acc_body_y', 'acc_body_z']].values
-            imu_omega = df_run[['gyro_body_x', 'gyro_body_y', 'gyro_body_z']].values
+            imu_acc = df_run[list(schema['imu_acceleration'])].values
+            imu_omega = df_run[list(schema['imu_angular_rate'])].values
 
             # Extract command velocity - 1 value
-            cmd_vel = df_run[['cmd_vel_x']].values
+            cmd_vel = df_run[[command_velocity_column]].values
 
             leg_features = []
             for leg in legs:
                 joint_names = joint_names_by_leg[leg]
-                q = df_run[['joint_pos_' + name for name in joint_names]].values
-                qd = df_run[['joint_vel_' + name for name in joint_names]].values
-                position = df_run[[f'fk_{leg}_foot_pos_{axis}' for axis in 'xyz']].values
-                velocity = df_run[[f'fk_{leg}_foot_vel_{axis}' for axis in 'xyz']].values
-                torque = df_run[['joint_torque_' + name for name in joint_names]].values
+                q = df_run[[schema['joint_position_pattern'].format(joint=name) for name in joint_names]].values
+                qd = df_run[[schema['joint_velocity_pattern'].format(joint=name) for name in joint_names]].values
+                position = df_run[[schema['foot_position_pattern'].format(leg=leg, axis=axis) for axis in 'xyz']].values
+                velocity = df_run[[schema['foot_velocity_pattern'].format(leg=leg, axis=axis) for axis in 'xyz']].values
+                torque = df_run[[schema['joint_torque_pattern'].format(joint=name) for name in joint_names]].values
                 torque_mse = np.sum(torque ** 2, axis=1, keepdims=True)
                 leg_features.extend((q, qd, position, velocity, torque, torque_mse))
 
@@ -192,10 +215,14 @@ def csv2numpy_split(data_pth, save_pth, cmd_vel_x_windows=((0.0, 2.0),),
 
             # Output extraction
             
-            contacts = df_run[[f'{leg[0]}foot-contact' for leg in legs]].values.astype(int)
+            contacts = df_run[[schema['contact_columns'][leg] for leg in legs]].values
+            if schema.get('contacts_positive'):
+                contacts = (contacts > 0).astype(int)
+            else:
+                contacts = contacts.astype(int)
             
-            body_velocity_world = df_run[['vel_x', 'vel_y', 'vel_z']].values
-            body_quaternion = df_run[['quat_w', 'quat_i', 'quat_j', 'quat_k']].values
+            body_velocity_world = df_run[list(schema['world_velocity'])].values
+            body_quaternion = df_run[list(schema['quaternion'])].values
             rotation_body_to_world = quaternion_to_rotation_matrix(body_quaternion)
             body_velocities = np.einsum(
                 'nij,nj->ni', rotation_body_to_world.transpose(0, 2, 1), body_velocity_world
@@ -264,27 +291,13 @@ def csv2numpy_split(data_pth, save_pth, cmd_vel_x_windows=((0.0, 2.0),),
 
 def main():
     parser = argparse.ArgumentParser(description='Convert CSV to numpy.')
-    parser.add_argument('--config_name', type=str, 
-                        default=os.path.dirname(os.path.abspath(__file__)) + '/../config/network_params.yaml')
-    parser.add_argument('--csv_folder', type=str, default=None,
-                        help='Path to CSV folder (overrides config file)')
-    parser.add_argument('--save_path', type=str, default=None,
-                        help='Path to save numpy files (overrides config file)')
+    parser.add_argument('--config_name', type=str,
+                        default=os.path.join(PROJECT_ROOT, 'config/network_params.yaml'))
     args = parser.parse_args()
     
     with open(args.config_name) as config_file:
         config = yaml.load(config_file, Loader=yaml.FullLoader)
     
-    # Override with command line arguments if provided
-    if args.csv_folder:
-        config['csv_folder'] = args.csv_folder
-    if args.save_path:
-        config['save_path'] = args.save_path
-    
-    # Set defaults if not in config
-    config.setdefault('csv_folder', '../Data/CSVFiles/')
-    config.setdefault('data_folder', '../Data/NumpyFiles/')
-    config.setdefault('save_path', config['data_folder'])  # Use data_folder if save_path not set
     ood_feature = config.get('ood_feature', 'cmd_vel')
     legs = resolve_active_legs(config.get('active_legs', 'both'))
     if ood_feature not in ('cmd_vel', 'environment'):
@@ -296,13 +309,13 @@ def main():
         raise ValueError(f'{window_key} must be a non-empty list of [min, max] windows with min <= max')
     
     print("Using configuration:")
-    print(f"  CSV folder: {config['csv_folder']}")
-    print(f"  Save path: {config['save_path']}")
+    print(f"  CSV folder: {CSV_FOLDER}")
+    print(f"  Save path: {DATA_FOLDER}")
     print(f"  OOD feature: {ood_feature}")
     print(f"  Active legs: {', '.join(legs)}")
     print(f"  {'Command-velocity' if ood_feature == 'cmd_vel' else 'Environment'} windows: {windows}")
     
-    csv2numpy_split(config['csv_folder'], config['save_path'],
+    csv2numpy_split(CSV_FOLDER, DATA_FOLDER,
                     cmd_vel_x_windows=windows if ood_feature == 'cmd_vel' else (),
                     ood_feature=ood_feature,
                     environment_windows=windows if ood_feature == 'environment' else (), legs=legs)

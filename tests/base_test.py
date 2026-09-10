@@ -57,6 +57,20 @@ class BaseSingleTest:
     def configure(self, config):
         return config
 
+    @staticmethod
+    def csv_folder_from_data_folder(data_folder):
+        """Derive the raw CSV directory from the configured numpy dataset directory."""
+        for numpy_name, csv_name in (
+            ('MujocoNumpyFiles', 'MujocoCSVFiles'),
+            ('NumpyFiles', 'CSVFiles'),
+        ):
+            if numpy_name in data_folder:
+                return data_folder.replace(numpy_name, csv_name)
+        raise ValueError(
+            'Cannot derive the CSV folder from data_folder. Expected a path containing '
+            'MujocoNumpyFiles or NumpyFiles.'
+        )
+
     def prepare(self, args):
         self.set_runtime_values(args)
         config = self.load_config(args.config_name)
@@ -74,7 +88,7 @@ class BaseSingleTest:
             raise ValueError('TEST_CMD_VEL_X_WINDOW must be (min, max) with min <= max')
 
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        csv_folder = config['csv_folder'] if os.path.isabs(config['csv_folder']) else os.path.join(project_root, config['csv_folder'])
+        csv_folder = self.csv_folder_from_data_folder(data_folder)
         trajectory, csv_path, run_index, start_cmd_vel = self.find_trajectory(
             csv_folder, config['window_size'], cmd_vel_x_window, np.random.default_rng(args.seed),
             ood_feature, environment_windows,
