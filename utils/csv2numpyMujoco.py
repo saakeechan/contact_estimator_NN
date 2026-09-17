@@ -11,8 +11,8 @@ except ModuleNotFoundError:  # Supports `python utils/csv2numpyMujoco.py`.
 
 # Edit these when converting a different MuJoCo CSV dataset.
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CSV_FOLDER = os.path.join(PROJECT_ROOT, 'Data/MujocoCSVFiles/Slope/')
-DATA_FOLDER = os.path.join(PROJECT_ROOT, 'Data/MujocoNumpyFiles/Slope/')
+CSV_FOLDER = os.path.join(PROJECT_ROOT, 'Data/MujocoCSVFiles/Payload/')
+DATA_FOLDER = os.path.join(PROJECT_ROOT, 'Data/MujocoNumpyFiles/Payload/')
 
 
 # Keep MuJoCo's source-field contract here; conversion flow lives in the shared

@@ -37,7 +37,8 @@ SCENARIO_FOLDERS = {
     'Backwards': MUJOCO_DATA_FOLDER / 'Backwards',
     'Isaac': ISAAC_DATA_FOLDER,
     'Sideways': MUJOCO_DATA_FOLDER / 'Sideways',
-    'Slip': MUJOCO_DATA_FOLDER / 'Slip'
+    'Slip': MUJOCO_DATA_FOLDER / 'Slip',
+    'Payload': MUJOCO_DATA_FOLDER / 'Payload'
 }
 SCENARIO_STYLES = {
     'Isaac': {'color': 'tab:blue', 'marker': 'o'},
@@ -47,7 +48,8 @@ SCENARIO_STYLES = {
     'Backwards': {'color': 'tab:purple', 'marker': 'v'},
     'Sideways': {'color': 'tab:brown', 'marker': 'p'},
     'Slip': {'color': 'tab:gray', 'marker': '8'},
-    'Flat2': {'color': 'tab:olive', 'marker': 'x'}
+    'Flat2': {'color': 'tab:olive', 'marker': 'x'},
+    'Payload': {'color': 'tab:cyan', 'marker': '*'}
 
 }
 

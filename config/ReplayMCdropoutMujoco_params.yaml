@@ -1,6 +1,6 @@
 # Replay continual learning with MC-dropout epistemic uncertainty.
 # One continual-learning task per MuJoCo folder, in this exact order.
-continual_environments: [Flat, Dampy, Slope, Sideways, Backwards]
+continual_environments: [Flat, Dampy, Slope, Payload]
 
 replay_capacity: 5000
 replay_seed: 0
